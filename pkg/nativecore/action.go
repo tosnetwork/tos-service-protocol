@@ -433,6 +433,9 @@ func validatePolicy(policy *nativev1.ControllerPolicyV1) (map[string]*nativev1.C
 		if controller == nil || !validKeyID(controller.KeyId) || len(controller.Ed25519PublicKey) != ed25519.PublicKeySize || !bytes.Equal(keyIDHash(controller.KeyId), controller.Ed25519PublicKey) || bytes.Equal(controller.Ed25519PublicKey, make([]byte, 32)) || controller.Weight == 0 || controller.Weight > MaxControllerWeight || controller.PurposeMask == 0 || controller.PurposeMask&^uint32(knownPurposeMask) != 0 {
 			return nil, errors.New("Native controllers must be valid")
 		}
+		if WeakEd25519PublicKey(controller.Ed25519PublicKey) {
+			return nil, nativeError(ErrWeakKey, "Native controller key is a small-order or non-canonical Ed25519 point")
+		}
 		if _, duplicate := controllers[controller.KeyId]; duplicate {
 			return nil, errors.New("duplicate Native controller key ID")
 		}

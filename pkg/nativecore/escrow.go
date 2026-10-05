@@ -129,6 +129,9 @@ func BuildEscrowAuthorizationCellV1(publicKey []byte) (*cell.Cell, error) {
 	if len(publicKey) != 32 || equalBytes(publicKey, make([]byte, 32)) {
 		return nil, errors.New("execution signer must be a non-zero Ed25519 public key")
 	}
+	if WeakEd25519PublicKey(publicKey) {
+		return nil, errors.New("execution signer is a small-order or non-canonical Ed25519 key the escrow refuses")
+	}
 	return cell.BeginCell().MustStoreUInt(escrowAuthorizationMagic, 32).MustStoreUInt(escrowAuthorizationVersion, 16).
 		MustStoreSlice(publicKey, 256).EndCell(), nil
 }
@@ -190,6 +193,9 @@ func decodeEscrowAuthorization(value *cell.Cell) ([]byte, error) {
 	key, err := s.LoadSlice(256)
 	if err != nil || equalBytes(key, make([]byte, 32)) || s.BitsLeft() != 0 || s.RefsNum() != 0 {
 		return nil, errors.New("invalid execution authorization")
+	}
+	if WeakEd25519PublicKey(key) {
+		return nil, errors.New("execution authorization names a key the escrow refuses")
 	}
 	return key, nil
 }
