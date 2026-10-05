@@ -243,7 +243,10 @@ func DecodePolicyCell(value *cell.Cell) (*nativev1.ControllerPolicyV1, error) {
 		return nil, err
 	}
 	count, err := s.LoadUInt(8)
-	if err != nil || count == 0 || count > MaxControllers {
+	if err == nil && count > MaxControllers {
+		return nil, nativeError(ErrPolicyTooWide, "Native policy names more controllers than the Registry admits")
+	}
+	if err != nil || count == 0 {
 		return nil, errors.New("invalid Native policy controller count")
 	}
 	cursor, err := s.LoadRefCell()

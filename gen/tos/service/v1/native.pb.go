@@ -39,6 +39,8 @@ const (
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION             NativeErrorCodeV1 = 2211
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_TIMELOCK                      NativeErrorCodeV1 = 2212
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE           NativeErrorCodeV1 = 2213
+	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_WEAK_KEY                      NativeErrorCodeV1 = 2214
+	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE               NativeErrorCodeV1 = 2215
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST            NativeErrorCodeV1 = 2300
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND              NativeErrorCodeV1 = 2301
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_PUBLIC_CONFLICT               NativeErrorCodeV1 = 2302
@@ -68,6 +70,8 @@ var (
 		2211: "NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION",
 		2212: "NATIVE_ERROR_CODE_V1_TIMELOCK",
 		2213: "NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE",
+		2214: "NATIVE_ERROR_CODE_V1_WEAK_KEY",
+		2215: "NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE",
 		2300: "NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST",
 		2301: "NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND",
 		2302: "NATIVE_ERROR_CODE_V1_PUBLIC_CONFLICT",
@@ -94,6 +98,8 @@ var (
 		"NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION":             2211,
 		"NATIVE_ERROR_CODE_V1_TIMELOCK":                      2212,
 		"NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE":           2213,
+		"NATIVE_ERROR_CODE_V1_WEAK_KEY":                      2214,
+		"NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE":               2215,
 		"NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST":            2300,
 		"NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND":              2301,
 		"NATIVE_ERROR_CODE_V1_PUBLIC_CONFLICT":               2302,
@@ -4002,7 +4008,7 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"\x15transport_binding_boc\x18\x04 \x01(\fR\x13transportBindingBoc\x12,\n" +
 	"\x12dispute_policy_boc\x18\x05 \x01(\fR\x10disputePolicyBoc\"`\n" +
 	"\x1cRequestQuoteProposalResponse\x12@\n" +
-	"\apackage\x18\x01 \x01(\v2&.tos.service.v1.QuoteProposalPackageV1R\apackage*\x9e\b\n" +
+	"\apackage\x18\x01 \x01(\v2&.tos.service.v1.QuoteProposalPackageV1R\apackage*\xed\b\n" +
 	"\x11NativeErrorCodeV1\x12$\n" +
 	" NATIVE_ERROR_CODE_V1_UNSPECIFIED\x10\x00\x12%\n" +
 	" NATIVE_ERROR_CODE_V1_BAD_MESSAGE\x10\x98\x11\x12'\n" +
@@ -4018,7 +4024,9 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"#NATIVE_ERROR_CODE_V1_BAD_TRANSITION\x10\xa2\x11\x12+\n" +
 	"&NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION\x10\xa3\x11\x12\"\n" +
 	"\x1dNATIVE_ERROR_CODE_V1_TIMELOCK\x10\xa4\x11\x12-\n" +
-	"(NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE\x10\xa5\x11\x12,\n" +
+	"(NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE\x10\xa5\x11\x12\"\n" +
+	"\x1dNATIVE_ERROR_CODE_V1_WEAK_KEY\x10\xa6\x11\x12)\n" +
+	"$NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE\x10\xa7\x11\x12,\n" +
 	"'NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST\x10\xfc\x11\x12*\n" +
 	"%NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND\x10\xfd\x11\x12)\n" +
 	"$NATIVE_ERROR_CODE_V1_PUBLIC_CONFLICT\x10\xfe\x11\x127\n" +

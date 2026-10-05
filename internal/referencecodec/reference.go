@@ -353,8 +353,14 @@ func locate(v VectorSet, kind uint8, objectID []byte) (string, string, error) {
 	return "0:" + hex.EncodeToString(stateInit.Hash()), base64.StdEncoding.EncodeToString(stateInit.ToBOC()), nil
 }
 
+// maxPolicyControllers is the Native Registry contract's policy width limit.
+const maxPolicyControllers = 20
+
 func policyCell(policy Policy) (*cell.Cell, error) {
-	if policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 || len(policy.Controllers) > 64 {
+	if len(policy.Controllers) > maxPolicyControllers {
+		return nil, validationError(2215, "policy names more than 20 controllers")
+	}
+	if policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 {
 		return nil, errors.New("invalid policy header")
 	}
 	type parsed struct {

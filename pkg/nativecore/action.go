@@ -27,8 +27,12 @@ const (
 	PurposeCapabilityControl = 8
 	knownPurposeMask         = PurposeAgentControl | PurposeDelegation | PurposeRecovery | PurposeCapabilityControl
 
-	MaxControllers             = 64
-	MaxSignatures              = 64
+	// MaxControllers is the Native Registry's policy width limit: a policy
+	// naming more controllers is refused with ErrPolicyTooWide before any
+	// controller is read, and a signature list may hold at most one
+	// signature per controller.
+	MaxControllers             = 20
+	MaxSignatures              = MaxControllers
 	MaxControllerWeight        = 1_000_000
 	MaxRecoveryTimelockSeconds = 365 * 24 * 60 * 60
 )
@@ -411,7 +415,10 @@ func buildPayload(action *nativev1.NativeActionV1, targetKind uint8) (Kind, *cel
 }
 
 func validatePolicy(policy *nativev1.ControllerPolicyV1) (map[string]*nativev1.ControllerV1, error) {
-	if policy == nil || policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 || len(policy.Controllers) > MaxControllers {
+	if policy != nil && len(policy.Controllers) > MaxControllers {
+		return nil, nativeError(ErrPolicyTooWide, "Native controller policy names more controllers than the Registry admits")
+	}
+	if policy == nil || policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 {
 		return nil, errors.New("invalid Native controller policy")
 	}
 	controllers := make(map[string]*nativev1.ControllerV1, len(policy.Controllers))

@@ -25,6 +25,8 @@ const (
 	ErrImmutableVersion   ErrorCode = 2211
 	ErrTimelock           ErrorCode = 2212
 	ErrDuplicateSignature ErrorCode = 2213
+	ErrWeakKey            ErrorCode = 2214
+	ErrPolicyTooWide      ErrorCode = 2215
 )
 
 var errorNames = map[ErrorCode]string{
@@ -42,6 +44,8 @@ var errorNames = map[ErrorCode]string{
 	ErrImmutableVersion:   "NATIVE_IMMUTABLE_VERSION",
 	ErrTimelock:           "NATIVE_TIMELOCK",
 	ErrDuplicateSignature: "NATIVE_DUPLICATE_SIGNATURE",
+	ErrWeakKey:            "NATIVE_WEAK_KEY",
+	ErrPolicyTooWide:      "NATIVE_POLICY_TOO_WIDE",
 }
 
 func (c ErrorCode) String() string {
