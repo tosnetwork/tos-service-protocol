@@ -24,7 +24,17 @@ type PreparedPaidDemandDeployment struct {
 	AttachedNanoTOS    uint64 `json:"attached_nanotos"`
 	MessageBOCBase64   string `json:"message_boc_base64"`
 	MessageHash        string `json:"message_hash"`
+	// NonProduction records the operator's acknowledgment that this escrow v2
+	// deployment is on a local or test network with test assets.
+	NonProduction bool `json:"non_production"`
 }
+
+// errProductionEscrowDeployment refuses an escrow v2 deployment the operator
+// has not acknowledged as non-production. Escrow v2 can strand funds when a
+// recipient wallet refuses a payout; it is an accepted risk only for local and
+// test networks with test assets.
+var errProductionEscrowDeployment = errors.New("escrow v2 is experimental and may strand funds: " +
+	"deployment requires the non-production test deployment acknowledgment")
 
 type PaidDemandEscrowDeployer interface {
 	PreparePaidDemandDeployment(context.Context, *PreparedPaidDemandPurchase) (*PreparedPaidDemandDeployment, error)
@@ -40,6 +50,10 @@ type TOSCTLPaidDemandEscrowDeployerConfig struct {
 	Timeout                            time.Duration
 	VaultURL                           string
 	AcknowledgeUnpinnedManualBroadcast bool
+	// AcknowledgeNonProductionTestDeployment states that deployments go to a
+	// local or test network with test assets. Off by default; without it the
+	// deployer prepares and broadcasts nothing.
+	AcknowledgeNonProductionTestDeployment bool
 }
 
 type TOSCTLPaidDemandEscrowDeployer struct {
@@ -48,6 +62,7 @@ type TOSCTLPaidDemandEscrowDeployer struct {
 	timeout                            time.Duration
 	runner                             commandRunner
 	acknowledgeUnpinnedManualBroadcast bool
+	nonProduction                      bool
 }
 
 func NewTOSCTLPaidDemandEscrowDeployer(config TOSCTLPaidDemandEscrowDeployerConfig) (*TOSCTLPaidDemandEscrowDeployer, error) {
@@ -74,13 +89,17 @@ func NewTOSCTLPaidDemandEscrowDeployer(config TOSCTLPaidDemandEscrowDeployerConf
 	return &TOSCTLPaidDemandEscrowDeployer{binary: config.BinaryPath, config: config.ConfigPath,
 		wallet: config.WalletName, relayer: config.RelayerAddress, attached: config.AttachedNanoTOS,
 		timeout: config.Timeout, runner: runner,
-		acknowledgeUnpinnedManualBroadcast: config.AcknowledgeUnpinnedManualBroadcast}, nil
+		acknowledgeUnpinnedManualBroadcast: config.AcknowledgeUnpinnedManualBroadcast,
+		nonProduction:                      config.AcknowledgeNonProductionTestDeployment}, nil
 }
 
 func (deployer *TOSCTLPaidDemandEscrowDeployer) PreparePaidDemandDeployment(ctx context.Context,
 	purchase *PreparedPaidDemandPurchase) (*PreparedPaidDemandDeployment, error) {
 	if deployer == nil || ctx == nil {
 		return nil, errors.New("invalid Paid Demand deployment")
+	}
+	if !deployer.nonProduction {
+		return nil, errProductionEscrowDeployment
 	}
 	stateInit, stateInitHash, err := validatePaidDemandDeploymentPurchase(purchase)
 	if err != nil {
@@ -119,7 +138,7 @@ func (deployer *TOSCTLPaidDemandEscrowDeployer) PreparePaidDemandDeployment(ctx 
 	}
 	return &PreparedPaidDemandDeployment{EscrowAddress: purchase.Escrow.Address, QuoteCommitment: purchase.QuoteCommitment,
 		StateInitBOCBase64: stateInit, StateInitHash: stateInitHash, AttachedNanoTOS: deployer.attached,
-		MessageBOCBase64: output.MessageBOC, MessageHash: cellHash(message)}, nil
+		MessageBOCBase64: output.MessageBOC, MessageHash: cellHash(message), NonProduction: true}, nil
 }
 
 func (deployer *TOSCTLPaidDemandEscrowDeployer) BroadcastPaidDemandDeployment(ctx context.Context,
@@ -127,6 +146,9 @@ func (deployer *TOSCTLPaidDemandEscrowDeployer) BroadcastPaidDemandDeployment(ct
 	if deployer == nil || ctx == nil || prepared == nil || !isRawAddress(prepared.EscrowAddress) ||
 		!validCellDigest(prepared.QuoteCommitment) || prepared.AttachedNanoTOS != deployer.attached || !validCellDigest(prepared.MessageHash) {
 		return errors.New("invalid prepared Paid Demand deployment")
+	}
+	if !deployer.nonProduction || !prepared.NonProduction {
+		return errProductionEscrowDeployment
 	}
 	stateInit, hash, err := decodeStateInit(prepared.StateInitBOCBase64)
 	if err != nil || hash != prepared.StateInitHash || prepared.EscrowAddress != "0:"+fmt.Sprintf("%x", stateInit.Hash()) {

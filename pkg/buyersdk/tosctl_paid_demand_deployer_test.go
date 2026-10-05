@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -65,6 +66,7 @@ func testPaidDemandDeployment(t *testing.T) (*TOSCTLPaidDemandEscrowDeployer, *P
 	deployer, err := NewTOSCTLPaidDemandEscrowDeployer(TOSCTLPaidDemandEscrowDeployerConfig{
 		BinaryPath: sender.binary, ConfigPath: sender.config, WalletName: sender.wallet,
 		RelayerAddress: "0:" + strings.Repeat("ab", 32), Timeout: time.Second,
+		AcknowledgeNonProductionTestDeployment: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +88,13 @@ func TestPaidDemandDeployerPreparesThenBroadcastsExactMessage(t *testing.T) {
 	if prepared.EscrowAddress != purchase.Escrow.Address || prepared.QuoteCommitment != purchase.QuoteCommitment ||
 		prepared.StateInitBOCBase64 != purchase.Escrow.StateInitBOC {
 		t.Fatalf("prepared deployment = %+v", prepared)
+	}
+	if !prepared.NonProduction {
+		t.Fatal("the prepared deployment does not record the non-production acknowledgment")
+	}
+	evidence, err := json.Marshal(prepared)
+	if err != nil || !strings.Contains(string(evidence), `"non_production":true`) {
+		t.Fatalf("deployment evidence omits the acknowledgment: %s %v", evidence, err)
 	}
 	if err := deployer.BroadcastPaidDemandDeployment(context.Background(), prepared); err != nil {
 		t.Fatal(err)
@@ -112,6 +121,57 @@ func TestPaidDemandDeployerRejectsCustodyAndArtifactSubstitution(t *testing.T) {
 	prepared.EscrowAddress = "0:" + strings.Repeat("f", 64)
 	if err := deployer.BroadcastPaidDemandDeployment(context.Background(), prepared); err == nil {
 		t.Fatal("deployer broadcast a substituted deployment artifact")
+	}
+}
+
+// Escrow v2 is an accepted risk only on test networks: without the operator's
+// non-production acknowledgment nothing is prepared or broadcast, and a
+// deployment prepared without it cannot be broadcast.
+func TestPaidDemandDeployerRequiresTheNonProductionAcknowledgment(t *testing.T) {
+	deployer, purchase := testPaidDemandDeployment(t)
+	fake := &paidDeployRunnerFake{purchase: purchase, deployer: deployer}
+	deployer.runner = fake
+	prepared, err := deployer.PreparePaidDemandDeployment(context.Background(), purchase)
+	if err != nil {
+		t.Fatalf("positive control: acknowledged deployment refused: %v", err)
+	}
+	fake.calls = nil
+
+	deployer.nonProduction = false
+	if _, err := deployer.PreparePaidDemandDeployment(context.Background(), purchase); !errors.Is(err, errProductionEscrowDeployment) {
+		t.Fatalf("prepared a deployment without the acknowledgment: %v", err)
+	}
+	if err := deployer.BroadcastPaidDemandDeployment(context.Background(), prepared); !errors.Is(err, errProductionEscrowDeployment) {
+		t.Fatalf("broadcast a deployment without the acknowledgment: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("custody was reached without the acknowledgment: %v", fake.calls)
+	}
+
+	deployer.nonProduction = true
+	unacknowledged := *prepared
+	unacknowledged.NonProduction = false
+	if err := deployer.BroadcastPaidDemandDeployment(context.Background(), &unacknowledged); !errors.Is(err, errProductionEscrowDeployment) {
+		t.Fatalf("broadcast a deployment whose evidence lacks the acknowledgment: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("custody was reached for an unacknowledged deployment: %v", fake.calls)
+	}
+}
+
+func TestPaidDemandDeployerAcknowledgmentDefaultsOff(t *testing.T) {
+	sender := testTOSCTLSender(t)
+	deployer, err := NewTOSCTLPaidDemandEscrowDeployer(TOSCTLPaidDemandEscrowDeployerConfig{
+		BinaryPath: sender.binary, ConfigPath: sender.config, WalletName: sender.wallet,
+		RelayerAddress: "0:" + strings.Repeat("ab", 32), Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deployer.nonProduction {
+		t.Fatal("the non-production acknowledgment is on by default")
+	}
+	if _, err := deployer.PreparePaidDemandDeployment(context.Background(), nil); !errors.Is(err, errProductionEscrowDeployment) {
+		t.Fatalf("a default deployer did not refuse: %v", err)
 	}
 }
 

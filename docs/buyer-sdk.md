@@ -148,3 +148,12 @@ version 2 pending-acceptance data, the Quote commitment, the deterministic
 address, an empty deploy body, the attached TOS amount, and the
 custody-produced signed-message hash. An uncertain broadcast result is reported
 as ambiguous and is never rebuilt or re-signed automatically.
+
+Escrow v2 is experimental: a payout refused by the recipient's wallet can
+strand funds in the escrow, an accepted risk only for local and test networks
+with test assets. The deployer therefore prepares and broadcasts nothing
+unless it is configured with `AcknowledgeNonProductionTestDeployment`, which is
+off by default. The acknowledgment is checked before preparation and again
+before broadcast, and is recorded in the prepared deployment as
+`"non_production": true`; a prepared deployment without it is not broadcast.
+This is separate from `AcknowledgeUnpinnedManualBroadcast`.
