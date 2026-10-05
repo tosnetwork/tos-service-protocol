@@ -126,6 +126,7 @@ func (fake *paidActionFake) BroadcastWalletAction(_ context.Context, prepared *P
 
 type paidDemandBuyerFixture struct {
 	buyer    *PaidDemandBuyer
+	config   PaidDemandBuyerConfig
 	input    PaidDemandPurchaseInput
 	resolver *paidEscrowFake
 	deployer *paidDeployerFake
@@ -192,6 +193,24 @@ func TestPaidDemandBuyerDeploysOnlyPendingStateBeforeAcceptance(t *testing.T) {
 	}
 }
 
+func TestPaidDemandBuyerRequiresTheReleasedEscrowCode(t *testing.T) {
+	fixture := newPaidDemandBuyerFixture(t)
+	config := fixture.config
+	config.EscrowCode = cell.BeginCell().MustStoreUInt(0x9999, 16).EndCell()
+	if _, err := NewPaidDemandBuyer(config); err == nil {
+		t.Fatal("a Paid Demand buyer was configured with escrow code other than the released contract")
+	}
+	purchase, err := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installPaidEscrow(t, fixture, purchase)
+	fixture.resolver.state.Reference.ContractCodeHash = "tvm-cell-sha256:" + strings.Repeat("ab", 32)
+	if _, err := fixture.buyer.Accept(context.Background(), purchase); err == nil {
+		t.Fatal("the buyer accepted an escrow observed running other code")
+	}
+}
+
 func TestPaidDemandBuyerResolvesAmbiguousAcceptanceWithoutReplacement(t *testing.T) {
 	fixture := newPaidDemandBuyerFixture(t)
 	purchase, err := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
@@ -245,7 +264,7 @@ func newPaidDemandBuyerFixture(t *testing.T) paidDemandBuyerFixture {
 	profile := commerce.PaidDemandQuoteProfileDigest()
 	master := "0:" + hex.EncodeToString(base.input.Proposal.MaximumPrice.Asset.Master.AccountId)
 	agreement := commerce.AgentAgreementBody{SchemaVersion: 1, AgreementID: "agreement:paid-buyer", Version: 1,
-		NetworkContext:   base.buyer.network.NetworkId,
+		NetworkContext:   base.network.NetworkId,
 		Participants:     []commerce.AgreementParticipant{{AgentID: buyerAgent, Roles: []string{"buyer"}}, {AgentID: provider, Roles: []string{"provider"}}},
 		TermsContentType: "text/plain", Terms: []byte("perform exact software work"),
 		Obligations: []commerce.AgreementObligation{
@@ -257,7 +276,7 @@ func newPaidDemandBuyerFixture(t *testing.T) paidDemandBuyerFixture {
 				SubjectContentType: "text/plain", Subject: []byte("work"), ConfidentialityPolicy: "participants", CancellationPolicy: "chain-profile",
 				DisputePolicy: "objective", AuthorizationPredicateIDs: []string{"predicate:provider"}},
 		}, AuthorizationPredicates: []commerce.AgreementAuthorizationPredicate{
-			{PredicateID: "predicate:buyer", AuthoritySubject: commerce.AgreementAuthoritySubject{SubjectKind: "wallet", SubjectNamespace: "tos.wallet", SubjectIdentifier: base.buyer.buyerAddress, RepresentedAgentID: buyerAgent},
+			{PredicateID: "predicate:buyer", AuthoritySubject: commerce.AgreementAuthoritySubject{SubjectKind: "wallet", SubjectNamespace: "tos.wallet", SubjectIdentifier: base.buyerAddress, RepresentedAgentID: buyerAgent},
 				ObligationIDs: []string{"pay"}, EvidenceProfileURI: commerce.EvidenceProfilePaidDemandQuote, EvidenceProfileVersion: 1, EvidenceProfileDigest: profile, ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())},
 			{PredicateID: "predicate:provider", AuthoritySubject: commerce.AgreementAuthoritySubject{SubjectKind: "agent", SubjectNamespace: "tos.agent", SubjectIdentifier: provider},
 				ObligationIDs: []string{"work"}, EvidenceProfileURI: commerce.EvidenceProfilePaidDemandQuote, EvidenceProfileVersion: 1, EvidenceProfileDigest: profile, ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())},
@@ -268,22 +287,22 @@ func newPaidDemandBuyerFixture(t *testing.T) paidDemandBuyerFixture {
 		t.Fatal(err)
 	}
 	authorization, _ := nativecore.BuildEscrowAuthorizationCellV1(base.input.ExecutionSignerEd25519)
-	_, projection, err := nativecore.BuildAcceptedQuoteCommitment(base.buyer.network, base.input.Proposal,
+	_, projection, err := nativecore.BuildAcceptedQuoteCommitment(base.network, base.input.Proposal,
 		"sha256:"+hex.EncodeToString(authorization.Hash()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	agreementDigest, _ := commerce.AgreementBodyDigest(agreement)
-	binding := commerce.PaidDemandQuoteBindingBody{SchemaVersion: 1, NetworkContext: base.buyer.network.NetworkId,
+	binding := commerce.PaidDemandQuoteBindingBody{SchemaVersion: 1, NetworkContext: base.network.NetworkId,
 		AgreementBodyDigest: agreementDigest, AgreementObligationIDs: []string{"pay", "work"},
 		AgreementAuthorizationPredicateIDs:  []string{"predicate:buyer", "predicate:provider"},
 		AgreementAuthorizationTargetDigests: []string{agreement.AuthorizationPredicates[0].EvidenceTargetProjectionDigest, agreement.AuthorizationPredicates[1].EvidenceTargetProjectionDigest},
 		EvidenceProfileURI:                  commerce.EvidenceProfilePaidDemandQuote, EvidenceProfileVersion: 1, EvidenceProfileDigest: profile,
 		DemandMutationDigest: paidTestDigest("95"), ProviderOfferID: "offer:buyer", ProviderAgentID: provider, BuyerAgentID: buyerAgent,
-		BuyerWallet: base.buyer.buyerAddress, ProviderWallet: base.input.EscrowTerms.ProviderAddress,
+		BuyerWallet: base.buyerAddress, ProviderWallet: base.input.EscrowTerms.ProviderAddress,
 		NativeQuoteTermsProjectionDigest: projection, AcceptByUnix: base.input.Proposal.ExpiresAtUnixSeconds}
 	providerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x61}, ed25519.SeedSize))
-	proof := commerce.ProviderProofContext{SchemaVersion: 1, NetworkContext: base.buyer.network.NetworkId, ProviderAgentID: provider,
+	proof := commerce.ProviderProofContext{SchemaVersion: 1, NetworkContext: base.network.NetworkId, ProviderAgentID: provider,
 		Purpose: "provider-offer.sign", PublicKey: "ed25519:" + hex.EncodeToString(providerKey.Public().(ed25519.PublicKey)), AgentGeneration: 1,
 		ControllerPolicyDigest: paidTestDigest("96"), DelegationDigest: paidTestDigest("97"), ScopeBoundsDigest: paidTestDigest("98"), OwnerMandateDigest: paidTestDigest("99"),
 		IssuanceAuthorityReferenceDigest: paidTestDigest("9a"), ValidFromUnix: uint64(now.Add(-time.Hour).Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())}
@@ -292,18 +311,25 @@ func newPaidDemandBuyerFixture(t *testing.T) paidDemandBuyerFixture {
 		t.Fatal(err)
 	}
 	resolver := &paidEscrowFake{}
-	deployer := &paidDeployerFake{resolver: resolver, network: base.buyer.network}
+	deployer := &paidDeployerFake{resolver: resolver, network: base.network}
 	actions := &paidActionFake{resolver: resolver}
 	custodyKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x62}, ed25519.SeedSize))
-	paidBuyer, err := NewPaidDemandBuyer(PaidDemandBuyerConfig{Base: base.buyer, EscrowResolver: resolver,
-		ProviderOfferResolver: paidOfferKeyResolver{providerKey.Public().(ed25519.PublicKey)}, EscrowCode: cell.BeginCell().MustStoreUInt(0x9999, 16).EndCell(),
-		Deployer: deployer, ActionSender: actions, EffectAuthorizer: paidEffectAuthorizer{key: custodyKey},
-		OwnerID: "owner:test", AgentID: buyerAgent, NetworkGlobalID: -3, ActionNanoTOS: 100_000_000,
-		PollInterval: 10 * time.Millisecond, FinalityTimeout: time.Second, Now: func() time.Time { return now }})
+	escrowCode, err := nativecore.EscrowV2Code()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return paidDemandBuyerFixture{buyer: paidBuyer, input: PaidDemandPurchaseInput{Agreement: agreement,
+	config := PaidDemandBuyerConfig{NativeClient: base.native, AssetResolver: base.assets,
+		Network: base.network, RegistryCodeHash: base.registryCodeHash, BuyerAddress: base.buyerAddress,
+		AssetWalletCode: base.walletCode, BudgetLimits: base.limits, CallerID: "buyer-test", EscrowResolver: resolver,
+		ProviderOfferResolver: paidOfferKeyResolver{providerKey.Public().(ed25519.PublicKey)}, EscrowCode: escrowCode,
+		Deployer: deployer, ActionSender: actions, EffectAuthorizer: paidEffectAuthorizer{key: custodyKey},
+		OwnerID: "owner:test", AgentID: buyerAgent, NetworkGlobalID: -3, ActionNanoTOS: 100_000_000,
+		PollInterval: 10 * time.Millisecond, FinalityTimeout: time.Second, Now: func() time.Time { return now }}
+	paidBuyer, err := NewPaidDemandBuyer(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return paidDemandBuyerFixture{buyer: paidBuyer, config: config, input: PaidDemandPurchaseInput{Agreement: agreement,
 		ProviderOffer: offer, Proposal: base.input.Proposal, ManifestJSON: base.input.ManifestJSON,
 		EscrowTerms: base.input.EscrowTerms, ExecutionSignerEd25519: base.input.ExecutionSignerEd25519,
 		TransportBinding: base.input.TransportBinding, ExecutionDeadlineUnix: uint64(now.Add(90 * time.Minute).Unix())},

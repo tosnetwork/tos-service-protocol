@@ -59,6 +59,68 @@ func TestPaidDemandGateRequiresExactFinalizedAgreementOfferAndInputs(t *testing.
 	}
 }
 
+func TestPaidDemandGateSerializesConflictingTransportClaims(t *testing.T) {
+	gate, first := paidDemandFixture(t)
+	second := first
+	second.ExecutionID = digest("91")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, request := range []Request{first, second} {
+		go func(request Request) {
+			<-start
+			_, err := gate.ClaimPaidDemandExecution(context.Background(), request)
+			results <- err
+		}(request)
+	}
+	close(start)
+	successes := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("conflicting transports produced %d successful claims, want 1", successes)
+	}
+}
+
+func TestPaidDemandGateRejectsTombstonedProviderAgent(t *testing.T) {
+	gate, request := paidDemandFixture(t)
+	gate.native.(nativeFake).values[gate.providerAgent].GetAgent().Tombstoned = true
+	if _, err := gate.ClaimPaidDemandExecution(context.Background(), request); err == nil {
+		t.Fatal("tombstoned provider Agent executed work")
+	}
+}
+
+func TestPaidDemandGateRequiresTheReleasedEscrowCode(t *testing.T) {
+	gate, request := paidDemandFixture(t)
+	gate.paidEscrow.(paidEscrowFake).value.Reference.ContractCodeHash = cellHash("55")
+	if _, err := gate.ClaimPaidDemandExecution(context.Background(), request); err == nil {
+		t.Fatal("an escrow running other code authorized execution")
+	}
+}
+
+func TestPaidDemandStorePersistsNewFinalityHighWater(t *testing.T) {
+	gate, request := paidDemandFixture(t)
+	if _, err := gate.ClaimPaidDemandExecution(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	escrow := gate.paidEscrow.(paidEscrowFake).value
+	escrow.Reference.FinalizedCheckpoint = 60
+	escrow.Reference.TransactionHash = digest("60")
+	for id, state := range gate.native.(nativeFake).values {
+		state.Reference.FinalizedCheckpoint += 20
+		state.Reference.TransactionHash = digest("6" + id[len(id)-1:])
+	}
+	if _, err := gate.ClaimPaidDemandExecution(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	escrow.Reference.FinalizedCheckpoint = 39
+	if _, err := gate.ClaimPaidDemandExecution(context.Background(), request); err == nil {
+		t.Fatal("persisted escrow checkpoint accepted a regression")
+	}
+}
+
 func TestPaidDemandGateRejectsUnacceptedOrExpiredEscrow(t *testing.T) {
 	gate, request := paidDemandFixture(t)
 	resolved := gate.paidEscrow.(paidEscrowFake).value
@@ -168,7 +230,7 @@ func paidDemandFixture(t *testing.T) (*Gate, Request) {
 		FundingDeadline: escrowTerms.FundingDeadline, RefundAvailableAt: escrowTerms.RefundAvailableAt,
 		AcceptByUnix: proposal.ExpiresAtUnixSeconds, ExecutionDeadline: uint64(now.Add(90 * time.Minute).Unix()),
 		ProviderOfferDigest: offerDigest, AcceptedAtUnix: uint64(now.Add(-time.Minute).Unix()), FundedAtomicAmount: "1000", AcceptedQuote: quote},
-		Reference: reference(40, cellHash("55"), "56")}
+		Reference: reference(40, nativecore.EscrowV2CodeHash, "56")}
 	codeHash := cellHash("57")
 	agentState := &nativev1.NativeStateV1{Network: proto.Clone(network).(*nativev1.NetworkDomain), TvmStateHash: cellHash("58"),
 		Reference: reference(41, codeHash, "59"), State: &nativev1.NativeStateV1_Agent{Agent: &nativev1.AgentStateV1{AgentId: provider, Generation: 1, Sequence: 1, LastActionHash: digest("5a")}}}
@@ -192,3 +254,24 @@ func paidDemandFixture(t *testing.T) (*Gate, Request) {
 }
 
 func digestFromCell(value []byte) string { return "sha256:" + hex.EncodeToString(value) }
+
+type nativeFake struct {
+	values map[string]*nativev1.NativeStateV1
+}
+
+func (f nativeFake) ResolveFinalizedState(_ context.Context, objectID, _ string) (*nativev1.NativeStateV1, bool, time.Time, error) {
+	state, ok := f.values[objectID]
+	if !ok {
+		return nil, false, time.Time{}, nil
+	}
+	return proto.Clone(state).(*nativev1.NativeStateV1), true, time.Unix(2_000_000_000, 0), nil
+}
+
+func reference(checkpoint uint64, codeHash, txSuffix string) *nativev1.ChainReference {
+	return &nativev1.ChainReference{
+		ContractCodeHash: codeHash, TransactionHash: digest(txSuffix), FinalizedCheckpoint: checkpoint,
+	}
+}
+
+func digest(pair string) string   { return "sha256:" + strings.Repeat(pair, 32) }
+func cellHash(pair string) string { return "tvm-cell-sha256:" + strings.Repeat(pair, 32) }

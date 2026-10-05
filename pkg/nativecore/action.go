@@ -27,8 +27,12 @@ const (
 	PurposeCapabilityControl = 8
 	knownPurposeMask         = PurposeAgentControl | PurposeDelegation | PurposeRecovery | PurposeCapabilityControl
 
-	MaxControllers             = 64
-	MaxSignatures              = 64
+	// MaxControllers is the Native Registry's policy width limit: a policy
+	// naming more controllers is refused with ErrPolicyTooWide before any
+	// controller is read, and a signature list may hold at most one
+	// signature per controller.
+	MaxControllers             = 20
+	MaxSignatures              = MaxControllers
 	MaxControllerWeight        = 1_000_000
 	MaxRecoveryTimelockSeconds = 365 * 24 * 60 * 60
 )
@@ -411,7 +415,10 @@ func buildPayload(action *nativev1.NativeActionV1, targetKind uint8) (Kind, *cel
 }
 
 func validatePolicy(policy *nativev1.ControllerPolicyV1) (map[string]*nativev1.ControllerV1, error) {
-	if policy == nil || policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 || len(policy.Controllers) > MaxControllers {
+	if policy != nil && len(policy.Controllers) > MaxControllers {
+		return nil, nativeError(ErrPolicyTooWide, "Native controller policy names more controllers than the Registry admits")
+	}
+	if policy == nil || policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 {
 		return nil, errors.New("invalid Native controller policy")
 	}
 	controllers := make(map[string]*nativev1.ControllerV1, len(policy.Controllers))
@@ -425,6 +432,9 @@ func validatePolicy(policy *nativev1.ControllerPolicyV1) (map[string]*nativev1.C
 	for _, controller := range policy.Controllers {
 		if controller == nil || !validKeyID(controller.KeyId) || len(controller.Ed25519PublicKey) != ed25519.PublicKeySize || !bytes.Equal(keyIDHash(controller.KeyId), controller.Ed25519PublicKey) || bytes.Equal(controller.Ed25519PublicKey, make([]byte, 32)) || controller.Weight == 0 || controller.Weight > MaxControllerWeight || controller.PurposeMask == 0 || controller.PurposeMask&^uint32(knownPurposeMask) != 0 {
 			return nil, errors.New("Native controllers must be valid")
+		}
+		if WeakEd25519PublicKey(controller.Ed25519PublicKey) {
+			return nil, nativeError(ErrWeakKey, "Native controller key is a small-order or non-canonical Ed25519 point")
 		}
 		if _, duplicate := controllers[controller.KeyId]; duplicate {
 			return nil, errors.New("duplicate Native controller key ID")

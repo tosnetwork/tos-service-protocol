@@ -8,9 +8,10 @@ import (
 )
 
 // ChainConfig composes the Gate directly from quorum TOS JSON-RPC endpoints.
-// It deliberately has no gateway or provider-database dependency.
+// It deliberately has no gateway or provider-database dependency. The escrow
+// code hash must be the released escrow v2 contract's.
 type ChainConfig struct {
-	Gate                  Config
+	Gate                  PaidDemandConfig
 	Endpoints             []string
 	Quorum                int
 	RegistryWorkchain     int32
@@ -46,5 +47,5 @@ func NewFromChain(c ChainConfig) (*Gate, error) {
 	}
 	c.Gate.NativeResolver = nativeResolver
 	c.Gate.EscrowResolver = escrowResolver
-	return New(c.Gate)
+	return NewPaidDemand(c.Gate)
 }

@@ -353,8 +353,14 @@ func locate(v VectorSet, kind uint8, objectID []byte) (string, string, error) {
 	return "0:" + hex.EncodeToString(stateInit.Hash()), base64.StdEncoding.EncodeToString(stateInit.ToBOC()), nil
 }
 
+// maxPolicyControllers is the Native Registry contract's policy width limit.
+const maxPolicyControllers = 20
+
 func policyCell(policy Policy) (*cell.Cell, error) {
-	if policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 || len(policy.Controllers) > 64 {
+	if len(policy.Controllers) > maxPolicyControllers {
+		return nil, validationError(2215, "policy names more than 20 controllers")
+	}
+	if policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 {
 		return nil, errors.New("invalid policy header")
 	}
 	type parsed struct {
@@ -369,6 +375,9 @@ func policyCell(policy Policy) (*cell.Cell, error) {
 		key, err := hex32(controller.PublicKeyHex)
 		if err != nil || zero(key) || controller.Weight == 0 || controller.Weight > 1_000_000 || controller.PurposeMask == 0 || controller.PurposeMask&^uint32(15) != 0 || controller.Recovery && controller.PurposeMask&4 == 0 {
 			return nil, errors.New("invalid controller")
+		}
+		if weakControllerKey(key) {
+			return nil, validationError(2214, "controller key is a small-order or non-canonical Ed25519 point")
 		}
 		controllers[i] = parsed{key: key, weight: controller.Weight, purpose: controller.PurposeMask, recovery: controller.Recovery}
 		total += uint64(controller.Weight)

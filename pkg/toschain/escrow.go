@@ -13,22 +13,17 @@ import (
 	"github.com/tosnetwork/tosutils-go/address"
 )
 
-// FinalizedEscrowV1 binds the typed escrow state to the exact finalized
+// FinalizedEscrowV2 binds the typed escrow state to the exact finalized
 // account transaction and masterchain checkpoint from which it was decoded.
-type FinalizedEscrowV1 struct {
-	State       *nativecore.EscrowStateV1
-	Reference   *nativev1.ChainReference
-	FinalizedAt time.Time
-}
-
 type FinalizedEscrowV2 struct {
 	State       *nativecore.EscrowStateV2
 	Reference   *nativev1.ChainReference
 	FinalizedAt time.Time
 }
 
-// EscrowResolver reads a fixed escrow code identity from the same quorum and
-// rollback-protected finalized checkpoint model as the Native Registry.
+// EscrowResolver reads escrow accounts running the released escrow v2 code
+// from the same quorum and rollback-protected finalized checkpoint model as
+// the Native Registry.
 type EscrowResolver struct {
 	chain      *Adapter
 	network    *nativev1.NetworkDomain
@@ -46,6 +41,9 @@ func NewEscrowResolver(chain *Adapter, network *nativev1.NetworkDomain, codeHash
 	if raw, err := hex.DecodeString(strings.TrimPrefix(codeHash, "tvm-cell-sha256:")); err != nil || len(raw) != 32 {
 		return nil, errors.New("invalid escrow contract code hash")
 	}
+	if err := nativecore.RequireEscrowV2CodeHash(codeHash); err != nil {
+		return nil, err
+	}
 	store, err := newCheckpointStore(checkpointPath)
 	if err != nil {
 		return nil, err
@@ -53,85 +51,9 @@ func NewEscrowResolver(chain *Adapter, network *nativev1.NetworkDomain, codeHash
 	return &EscrowResolver{chain: chain, network: network, codeHash: codeHash, checkpoint: store}, nil
 }
 
-// ResolveFinalized returns only contract-code-authenticated, typed state from
-// a quorum-finalized account observation. Missing accounts are authoritative;
-// malformed, stale, or divergent observations fail closed.
-func (r *EscrowResolver) ResolveFinalized(ctx context.Context, escrowAddress string) (*FinalizedEscrowV1, bool, error) {
-	if r == nil || ctx == nil {
-		return nil, false, errors.New("invalid escrow resolution request")
-	}
-	parsed, err := address.ParseRawAddr(escrowAddress)
-	if err != nil || parsed == nil || parsed.Type() != address.StdAddress || parsed.Workchain() != 0 || parsed.StringRaw() != escrowAddress {
-		return nil, false, nativecore.NewProtocolError(nativecore.ErrBadMessage, "invalid escrow address", err)
-	}
-	observation, nodes, err := r.chain.consensus(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-	if err := r.chain.validateObservationTime(observation, time.Now()); err != nil {
-		return nil, false, err
-	}
-	r.mu.Lock()
-	if observation.seqno == 0 || observation.seqno < r.highWater {
-		r.mu.Unlock()
-		return nil, false, nativecore.NewProtocolError(nativecore.ErrBadSequence, "escrow finalized checkpoint regressed", nil)
-	}
-	r.mu.Unlock()
-	vote, _, err := quorumRead(ctx, nodes, r.chain.quorum, func(ctx context.Context, node *rpcNode) (nativeAccountVote, error) {
-		return readNativeAccountAt(ctx, node, escrowAddress, observation.seqno, r.network, r.codeHash)
-	})
-	if err != nil {
-		return nil, false, err
-	}
-	if !vote.Found {
-		if err := r.commitCheckpoint(observation.seqno); err != nil {
-			return nil, false, err
-		}
-		return nil, false, nil
-	}
-	data, err := decodeCellBOC(vote.Data)
-	if err != nil {
-		return nil, false, nativecore.NewProtocolError(nativecore.ErrBadMessage, "invalid escrow account data BOC", err)
-	}
-	state, err := nativecore.DecodeEscrowDataV1(data)
-	if err != nil {
-		return nil, false, nativecore.NewProtocolError(nativecore.ErrBadMessage, "invalid typed escrow state", err)
-	}
-	code, err := decodeCellBOC(vote.Code)
-	if err != nil {
-		return nil, false, nativecore.NewProtocolError(nativecore.ErrBadMessage, "invalid escrow account code BOC", err)
-	}
-	identity, err := nativecore.BuildEscrowStateInitV1(0, code, nativecore.EscrowInitV1{
-		AcceptedQuote: state.AcceptedQuote, Terms: nativecore.EscrowTermsV1{
-			BuyerAddress: state.BuyerAddress, ProviderAddress: state.ProviderAddress,
-			FundingDeadline: state.FundingDeadline, RefundAvailableAt: state.RefundAvailableAt,
-		},
-		ExecutionSignerEd25519: state.ExecutionSignerEd25519,
-		TransportBinding:       state.TransportBinding,
-		AssetMasterAddress:     state.AssetMasterAddress, AssetWalletCode: state.AssetWalletCode,
-	})
-	if err != nil || identity.Address != escrowAddress {
-		return nil, false, nativecore.NewProtocolError(nativecore.ErrWrongContract, "escrow account does not match canonical StateInit", err)
-	}
-	lt, transactionHash, err := transactionTuple(vote)
-	if err != nil {
-		return nil, false, err
-	}
-	reference := &nativev1.ChainReference{
-		Workchain: 0, Account: escrowAddress, LogicalTime: lt,
-		TransactionHash:  "sha256:" + hex.EncodeToString(transactionHash),
-		ContractCodeHash: r.codeHash, FinalizedCheckpoint: observation.seqno,
-	}
-	if err := r.commitCheckpoint(observation.seqno); err != nil {
-		return nil, false, err
-	}
-	return &FinalizedEscrowV1{State: state, Reference: reference,
-		FinalizedAt: time.Unix(int64(vote.TransactionTime), 0).UTC()}, true, nil
-}
-
-// ResolveFinalizedV2 authenticates the additive Paid Demand escrow successor.
-// The resolver instance must be pinned to the released V2 code hash; a V1
-// resolver and V2 resolver therefore cannot reinterpret each other's state.
+// ResolveFinalizedV2 returns only contract-code-authenticated, typed escrow
+// state from a quorum-finalized account observation. Missing accounts are
+// authoritative; malformed, stale, or divergent observations fail closed.
 func (r *EscrowResolver) ResolveFinalizedV2(ctx context.Context, escrowAddress string) (*FinalizedEscrowV2, bool, error) {
 	if r == nil || ctx == nil {
 		return nil, false, errors.New("invalid escrow V2 resolution request")

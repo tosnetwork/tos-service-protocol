@@ -35,7 +35,7 @@ func TestSoftwareWorkReceiptAndSettlementIntentRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected Receipt: %+v %s", decoded, commitment)
 	}
 	quote := cell.BeginCell().MustStoreUInt(1, 1).EndCell()
-	intent, err := BuildEscrowSettlementIntentV1(
+	intent, err := BuildEscrowSettlementIntentV2(42,
 		testRawAddress(t, "EQCMqzUxrDnAvtAs4dsVR9ReCB5oX_Kx7rJJNcjajorucdcS"),
 		quote, receipt, big.NewInt(25_000_000), 7)
 	if err != nil {
@@ -46,7 +46,7 @@ func TestSoftwareWorkReceiptAndSettlementIntentRoundTrip(t *testing.T) {
 	if !ed25519.Verify(private.Public().(ed25519.PublicKey), intent.Hash(), signature) {
 		t.Fatal("settlement intent signature did not verify")
 	}
-	body, err := BuildEscrowReleaseBodyV1(7, receipt, signature)
+	body, err := BuildEscrowReleaseBodyV2(7, receipt, signature)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestSoftwareWorkReceiptRejectsNonSuccessfulOrZeroEvidence(t *testing.T) {
 	if _, _, err := BuildSoftwareWorkReceiptCellV1(zero); err == nil {
 		t.Fatal("accepted zero evidence digest")
 	}
-	if _, err := BuildEscrowRefundBodyV1(0); err == nil {
+	if _, err := BuildEscrowRefundBodyV2(0); err == nil {
 		t.Fatal("accepted zero pending query ID")
 	}
 }

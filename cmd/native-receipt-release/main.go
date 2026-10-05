@@ -1,6 +1,7 @@
 // Command native-receipt-release builds a canonical software-work Receipt and
-// settlement intent, then optionally verifies an external Ed25519 signature
-// and emits the release body. It never reads or handles a private key.
+// the escrow v2 settlement intent for a funded escrow, then optionally verifies
+// an external Ed25519 signature and emits the release body. It never reads or
+// handles a private key.
 package main
 
 import (
@@ -11,10 +12,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
+	"strings"
 
-	"github.com/tosnetwork/tos-service-protocol/internal/referencecodec"
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
@@ -73,50 +76,56 @@ type externalSignature struct {
 	SignatureHex string `json:"signature_hex"`
 }
 
-func buildSigningPackage(out outcome, vector referencecodec.QuoteVector, escrow string, query uint64) (signingPackage, *cell.Cell, error) {
-	quote, quoteCommitment, err := referencecodec.ComputeAcceptedQuote(vector)
+// escrowRelease names the finalized escrow v2 account a Receipt releases and
+// the network whose GLOBALID the settlement intent must carry.
+type escrowRelease struct {
+	Network  *nativev1.NetworkDomain
+	GlobalID int32
+	Escrow   string
+	Data     *cell.Cell
+	QueryID  uint64
+}
+
+func buildSigningPackage(out outcome, release escrowRelease) (signingPackage, *cell.Cell, error) {
+	state, err := nativecore.DecodeEscrowDataV2(release.Data, release.Network)
 	if err != nil {
-		return signingPackage{}, nil, fmt.Errorf("rebuild Accepted Quote: %w", err)
+		return signingPackage{}, nil, fmt.Errorf("decode escrow v2 state: %w", err)
 	}
-	if quoteCommitment != vector.Expected.Commitment || out.Quote != quoteCommitment {
-		return signingPackage{}, nil, errors.New("execution outcome does not bind the canonical Accepted Quote")
+	if state.Status != nativecore.EscrowStatusFundedV2 {
+		return signingPackage{}, nil, errors.New("escrow is not funded")
 	}
-	expectedBOC, err := base64.StdEncoding.DecodeString(vector.Expected.BOCBase64)
+	if out.Quote != state.QuoteCommitment {
+		return signingPackage{}, nil, errors.New("execution outcome does not bind the escrow's Accepted Quote")
+	}
+	quote, err := nativecore.DecodeAcceptedQuoteV2(state.AcceptedQuote, release.Network)
 	if err != nil {
-		return signingPackage{}, nil, fmt.Errorf("decode expected Quote BOC: %w", err)
-	}
-	expectedQuote, err := cell.FromBOC(expectedBOC)
-	if err != nil || !equalBytes(expectedQuote.Hash(), quote.Hash()) {
-		return signingPackage{}, nil, errors.New("expected Quote BOC does not match the canonical encoder")
+		return signingPackage{}, nil, fmt.Errorf("decode Accepted Quote: %w", err)
 	}
 	receipt, commitment, err := nativecore.BuildSoftwareWorkReceiptCellV1(nativecore.SoftwareWorkReceiptV1{
 		QuoteCommitment: out.Quote, ExecutionID: out.Execution, InputDigest: out.Input,
 		ResultDigest: out.Result, ArtifactDigest: out.Artifact.Digest, ReportDigest: out.Report.Digest,
 		SourceDigest: out.Source, ToolchainDigest: out.Toolchain, SandboxDigest: out.Sandbox,
-		ChargedAtomicAmount: vector.Quote.MaximumAtomicAmount, ProviderAgentID: vector.Quote.ProviderAgentID,
+		ChargedAtomicAmount: state.FundedAtomicAmount, ProviderAgentID: quote.Terms.Proposal.ProviderAgentId,
 		CompletedAt: out.Completed, ExitCode: 0,
 	})
 	if err != nil {
 		return signingPackage{}, nil, fmt.Errorf("build Receipt: %w", err)
 	}
-	amount, ok := new(big.Int).SetString(vector.Quote.MaximumAtomicAmount, 10)
+	amount, ok := new(big.Int).SetString(state.FundedAtomicAmount, 10)
 	if !ok {
-		return signingPackage{}, nil, errors.New("invalid Quote amount")
+		return signingPackage{}, nil, errors.New("invalid funded amount")
 	}
-	intent, err := nativecore.BuildEscrowSettlementIntentV1(escrow, quote, receipt, amount, query)
+	intent, err := nativecore.BuildEscrowSettlementIntentV2(release.GlobalID, release.Escrow, state.AcceptedQuote,
+		receipt, amount, release.QueryID)
 	if err != nil {
 		return signingPackage{}, nil, fmt.Errorf("build settlement intent: %w", err)
 	}
-	publicKey, err := hex.DecodeString(vector.Quote.ExecutionSignerPublicKey)
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return signingPackage{}, nil, errors.New("invalid Quote execution signer public key")
-	}
 	return signingPackage{
-		Schema:            "tos.service.software-work-settlement-signing.v1",
+		Schema:            "tos.service.software-work-settlement-signing.v2",
 		ReceiptCommitment: commitment, ReceiptBOCBase64: base64.StdEncoding.EncodeToString(receipt.ToBOC()),
 		SettlementIntent:         "tvm-cell-sha256:" + hex.EncodeToString(intent.Hash()),
 		SigningPayloadHex:        hex.EncodeToString(intent.Hash()),
-		ExecutionSignerPublicKey: hex.EncodeToString(publicKey), QueryID: query,
+		ExecutionSignerPublicKey: hex.EncodeToString(state.ExecutionSignerEd25519), QueryID: release.QueryID,
 	}, receipt, nil
 }
 
@@ -141,11 +150,11 @@ func applyExternalSignature(value *signingPackage, receipt *cell.Cell, path stri
 	if !ed25519.Verify(publicKey, payload, signature) {
 		return errors.New("external signature verification failed")
 	}
-	body, err := nativecore.BuildEscrowReleaseBodyV1(value.QueryID, receipt, signature)
+	body, err := nativecore.BuildEscrowReleaseBodyV2(value.QueryID, receipt, signature)
 	if err != nil {
 		return fmt.Errorf("build release body: %w", err)
 	}
-	value.Schema = "tos.service.software-work-settlement-release.v1"
+	value.Schema = "tos.service.software-work-settlement-release.v2"
 	value.SignatureHex = signed.SignatureHex
 	value.ReleaseBodyBOCBase64 = base64.StdEncoding.EncodeToString(body.ToBOC())
 	return nil
@@ -153,7 +162,11 @@ func applyExternalSignature(value *signingPackage, receipt *cell.Cell, path stri
 
 func main() {
 	outPath := flag.String("outcome", "", "successful outcome JSON")
-	quotePath := flag.String("quote-vector", "", "canonical Accepted Quote vector")
+	dataPath := flag.String("escrow-data", "", "finalized escrow v2 account data BOC (Base64)")
+	networkID := flag.String("network", "", "canonical network ID")
+	genesisRoot := flag.String("genesis-root", "", "sha256 genesis root")
+	genesisFile := flag.String("genesis-file", "", "sha256 genesis file")
+	globalID := flag.Int("global-id", 0, "network global ID (ConfigParam 19)")
 	escrow := flag.String("escrow", "", "escrow address")
 	query := flag.Uint64("query-id", 0, "non-zero query ID")
 	signaturePath := flag.String("signature-file", "", "optional tosctl wallet sign JSON")
@@ -162,11 +175,16 @@ func main() {
 	if err := decode(*outPath, &out); err != nil {
 		fail(err)
 	}
-	var vector referencecodec.QuoteVector
-	if err := decode(*quotePath, &vector); err != nil {
+	if *globalID == 0 || *globalID < math.MinInt32 || *globalID > math.MaxInt32 || *networkID == "" {
+		fail(errors.New("--network and a non-zero 32-bit --global-id are required"))
+	}
+	data, err := readCell(*dataPath)
+	if err != nil {
 		fail(err)
 	}
-	result, receipt, err := buildSigningPackage(out, vector, *escrow, *query)
+	result, receipt, err := buildSigningPackage(out, escrowRelease{
+		Network:  &nativev1.NetworkDomain{NetworkId: *networkID, GenesisRootHash: *genesisRoot, GenesisFileHash: *genesisFile},
+		GlobalID: int32(*globalID), Escrow: *escrow, Data: data, QueryID: *query})
 	if err != nil {
 		fail(err)
 	}
@@ -182,6 +200,21 @@ func main() {
 	fmt.Println(string(encoded))
 }
 
+func readCell(path string) (*cell.Cell, error) {
+	if path == "" {
+		return nil, errors.New("required input path is empty")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	boc, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(string(raw)), ""))
+	if err != nil {
+		return nil, err
+	}
+	return cell.FromBOC(boc)
+}
+
 func decode(path string, target any) error {
 	if path == "" {
 		return errors.New("required input path is empty")
@@ -194,17 +227,6 @@ func decode(path string, target any) error {
 		return err
 	}
 	return nil
-}
-
-func equalBytes(left, right []byte) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	var difference byte
-	for i := range left {
-		difference |= left[i] ^ right[i]
-	}
-	return difference == 0
 }
 
 func fail(err error) {

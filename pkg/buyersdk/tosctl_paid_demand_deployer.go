@@ -3,6 +3,8 @@ package buyersdk
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +24,17 @@ type PreparedPaidDemandDeployment struct {
 	AttachedNanoTOS    uint64 `json:"attached_nanotos"`
 	MessageBOCBase64   string `json:"message_boc_base64"`
 	MessageHash        string `json:"message_hash"`
+	// NonProduction records the operator's acknowledgment that this escrow v2
+	// deployment is on a local or test network with test assets.
+	NonProduction bool `json:"non_production"`
 }
+
+// errProductionEscrowDeployment refuses an escrow v2 deployment the operator
+// has not acknowledged as non-production. Escrow v2 can strand funds when a
+// recipient wallet refuses a payout; it is an accepted risk only for local and
+// test networks with test assets.
+var errProductionEscrowDeployment = errors.New("escrow v2 is experimental and may strand funds: " +
+	"deployment requires the non-production test deployment acknowledgment")
 
 type PaidDemandEscrowDeployer interface {
 	PreparePaidDemandDeployment(context.Context, *PreparedPaidDemandPurchase) (*PreparedPaidDemandDeployment, error)
@@ -38,6 +50,10 @@ type TOSCTLPaidDemandEscrowDeployerConfig struct {
 	Timeout                            time.Duration
 	VaultURL                           string
 	AcknowledgeUnpinnedManualBroadcast bool
+	// AcknowledgeNonProductionTestDeployment states that deployments go to a
+	// local or test network with test assets. Off by default; without it the
+	// deployer prepares and broadcasts nothing.
+	AcknowledgeNonProductionTestDeployment bool
 }
 
 type TOSCTLPaidDemandEscrowDeployer struct {
@@ -46,6 +62,7 @@ type TOSCTLPaidDemandEscrowDeployer struct {
 	timeout                            time.Duration
 	runner                             commandRunner
 	acknowledgeUnpinnedManualBroadcast bool
+	nonProduction                      bool
 }
 
 func NewTOSCTLPaidDemandEscrowDeployer(config TOSCTLPaidDemandEscrowDeployerConfig) (*TOSCTLPaidDemandEscrowDeployer, error) {
@@ -72,13 +89,17 @@ func NewTOSCTLPaidDemandEscrowDeployer(config TOSCTLPaidDemandEscrowDeployerConf
 	return &TOSCTLPaidDemandEscrowDeployer{binary: config.BinaryPath, config: config.ConfigPath,
 		wallet: config.WalletName, relayer: config.RelayerAddress, attached: config.AttachedNanoTOS,
 		timeout: config.Timeout, runner: runner,
-		acknowledgeUnpinnedManualBroadcast: config.AcknowledgeUnpinnedManualBroadcast}, nil
+		acknowledgeUnpinnedManualBroadcast: config.AcknowledgeUnpinnedManualBroadcast,
+		nonProduction:                      config.AcknowledgeNonProductionTestDeployment}, nil
 }
 
 func (deployer *TOSCTLPaidDemandEscrowDeployer) PreparePaidDemandDeployment(ctx context.Context,
 	purchase *PreparedPaidDemandPurchase) (*PreparedPaidDemandDeployment, error) {
 	if deployer == nil || ctx == nil {
 		return nil, errors.New("invalid Paid Demand deployment")
+	}
+	if !deployer.nonProduction {
+		return nil, errProductionEscrowDeployment
 	}
 	stateInit, stateInitHash, err := validatePaidDemandDeploymentPurchase(purchase)
 	if err != nil {
@@ -117,7 +138,7 @@ func (deployer *TOSCTLPaidDemandEscrowDeployer) PreparePaidDemandDeployment(ctx 
 	}
 	return &PreparedPaidDemandDeployment{EscrowAddress: purchase.Escrow.Address, QuoteCommitment: purchase.QuoteCommitment,
 		StateInitBOCBase64: stateInit, StateInitHash: stateInitHash, AttachedNanoTOS: deployer.attached,
-		MessageBOCBase64: output.MessageBOC, MessageHash: cellHash(message)}, nil
+		MessageBOCBase64: output.MessageBOC, MessageHash: cellHash(message), NonProduction: true}, nil
 }
 
 func (deployer *TOSCTLPaidDemandEscrowDeployer) BroadcastPaidDemandDeployment(ctx context.Context,
@@ -126,12 +147,18 @@ func (deployer *TOSCTLPaidDemandEscrowDeployer) BroadcastPaidDemandDeployment(ct
 		!validCellDigest(prepared.QuoteCommitment) || prepared.AttachedNanoTOS != deployer.attached || !validCellDigest(prepared.MessageHash) {
 		return errors.New("invalid prepared Paid Demand deployment")
 	}
+	if !deployer.nonProduction || !prepared.NonProduction {
+		return errProductionEscrowDeployment
+	}
 	stateInit, hash, err := decodeStateInit(prepared.StateInitBOCBase64)
 	if err != nil || hash != prepared.StateInitHash || prepared.EscrowAddress != "0:"+fmt.Sprintf("%x", stateInit.Hash()) {
 		return errors.New("Paid Demand StateInit changed before broadcast")
 	}
-	_, data, err := strictStateInitParts(stateInit)
+	code, data, err := strictStateInitParts(stateInit)
 	if err != nil {
+		return err
+	}
+	if err := nativecore.RequireEscrowV2Code(code); err != nil {
 		return err
 	}
 	// The network is committed inside Quote and checked again by the quorum
@@ -209,6 +236,9 @@ func validatePaidDemandDeploymentPurchase(purchase *PreparedPaidDemandPurchase) 
 	if err != nil || cellHash(code) != purchase.Escrow.CodeHash || !bytes.Equal(data.Hash(), purchase.Escrow.Data.Hash()) {
 		return "", "", errors.New("Paid Demand StateInit contents changed")
 	}
+	if err := nativecore.RequireEscrowV2Code(code); err != nil {
+		return "", "", err
+	}
 	return purchase.Escrow.StateInitBOC, hash, nil
 }
 
@@ -216,4 +246,70 @@ func (deployer *TOSCTLPaidDemandEscrowDeployer) run(ctx context.Context, args ..
 	call, cancel := context.WithTimeout(ctx, deployer.timeout)
 	defer cancel()
 	return deployer.runner.run(call, deployer.binary, args...)
+}
+
+func decodeStateInit(encoded string) (*cell.Cell, string, error) {
+	value, err := decodeSingleCell(encoded)
+	if err != nil {
+		return nil, "", err
+	}
+	return value, cellHash(value), nil
+}
+
+func strictStateInitParts(value *cell.Cell) (*cell.Cell, *cell.Cell, error) {
+	if value == nil {
+		return nil, nil, errors.New("missing StateInit")
+	}
+	s, err := value.BeginParse()
+	if err != nil {
+		return nil, nil, errors.New("invalid StateInit cell")
+	}
+	splitDepth, err := s.LoadBoolBit()
+	if err != nil || splitDepth {
+		return nil, nil, errors.New("unsupported StateInit split depth")
+	}
+	special, err := s.LoadBoolBit()
+	if err != nil || special {
+		return nil, nil, errors.New("unsupported StateInit special value")
+	}
+	codePresent, err := s.LoadBoolBit()
+	if err != nil || !codePresent {
+		return nil, nil, errors.New("missing StateInit code")
+	}
+	code, err := s.LoadRefCell()
+	if err != nil {
+		return nil, nil, errors.New("invalid StateInit code")
+	}
+	dataPresent, err := s.LoadBoolBit()
+	if err != nil || !dataPresent {
+		return nil, nil, errors.New("missing StateInit data")
+	}
+	data, err := s.LoadRefCell()
+	if err != nil {
+		return nil, nil, errors.New("invalid StateInit data")
+	}
+	libraryPresent, err := s.LoadBoolBit()
+	if err != nil || libraryPresent || s.BitsLeft() != 0 || s.RefsNum() != 0 {
+		return nil, nil, errors.New("unsupported StateInit library or trailing data")
+	}
+	return code, data, nil
+}
+
+func decodeSingleCell(encoded string) (*cell.Cell, error) {
+	if encoded == "" || strings.Join(strings.Fields(encoded), "") != encoded {
+		return nil, errors.New("invalid cell BOC")
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(raw) == 0 || len(raw) > 2<<20 || base64.StdEncoding.EncodeToString(raw) != encoded {
+		return nil, errors.New("invalid cell BOC")
+	}
+	value, err := cell.FromBOC(raw)
+	if err != nil {
+		return nil, errors.New("invalid cell BOC")
+	}
+	return value, nil
+}
+
+func cellHash(value *cell.Cell) string {
+	return "tvm-cell-sha256:" + hex.EncodeToString(value.Hash())
 }

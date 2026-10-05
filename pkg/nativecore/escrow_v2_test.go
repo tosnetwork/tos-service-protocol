@@ -37,7 +37,7 @@ func TestPaidDemandEscrowV2StartsPendingAcceptance(t *testing.T) {
 		t.Fatal(err)
 	}
 	master := address.NewAddress(0, 0, masterID).StringRaw()
-	identity, err := BuildEscrowStateInitV2(0, cell.BeginCell().MustStoreUInt(0xabcdef02, 32).EndCell(), EscrowInitV2{
+	identity, err := BuildEscrowStateInitV2(0, testEscrowV2Code(t), EscrowInitV2{
 		Network: network, AcceptedQuote: quote, Terms: terms, ExecutionSignerEd25519: signer,
 		TransportBinding: testEscrowTransport(), AssetMasterAddress: master, AssetWalletCode: walletCode})
 	if err != nil {
@@ -86,7 +86,7 @@ func TestPaidDemandEscrowV2RejectsFundingDeadlineOutOfOrder(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		_, err = BuildEscrowStateInitV2(0, cell.BeginCell().MustStoreUInt(0xabcdef02, 32).EndCell(), EscrowInitV2{
+		_, err = BuildEscrowStateInitV2(0, testEscrowV2Code(t), EscrowInitV2{
 			Network: network, AcceptedQuote: quote, Terms: terms, ExecutionSignerEd25519: signer,
 			TransportBinding: testEscrowTransport(), AssetMasterAddress: master, AssetWalletCode: walletCode})
 		return err
