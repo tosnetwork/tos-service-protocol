@@ -52,7 +52,7 @@ func TestApplyExternalSignature(t *testing.T) {
 	if err := applyExternalSignature(&value, receipt, signatureFile(t, signed)); err != nil {
 		t.Fatal(err)
 	}
-	if value.Schema != "tos.service.software-work-settlement-release.v1" ||
+	if value.Schema != "tos.service.software-work-settlement-release.v2" ||
 		value.ReleaseBodyBOCBase64 == "" || value.SignatureHex == "" {
 		t.Fatalf("incomplete signed release: %+v", value)
 	}

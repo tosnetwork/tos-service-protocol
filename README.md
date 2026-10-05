@@ -57,12 +57,13 @@ private-key or gateway-database authority. See
 
 ## Buyer SDK
 
-`pkg/buyersdk` prepares an exact Accepted Quote and deterministic escrow only
-after checking the manifest, finalized Capability, TOS-network stablecoin, and
-buyer balance. Its owner-private journal atomically enforces purchase budgets
-and grants one crash-safe funding lease; an ambiguous broadcast is resolved
-from finalized chain state and is never paid again automatically. Wallet keys
-remain behind an injected custody sender. See
+`pkg/buyersdk` prepares an exact Accepted Quote and deterministic stablecoin
+escrow v2 only after checking the Agreement, signed Provider Offer, manifest,
+finalized Capability, TOS-network stablecoin, and buyer balance. It deploys,
+accepts and funds the escrow as separate custody-authorized steps, each
+confirmed from finalized chain state; an ambiguous submission is resolved from
+finalized state and never paid again automatically. Only the released escrow v2
+code (`nativecore.EscrowV2CodeHash`) is built, deployed or resolved. See
 [`docs/buyer-sdk.md`](docs/buyer-sdk.md).
 
 The separate derived discovery boundary is documented in

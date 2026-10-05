@@ -47,11 +47,6 @@ type CustodyEffectAuthorizer interface {
 }
 
 type PaidDemandBuyerConfig struct {
-	// Base is retained for callers migrating from the original software-work
-	// buyer. New Paid Demand deployments should provide the explicit verifier
-	// fields below and do not need any V1 escrow, funding sender, or budget
-	// journal dependency.
-	Base                   *Buyer
 	NativeClient           NativeClient
 	AssetResolver          AssetResolver
 	Network                *nativev1.NetworkDomain
@@ -77,7 +72,7 @@ type PaidDemandBuyerConfig struct {
 }
 
 type PaidDemandBuyer struct {
-	base                   *Buyer
+	base                   *buyerBase
 	escrowResolver         PaidDemandEscrowResolver
 	offerResolver          commerce.ProviderOfferKeyResolver
 	escrowCode             *cell.Cell
@@ -118,7 +113,7 @@ type PreparedPaidDemandPurchase struct {
 	AgreementDigest     string
 	QuoteCommitment     string
 	QuoteBOCBase64      string
-	Escrow              nativecore.EscrowIdentityV1
+	Escrow              nativecore.EscrowIdentityV2
 	AssetMasterAddress  string
 	BuyerWalletAddress  string
 	AmountAtomic        string
@@ -126,26 +121,22 @@ type PreparedPaidDemandPurchase struct {
 }
 
 func NewPaidDemandBuyer(config PaidDemandBuyerConfig) (*PaidDemandBuyer, error) {
-	base := config.Base
-	if base == nil {
-		if config.NativeClient == nil || config.AssetResolver == nil || config.Network == nil ||
-			config.RegistryCodeHash == "" || config.BuyerAddress == "" || config.AssetWalletCode == nil ||
-			!config.BudgetLimits.permits("1") || config.CallerID == "" || len(config.CallerID) > 256 {
-			return nil, errors.New("invalid Paid Demand verifier configuration")
-		}
-		if config.Now == nil {
-			config.Now = time.Now
-		}
-		base = &Buyer{nativeClient: config.NativeClient, assetResolver: config.AssetResolver,
-			limits: config.BudgetLimits, network: proto.Clone(config.Network).(*nativev1.NetworkDomain),
-			registryCodeHash: config.RegistryCodeHash, buyerAddress: config.BuyerAddress,
-			walletCode: config.AssetWalletCode, callerID: config.CallerID, pollInterval: config.PollInterval,
-			finalityTimeout: config.FinalityTimeout, now: config.Now}
+	if config.NativeClient == nil || config.AssetResolver == nil || config.Network == nil ||
+		config.RegistryCodeHash == "" || config.BuyerAddress == "" || config.AssetWalletCode == nil ||
+		!config.BudgetLimits.permits("1") || config.CallerID == "" || len(config.CallerID) > 256 {
+		return nil, errors.New("invalid Paid Demand verifier configuration")
 	}
+	base := &buyerBase{nativeClient: config.NativeClient, assetResolver: config.AssetResolver,
+		limits: config.BudgetLimits, network: proto.Clone(config.Network).(*nativev1.NetworkDomain),
+		registryCodeHash: config.RegistryCodeHash, buyerAddress: config.BuyerAddress,
+		walletCode: config.AssetWalletCode, callerID: config.CallerID}
 	if config.EscrowResolver == nil || config.ProviderOfferResolver == nil ||
 		config.EscrowCode == nil || config.Deployer == nil || config.ActionSender == nil || config.EffectAuthorizer == nil ||
 		config.OwnerID == "" || config.AgentID == "" || config.NetworkGlobalID == 0 {
 		return nil, errors.New("invalid Paid Demand buyer configuration")
+	}
+	if err := nativecore.RequireEscrowV2Code(config.EscrowCode); err != nil {
+		return nil, err
 	}
 	if config.ActionNanoTOS == 0 {
 		config.ActionNanoTOS = 100_000_000
@@ -160,25 +151,16 @@ func NewPaidDemandBuyer(config PaidDemandBuyerConfig) (*PaidDemandBuyer, error) 
 		return nil, errors.New("Paid Demand action authorization TTL is invalid")
 	}
 	if config.PollInterval == 0 {
-		config.PollInterval = base.pollInterval
-		if config.PollInterval == 0 {
-			config.PollInterval = time.Second
-		}
+		config.PollInterval = time.Second
 	}
 	if config.FinalityTimeout == 0 {
-		config.FinalityTimeout = base.finalityTimeout
-		if config.FinalityTimeout == 0 {
-			config.FinalityTimeout = 5 * time.Minute
-		}
+		config.FinalityTimeout = 5 * time.Minute
 	}
 	if config.PollInterval < 10*time.Millisecond || config.FinalityTimeout <= config.PollInterval || config.FinalityTimeout > time.Hour {
 		return nil, errors.New("Paid Demand finality policy is invalid")
 	}
 	if config.Now == nil {
-		config.Now = base.now
-		if config.Now == nil {
-			config.Now = time.Now
-		}
+		config.Now = time.Now
 	}
 	base.pollInterval, base.finalityTimeout, base.now = config.PollInterval, config.FinalityTimeout, config.Now
 	return &PaidDemandBuyer{base: base, escrowResolver: config.EscrowResolver,
@@ -515,7 +497,8 @@ func (buyer *PaidDemandBuyer) resolveExact(ctx context.Context,
 		return nil, err
 	}
 	if !found || resolved == nil || resolved.State == nil || resolved.Reference == nil ||
-		resolved.Reference.FinalizedCheckpoint == 0 || resolved.Reference.ContractCodeHash != purchase.Escrow.CodeHash ||
+		resolved.Reference.FinalizedCheckpoint == 0 || resolved.Reference.ContractCodeHash != nativecore.EscrowV2CodeHash ||
+		resolved.Reference.ContractCodeHash != purchase.Escrow.CodeHash ||
 		resolved.State.QuoteCommitment != purchase.QuoteCommitment || resolved.State.BuyerAddress != buyer.base.buyerAddress ||
 		resolved.State.AssetMasterAddress != purchase.AssetMasterAddress ||
 		resolved.State.AssetWalletCodeHash != purchase.Proposal.MaximumPrice.Asset.WalletCodeHash {

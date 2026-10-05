@@ -60,29 +60,32 @@ type EscrowStateV2 struct {
 	ExecutionSignerEd25519 []byte
 }
 
-func BuildEscrowStateInitV2(workchain int32, code *cell.Cell, init EscrowInitV2) (EscrowIdentityV1, error) {
+func BuildEscrowStateInitV2(workchain int32, code *cell.Cell, init EscrowInitV2) (EscrowIdentityV2, error) {
 	if workchain != 0 || code == nil || init.AcceptedQuote == nil || init.Network == nil {
-		return EscrowIdentityV1{}, errors.New("invalid escrow V2 code, quote, network, or workchain")
+		return EscrowIdentityV2{}, errors.New("invalid escrow V2 code, quote, network, or workchain")
+	}
+	if err := RequireEscrowV2Code(code); err != nil {
+		return EscrowIdentityV2{}, err
 	}
 	quote, err := DecodeAcceptedQuoteV2(init.AcceptedQuote, init.Network)
 	if err != nil {
-		return EscrowIdentityV1{}, err
+		return EscrowIdentityV2{}, err
 	}
 	terms, err := BuildEscrowTermsCellV1(init.Terms)
 	if err != nil {
-		return EscrowIdentityV1{}, err
+		return EscrowIdentityV2{}, err
 	}
 	authorization, err := BuildEscrowAuthorizationCellV1(init.ExecutionSignerEd25519)
 	if err != nil {
-		return EscrowIdentityV1{}, err
+		return EscrowIdentityV2{}, err
 	}
 	masterAddress, err := escrowAddress(init.AssetMasterAddress)
 	if err != nil || init.AssetWalletCode == nil {
-		return EscrowIdentityV1{}, errors.New("invalid escrow V2 asset route")
+		return EscrowIdentityV2{}, errors.New("invalid escrow V2 asset route")
 	}
 	transport, _, err := BuildTransportBindingCellV1(init.TransportBinding)
 	if err != nil {
-		return EscrowIdentityV1{}, err
+		return EscrowIdentityV2{}, err
 	}
 	dispute, _ := BuildObjectiveDisputePolicyCellV1()
 	proposal := quote.Terms.Proposal
@@ -94,26 +97,26 @@ func BuildEscrowStateInitV2(workchain int32, code *cell.Cell, init EscrowInitV2)
 		init.Terms.FundingDeadline < quote.Extension.AcceptByUnix || init.Terms.FundingDeadline >= quote.Extension.ExecutionDeadline {
 		// The escrow contract enforces accept_by <= funding_deadline <
 		// execution_deadline < refund_at; build nothing it would reject at accept.
-		return EscrowIdentityV1{}, errors.New("escrow V2 terms, authorization, policy, or deadlines differ from Quote")
+		return EscrowIdentityV2{}, errors.New("escrow V2 terms, authorization, policy, or deadlines differ from Quote")
 	}
 	quoteMaster, quoteWalletCode, err := acceptedQuoteAssetRouteFromProposal(proposal)
 	if err != nil || init.AssetMasterAddress != quoteMaster || !bytes.Equal(init.AssetWalletCode.Hash(), quoteWalletCode) {
-		return EscrowIdentityV1{}, errors.New("escrow V2 asset route differs from Quote")
+		return EscrowIdentityV2{}, errors.New("escrow V2 asset route differs from Quote")
 	}
-	route := cell.BeginCell().MustStoreUInt(escrowAssetRouteMagic, 32).MustStoreUInt(2, 16).
+	route := cell.BeginCell().MustStoreUInt(escrowAssetRouteMagic, 32).MustStoreUInt(escrowStateVersion, 16).
 		MustStoreAddr(masterAddress).MustStoreSlice(init.AssetWalletCode.Hash(), 256).MustStoreRef(init.AssetWalletCode).EndCell()
-	runtime := cell.BeginCell().MustStoreUInt(escrowRuntimeMagic, 32).MustStoreUInt(2, 16).
+	runtime := cell.BeginCell().MustStoreUInt(escrowRuntimeMagic, 32).MustStoreUInt(escrowStateVersion, 16).
 		MustStoreBigUInt(new(big.Int), 128).MustStoreBigUInt(new(big.Int), 128).
 		MustStoreSlice(make([]byte, 32), 256).MustStoreUInt(0, 64).MustStoreUInt(0, 64).
 		MustStoreRef(route).MustStoreRef(transport).MustStoreRef(dispute).EndCell()
-	data := cell.BeginCell().MustStoreUInt(escrowDataMagic, 32).MustStoreUInt(2, 16).
+	data := cell.BeginCell().MustStoreUInt(escrowDataMagic, 32).MustStoreUInt(escrowStateVersion, 16).
 		MustStoreUInt(uint64(EscrowStatusPendingAcceptanceV2), 8).MustStoreSlice(init.AcceptedQuote.Hash(), 256).
 		MustStoreSlice(terms.Hash(), 256).MustStoreSlice(authorization.Hash(), 256).
 		MustStoreRef(init.AcceptedQuote).MustStoreRef(terms).MustStoreRef(authorization).MustStoreRef(runtime).EndCell()
 	stateInit := cell.BeginCell().MustStoreBoolBit(false).MustStoreBoolBit(false).
 		MustStoreBoolBit(true).MustStoreRef(code).MustStoreBoolBit(true).MustStoreRef(data).
 		MustStoreBoolBit(false).EndCell()
-	return EscrowIdentityV1{Address: fmt.Sprintf("%d:%s", workchain, hex.EncodeToString(stateInit.Hash())),
+	return EscrowIdentityV2{Address: fmt.Sprintf("%d:%s", workchain, hex.EncodeToString(stateInit.Hash())),
 		CodeHash: "tvm-cell-sha256:" + hex.EncodeToString(code.Hash()), QuoteCommitment: "tvm-cell-sha256:" + hex.EncodeToString(init.AcceptedQuote.Hash()),
 		EscrowTermsDigest: "tvm-cell-sha256:" + hex.EncodeToString(terms.Hash()), AuthorizationDigest: "tvm-cell-sha256:" + hex.EncodeToString(authorization.Hash()),
 		TransportDigest: "tvm-cell-sha256:" + hex.EncodeToString(transport.Hash()), DisputePolicyDigest: "tvm-cell-sha256:" + hex.EncodeToString(dispute.Hash()),
@@ -133,7 +136,7 @@ func DecodeEscrowDataV2(data *cell.Cell, network *nativev1.NetworkDomain) (*Escr
 		return nil, errors.New("invalid escrow V2 magic")
 	}
 	schema, err := s.LoadUInt(16)
-	if err != nil || schema != 2 {
+	if err != nil || schema != escrowStateVersion {
 		return nil, errors.New("unsupported escrow V2 schema")
 	}
 	status, err := s.LoadUInt(8)
@@ -257,7 +260,7 @@ func decodeEscrowRuntimeV2(root *cell.Cell) (escrowRuntimeV2, error) {
 		return escrowRuntimeV2{}, errors.New("invalid escrow V2 runtime")
 	}
 	schema, err := s.LoadUInt(16)
-	if err != nil || schema != 2 {
+	if err != nil || schema != escrowStateVersion {
 		return escrowRuntimeV2{}, errors.New("invalid escrow V2 runtime schema")
 	}
 	funded, err := s.LoadBigUInt(128)
@@ -311,7 +314,7 @@ func decodeEscrowAssetRouteV2(root *cell.Cell) (escrowAssetRouteV2, error) {
 		return escrowAssetRouteV2{}, errors.New("invalid escrow V2 route")
 	}
 	schema, err := s.LoadUInt(16)
-	if err != nil || schema != 2 {
+	if err != nil || schema != escrowStateVersion {
 		return escrowAssetRouteV2{}, errors.New("invalid escrow V2 route schema")
 	}
 	masterAddress, err := s.LoadAddr()

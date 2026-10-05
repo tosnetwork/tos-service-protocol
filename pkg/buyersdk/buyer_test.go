@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +12,6 @@ import (
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
-	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 	"google.golang.org/protobuf/proto"
 )
@@ -35,204 +33,26 @@ func (f *assetFake) ResolveBuyerAsset(_ context.Context, _ *nativev1.TOSAssetIde
 	return &result, nil
 }
 
-type escrowFake struct {
-	state *toschain.FinalizedEscrowV1
+type purchaseFixtureInput struct {
+	Proposal               *nativev1.QuoteProposalV1
+	ManifestJSON           []byte
+	EscrowTerms            nativecore.EscrowTermsV1
+	ExecutionSignerEd25519 []byte
+	TransportBinding       nativecore.TransportBindingV1
 }
 
-func (f *escrowFake) ResolveFinalized(_ context.Context, _ string) (*toschain.FinalizedEscrowV1, bool, error) {
-	if f.state == nil {
-		return nil, false, nil
-	}
-	state := *f.state.State
-	reference := proto.Clone(f.state.Reference).(*nativev1.ChainReference)
-	return &toschain.FinalizedEscrowV1{State: &state, Reference: reference, FinalizedAt: f.state.FinalizedAt}, true, nil
-}
-
-type fundingFake struct {
-	escrow       *escrowFake
-	prepareCalls int
-	calls        int
-	prepareFail  bool
-	fail         bool
-}
-
-func (f *fundingFake) PrepareStablecoinFunding(_ context.Context, intent FundingIntent) (*PreparedFunding, error) {
-	f.prepareCalls++
-	if f.prepareFail {
-		return nil, errors.New("injected preparation failure")
-	}
-	return &PreparedFunding{Intent: intent, MessageBOCBase64: "prepared", MessageHash: "tvm-cell-sha256:" + strings.Repeat("99", 32)}, nil
-}
-
-func (f *fundingFake) BroadcastStablecoinFunding(_ context.Context, prepared *PreparedFunding) error {
-	f.calls++
-	if f.fail {
-		return errors.New("injected wallet ambiguity")
-	}
-	f.escrow.state.State.Status = nativecore.EscrowStatusFunded
-	f.escrow.state.State.FundedAtomicAmount = prepared.Intent.AmountAtomic
-	return nil
-}
-
+// buyerFixture holds the verifier inputs a buyer is configured with and one
+// reviewed purchase input.
 type buyerFixture struct {
-	buyer    *Buyer
-	input    PurchaseInput
-	escrow   *escrowFake
-	sender   *fundingFake
-	journal  *FileBudgetJournal
-	now      time.Time
-	codeHash string
-}
-
-func TestBuyerPreparesAndFundsExactFinalizedPurchaseOnce(t *testing.T) {
-	fixture := newBuyerFixture(t, BudgetLimits{Window: time.Hour, MaxPurchases: 2,
-		MaxPerPurchaseAtomic: "100", MaxTotalAtomic: "150"})
-	prepared, err := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	installEscrow(t, fixture, prepared)
-	resolved, err := fixture.buyer.FundPurchase(context.Background(), prepared, "buyer-request-one")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resolved.State.Status != nativecore.EscrowStatusFunded || resolved.State.FundedAtomicAmount != "100" || fixture.sender.calls != 1 {
-		t.Fatal("buyer SDK did not finalize the exact stablecoin funding")
-	}
-	if _, err := fixture.buyer.FundPurchase(context.Background(), prepared, "buyer-request-two"); err != nil {
-		t.Fatal(err)
-	}
-	if fixture.sender.calls != 1 {
-		t.Fatal("finalized purchase was funded twice")
-	}
-}
-
-func TestBuyerRefusesAmbiguousBroadcastRecovery(t *testing.T) {
-	fixture := newBuyerFixture(t, BudgetLimits{Window: time.Hour, MaxPurchases: 2,
-		MaxPerPurchaseAtomic: "100", MaxTotalAtomic: "200"})
-	prepared, err := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	installEscrow(t, fixture, prepared)
-	intent, err := fixture.buyer.fundingIntent(prepared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if phase, err := fixture.journal.begin("ambiguous", intent, fixture.buyer.limits, fixture.now); err != nil || phase != budgetPrepared {
-		t.Fatalf("claim phase=%s err=%v", phase, err)
-	}
-	if acquired, _, err := fixture.journal.acquire(intent); err != nil || !acquired {
-		t.Fatalf("acquire=%v err=%v", acquired, err)
-	}
-	if _, err := fixture.buyer.FundPurchase(context.Background(), prepared, "ambiguous"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("ambiguous funding recovery err=%v", err)
-	}
-	if fixture.sender.calls != 0 {
-		t.Fatal("ambiguous purchase was rebroadcast")
-	}
-}
-
-func TestBuyerPreparedCrashRemainsSafelyRecoverable(t *testing.T) {
-	fixture := newBuyerFixture(t, BudgetLimits{Window: time.Hour, MaxPurchases: 2,
-		MaxPerPurchaseAtomic: "100", MaxTotalAtomic: "200"})
-	prepared, _ := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
-	installEscrow(t, fixture, prepared)
-	intent, _ := fixture.buyer.fundingIntent(prepared)
-	if _, err := fixture.journal.begin("prepared", intent, fixture.buyer.limits, fixture.now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fixture.buyer.FundPurchase(context.Background(), prepared, "prepared"); err != nil {
-		t.Fatal(err)
-	}
-	if fixture.sender.calls != 1 {
-		t.Fatal("prepared crash state did not grant one recoverable lease")
-	}
-}
-
-func TestBuyerPreparationFailureDoesNotConsumeBroadcastLease(t *testing.T) {
-	fixture := newBuyerFixture(t, BudgetLimits{Window: time.Hour, MaxPurchases: 2,
-		MaxPerPurchaseAtomic: "100", MaxTotalAtomic: "200"})
-	prepared, _ := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
-	installEscrow(t, fixture, prepared)
-	fixture.sender.prepareFail = true
-	if _, err := fixture.buyer.FundPurchase(context.Background(), prepared, "retryable-preparation"); err == nil {
-		t.Fatal("injected preparation failure was ignored")
-	}
-	if fixture.sender.calls != 0 {
-		t.Fatal("preparation failure reached broadcast")
-	}
-	fixture.sender.prepareFail = false
-	if _, err := fixture.buyer.FundPurchase(context.Background(), prepared, "retryable-preparation"); err != nil {
-		t.Fatal(err)
-	}
-	if fixture.sender.prepareCalls != 2 || fixture.sender.calls != 1 {
-		t.Fatal("prepared journal state did not retain exactly one recoverable broadcast lease")
-	}
-}
-
-func TestBuyerBudgetIsAtomicAcrossPurchases(t *testing.T) {
-	directory := privateDirectory(t)
-	journal, err := NewFileBudgetJournal(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	limits := BudgetLimits{Window: time.Hour, MaxPurchases: 3, MaxPerPurchaseAtomic: "75", MaxTotalAtomic: "100"}
-	now := time.Unix(2_000_000_000, 0)
-	first := testIntent("one", "60")
-	second := testIntent("two", "60")
-	if _, err := journal.begin("one", first, limits, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := journal.begin("two", second, limits, now); err == nil {
-		t.Fatal("buyer total stablecoin budget was exceeded")
-	}
-}
-
-func TestBuyerRejectsReviewedPurchaseMutation(t *testing.T) {
-	fixture := newBuyerFixture(t, BudgetLimits{Window: time.Hour, MaxPurchases: 2,
-		MaxPerPurchaseAtomic: "100", MaxTotalAtomic: "200"})
-	prepared, _ := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
-	installEscrow(t, fixture, prepared)
-	prepared.ManifestCBOR[0] ^= 0xff
-	if _, err := fixture.buyer.FundPurchase(context.Background(), prepared, "mutated"); err == nil {
-		t.Fatal("mutated purchase reached buyer wallet")
-	}
-	if fixture.sender.calls != 0 {
-		t.Fatal("mutated purchase was broadcast")
-	}
-}
-
-func TestBuyerRejectsProposalMutationAfterReview(t *testing.T) {
-	fixture := newBuyerFixture(t, BudgetLimits{Window: time.Hour, MaxPurchases: 2,
-		MaxPerPurchaseAtomic: "100", MaxTotalAtomic: "200"})
-	prepared, _ := fixture.buyer.PreparePurchase(context.Background(), fixture.input)
-	installEscrow(t, fixture, prepared)
-	prepared.Proposal.TransportBindingDigest = "sha256:" + strings.Repeat("12", 32)
-	if _, err := fixture.buyer.FundPurchase(context.Background(), prepared, "mutated-proposal"); err == nil {
-		t.Fatal("mutated Quote Proposal reached buyer wallet")
-	}
-	if fixture.sender.calls != 0 {
-		t.Fatal("mutated Quote Proposal was broadcast")
-	}
-}
-
-func TestBuyerAcceptsExactCatalogManifestCBOR(t *testing.T) {
-	fixture := newBuyerFixture(t, BudgetLimits{Window: time.Hour, MaxPurchases: 2,
-		MaxPerPurchaseAtomic: "100", MaxTotalAtomic: "200"})
-	manifest, err := nativecore.DecodeSoftwareWorkManifestJSON(fixture.input.ManifestJSON)
-	if err != nil {
-		t.Fatal(err)
-	}
-	canonical, _, err := nativecore.CanonicalSoftwareWorkManifest(manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.input.ManifestJSON = nil
-	fixture.input.ManifestCBOR = canonical
-	if _, err := fixture.buyer.PreparePurchase(context.Background(), fixture.input); err != nil {
-		t.Fatal(err)
-	}
+	native           *buyerNativeFake
+	assets           *assetFake
+	limits           BudgetLimits
+	network          *nativev1.NetworkDomain
+	registryCodeHash string
+	buyerAddress     string
+	walletCode       *cell.Cell
+	input            purchaseFixtureInput
+	now              time.Time
 }
 
 func newBuyerFixture(t *testing.T, limits BudgetLimits) buyerFixture {
@@ -270,12 +90,10 @@ func newBuyerFixture(t *testing.T, limits BudgetLimits) buyerFixture {
 		FundingDeadline: uint64(now.Add(time.Hour).Unix()), RefundAvailableAt: uint64(now.Add(2 * time.Hour).Unix())}
 	termsCell, _ := nativecore.BuildEscrowTermsCellV1(terms)
 	signer := bytes32(0xbb)
-	authorization, _ := nativecore.BuildEscrowAuthorizationCellV1(signer)
 	transport := nativecore.TransportBindingV1{SecurityMode: 0, MaxRequestBytes: 1 << 20, BaseURL: "http://127.0.0.1:8080"}
 	_, transportDigest, _ := nativecore.BuildTransportBindingCellV1(transport)
 	_, disputeDigest := nativecore.BuildObjectiveDisputePolicyCellV1()
 	walletCode := cell.BeginCell().MustStoreUInt(0x1234, 16).EndCell()
-	escrowCode := cell.BeginCell().MustStoreUInt(0x5678, 16).EndCell()
 	asset := &nativev1.TOSAssetIdentityV1{Master: &nativev1.TOSContractIdentityV1{Workchain: 0,
 		AccountId: bytes32(0xcc), CodeHash: "tvm-cell-sha256:" + strings.Repeat("dd", 32)},
 		WalletCodeHash: "tvm-cell-sha256:" + hex.EncodeToString(walletCode.Hash()), Decimals: 6}
@@ -288,35 +106,10 @@ func newBuyerFixture(t *testing.T, limits BudgetLimits) buyerFixture {
 	assetResolver := &assetFake{observation: &AssetObservation{Asset: proto.Clone(asset).(*nativev1.TOSAssetIdentityV1),
 		MasterAddress: masterAddress, BuyerWalletAddress: "0:" + strings.Repeat("ee", 32),
 		BuyerBalanceAtomic: "1000", FinalizedCheckpoint: 11}}
-	escrowResolver := &escrowFake{}
-	sender := &fundingFake{escrow: escrowResolver}
-	journal, err := NewFileBudgetJournal(privateDirectory(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	buyer, err := New(Config{NativeClient: &buyerNativeFake{state: capabilityState}, AssetResolver: assetResolver,
-		EscrowResolver: escrowResolver, FundingSender: sender, BudgetJournal: journal, BudgetLimits: limits,
-		Network: network, RegistryCodeHash: registryCodeHash, BuyerAddress: buyerAddress,
-		EscrowCode: escrowCode, AssetWalletCode: walletCode, CallerID: "buyer-test",
-		PollInterval: 10 * time.Millisecond, FinalityTimeout: time.Second, Now: func() time.Time { return now }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = authorization
-	return buyerFixture{buyer: buyer, input: PurchaseInput{Proposal: proposal, ManifestJSON: vector.Manifest,
-		EscrowTerms: terms, ExecutionSignerEd25519: signer, TransportBinding: transport}, escrow: escrowResolver,
-		sender: sender, journal: journal, now: now, codeHash: registryCodeHash}
-}
-
-func installEscrow(t *testing.T, fixture buyerFixture, prepared *PreparedPurchase) {
-	t.Helper()
-	state, err := nativecore.DecodeEscrowDataV1(prepared.Escrow.Data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fixture.escrow.state = &toschain.FinalizedEscrowV1{State: state,
-		Reference:   &nativev1.ChainReference{ContractCodeHash: prepared.Escrow.CodeHash, FinalizedCheckpoint: 12},
-		FinalizedAt: fixture.now}
+	return buyerFixture{native: &buyerNativeFake{state: capabilityState}, assets: assetResolver, limits: limits,
+		network: network, registryCodeHash: registryCodeHash, buyerAddress: buyerAddress, walletCode: walletCode,
+		input: purchaseFixtureInput{Proposal: proposal, ManifestJSON: vector.Manifest, EscrowTerms: terms,
+			ExecutionSignerEd25519: signer, TransportBinding: transport}, now: now}
 }
 
 func privateDirectory(t *testing.T) string {

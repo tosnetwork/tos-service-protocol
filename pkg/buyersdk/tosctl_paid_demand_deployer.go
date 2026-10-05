@@ -3,6 +3,8 @@ package buyersdk
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,8 +132,11 @@ func (deployer *TOSCTLPaidDemandEscrowDeployer) BroadcastPaidDemandDeployment(ct
 	if err != nil || hash != prepared.StateInitHash || prepared.EscrowAddress != "0:"+fmt.Sprintf("%x", stateInit.Hash()) {
 		return errors.New("Paid Demand StateInit changed before broadcast")
 	}
-	_, data, err := strictStateInitParts(stateInit)
+	code, data, err := strictStateInitParts(stateInit)
 	if err != nil {
+		return err
+	}
+	if err := nativecore.RequireEscrowV2Code(code); err != nil {
 		return err
 	}
 	// The network is committed inside Quote and checked again by the quorum
@@ -209,6 +214,9 @@ func validatePaidDemandDeploymentPurchase(purchase *PreparedPaidDemandPurchase) 
 	if err != nil || cellHash(code) != purchase.Escrow.CodeHash || !bytes.Equal(data.Hash(), purchase.Escrow.Data.Hash()) {
 		return "", "", errors.New("Paid Demand StateInit contents changed")
 	}
+	if err := nativecore.RequireEscrowV2Code(code); err != nil {
+		return "", "", err
+	}
 	return purchase.Escrow.StateInitBOC, hash, nil
 }
 
@@ -216,4 +224,70 @@ func (deployer *TOSCTLPaidDemandEscrowDeployer) run(ctx context.Context, args ..
 	call, cancel := context.WithTimeout(ctx, deployer.timeout)
 	defer cancel()
 	return deployer.runner.run(call, deployer.binary, args...)
+}
+
+func decodeStateInit(encoded string) (*cell.Cell, string, error) {
+	value, err := decodeSingleCell(encoded)
+	if err != nil {
+		return nil, "", err
+	}
+	return value, cellHash(value), nil
+}
+
+func strictStateInitParts(value *cell.Cell) (*cell.Cell, *cell.Cell, error) {
+	if value == nil {
+		return nil, nil, errors.New("missing StateInit")
+	}
+	s, err := value.BeginParse()
+	if err != nil {
+		return nil, nil, errors.New("invalid StateInit cell")
+	}
+	splitDepth, err := s.LoadBoolBit()
+	if err != nil || splitDepth {
+		return nil, nil, errors.New("unsupported StateInit split depth")
+	}
+	special, err := s.LoadBoolBit()
+	if err != nil || special {
+		return nil, nil, errors.New("unsupported StateInit special value")
+	}
+	codePresent, err := s.LoadBoolBit()
+	if err != nil || !codePresent {
+		return nil, nil, errors.New("missing StateInit code")
+	}
+	code, err := s.LoadRefCell()
+	if err != nil {
+		return nil, nil, errors.New("invalid StateInit code")
+	}
+	dataPresent, err := s.LoadBoolBit()
+	if err != nil || !dataPresent {
+		return nil, nil, errors.New("missing StateInit data")
+	}
+	data, err := s.LoadRefCell()
+	if err != nil {
+		return nil, nil, errors.New("invalid StateInit data")
+	}
+	libraryPresent, err := s.LoadBoolBit()
+	if err != nil || libraryPresent || s.BitsLeft() != 0 || s.RefsNum() != 0 {
+		return nil, nil, errors.New("unsupported StateInit library or trailing data")
+	}
+	return code, data, nil
+}
+
+func decodeSingleCell(encoded string) (*cell.Cell, error) {
+	if encoded == "" || strings.Join(strings.Fields(encoded), "") != encoded {
+		return nil, errors.New("invalid cell BOC")
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(raw) == 0 || len(raw) > 2<<20 || base64.StdEncoding.EncodeToString(raw) != encoded {
+		return nil, errors.New("invalid cell BOC")
+	}
+	value, err := cell.FromBOC(raw)
+	if err != nil {
+		return nil, errors.New("invalid cell BOC")
+	}
+	return value, nil
+}
+
+func cellHash(value *cell.Cell) string {
+	return "tvm-cell-sha256:" + hex.EncodeToString(value.Hash())
 }
