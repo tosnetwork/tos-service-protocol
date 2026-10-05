@@ -376,6 +376,9 @@ func policyCell(policy Policy) (*cell.Cell, error) {
 		if err != nil || zero(key) || controller.Weight == 0 || controller.Weight > 1_000_000 || controller.PurposeMask == 0 || controller.PurposeMask&^uint32(15) != 0 || controller.Recovery && controller.PurposeMask&4 == 0 {
 			return nil, errors.New("invalid controller")
 		}
+		if weakControllerKey(key) {
+			return nil, validationError(2214, "controller key is a small-order or non-canonical Ed25519 point")
+		}
 		controllers[i] = parsed{key: key, weight: controller.Weight, purpose: controller.PurposeMask, recovery: controller.Recovery}
 		total += uint64(controller.Weight)
 		if controller.Recovery {
