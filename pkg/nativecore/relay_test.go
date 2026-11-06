@@ -1,11 +1,14 @@
 package nativecore
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -409,5 +412,64 @@ func TestRecoveryCompletionUsesFinalizedChainTime(t *testing.T) {
 	relay.Resolver = resolverStub{states: map[string]*nativev1.NativeStateV1{agentID: state}, finalizedAt: time.Unix(int64(executeAfter), 0)}
 	if _, err := relay.preflightTargetTransition(context.Background(), action, built); err != nil {
 		t.Fatalf("recovery completion at finalized chain time: %v", err)
+	}
+}
+
+// The registry admits a purpose-isolated initial policy: every controller signs
+// the registration to prove possession, and consent is the agent-control
+// weight. The relayer preflight must admit what the contract admits.
+func TestRelayerAdmitsPurposeIsolatedRegistration(t *testing.T) {
+	l := testLocator(t)
+	controller := func(mask uint32, recovery bool) (*nativev1.ControllerV1, ed25519.PrivateKey) {
+		public, private, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &nativev1.ControllerV1{KeyId: "ed25519:" + hex.EncodeToString(public), Ed25519PublicKey: public,
+			Weight: 1, PurposeMask: mask, Recovery: recovery}, private
+	}
+	agentKey, agentPrivate := controller(PurposeAgentControl|PurposeDelegation, false)
+	isolatedKey, isolatedPrivate := controller(PurposeCapabilityControl|PurposeRecovery, true)
+	policy := &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1, RecoveryTimelockSeconds: 60,
+		Controllers: []*nativev1.ControllerV1{agentKey, isolatedKey}}
+	submission, built := signedAgentRegistration(t, l, policy, agentPrivate, bytes32('i'), bytes32('j'))
+	isolatedSignature, err := SignAction(isolatedPrivate, isolatedKey.KeyId, built)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Possession without the isolated controller is refused before any broadcast.
+	missing := &senderStub{}
+	relay := testRelayer(t, l, missing, resolverStub{states: map[string]*nativev1.NativeStateV1{}})
+	if _, err := relay.SubmitIdempotent(context.Background(), submission, "isolated-missing"); err == nil {
+		t.Fatal("registration without every controller's possession signature was accepted")
+	}
+	if missing.calls != 0 {
+		t.Fatalf("refused registration caused %d paid broadcasts", missing.calls)
+	}
+
+	// With both possession signatures the registration is relayed once, although
+	// the isolated controller holds no agent control.
+	signatures := append(submission.AuthoritySignatures, isolatedSignature)
+	sort.Slice(signatures, func(i, j int) bool {
+		return bytes.Compare(keyIDHash(signatures[i].KeyId), keyIDHash(signatures[j].KeyId)) < 0
+	})
+	submission.AuthoritySignatures = signatures
+	sender := &senderStub{}
+	relay = testRelayer(t, l, sender, resolverStub{states: map[string]*nativev1.NativeStateV1{}})
+	_, _ = relay.SubmitIdempotent(context.Background(), submission, "isolated-complete")
+	if sender.calls != 1 {
+		t.Fatalf("purpose-isolated registration caused %d paid broadcasts, want 1", sender.calls)
+	}
+}
+
+func TestRegistrationConsentIsAgentControlWeight(t *testing.T) {
+	policy, _ := testPolicy(t)
+	if err := VerifyRegistrationConsent(policy); err != nil {
+		t.Fatalf("single full controller: %v", err)
+	}
+	policy.Controllers[0].PurposeMask = PurposeDelegation | PurposeCapabilityControl | PurposeRecovery
+	if err := VerifyRegistrationConsent(policy); err == nil {
+		t.Fatal("a policy whose agent-control weight cannot meet its threshold was accepted")
 	}
 }

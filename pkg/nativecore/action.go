@@ -178,6 +178,30 @@ func VerifySignatures(policy *nativev1.ControllerPolicyV1, signatures []*nativev
 	return nil
 }
 
+// VerifyRegistrationConsent mirrors the registry's verify_registration_consent.
+// Every controller of an initial policy proves possession of its key (see
+// VerifyPolicyPossession); consent to the registration is then the policy's
+// agent-control weight held to its threshold. A controller isolated to
+// delegation, Capability control or recovery signs for possession only and
+// neither grants nor withholds consent, so it must not be required to hold
+// agent control.
+func VerifyRegistrationConsent(policy *nativev1.ControllerPolicyV1) error {
+	controllers, err := validatePolicy(policy)
+	if err != nil {
+		return wrapNativeError(ErrBadPolicy, "invalid Native registration policy", err)
+	}
+	var total uint64
+	for _, controller := range controllers {
+		if controller.PurposeMask&PurposeAgentControl != 0 {
+			total += uint64(controller.Weight)
+		}
+	}
+	if total < uint64(policy.Threshold) {
+		return nativeError(ErrThreshold, "Native registration consent is below the agent-control threshold")
+	}
+	return nil
+}
+
 func VerifyPolicyPossession(policy *nativev1.ControllerPolicyV1, signatures []*nativev1.SignatureV1, actionHash []byte) error {
 	controllers, err := validatePolicy(policy)
 	if err != nil {

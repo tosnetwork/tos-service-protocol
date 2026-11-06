@@ -151,7 +151,7 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 		if err := VerifyPolicyPossession(payload.InitialPolicy, submission.AuthoritySignatures, built.Hash); err != nil {
 			return "", err
 		}
-		if err := VerifySignatures(payload.InitialPolicy, submission.AuthoritySignatures, PurposeAgentControl, false, built.Hash); err != nil {
+		if err := VerifyRegistrationConsent(payload.InitialPolicy); err != nil {
 			return "", err
 		}
 	} else if err := r.verifyLiveAuthorization(ctx, submission, built, targetState); err != nil {
