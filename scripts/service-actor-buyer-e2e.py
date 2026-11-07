@@ -145,6 +145,18 @@ def buyer_retry(*args: str, timeout: float = 180, **kwargs):
     return json.loads(result.stdout)
 
 
+def status_of(request_hash: str) -> dict:
+    """One status read; a failure is kept so the evidence shows why."""
+    result = buyer("status", "--request-hash", request_hash, check=False)
+    if result.returncode != 0:
+        LAST_STATUS_ERROR[0] = result.stderr.strip()[-600:]
+        return {}
+    return json.loads(result.stdout)
+
+
+LAST_STATUS_ERROR = [None]
+
+
 def fixture(*args: str) -> dict:
     return json.loads(run([str(BIN / "service-actor-e2e-fixture"), *args]).stdout)
 
@@ -303,8 +315,9 @@ def acceptance() -> None:
     record("buyer called through tosctl agent service send with the quoted terms hash",
            called.returncode == 0 and called_record.get("phase") == "submitted", called.stderr.strip()[-600:])
     status = poll(lambda: (lambda r: r if r.get("found") and r.get("state") == "pending" else None)(
-        json.loads(buyer("status", "--request-hash", request_hash).stdout)), 240, 4)
-    record("the finalized call is admitted and pending, verified from its snapshot", bool(status), status)
+        status_of(request_hash)), 240, 4)
+    record("the finalized call is admitted and pending, verified from its snapshot", bool(status),
+           status or LAST_STATUS_ERROR[0])
     if not status:
         return
     request_id = status["request_id"]
@@ -314,9 +327,9 @@ def acceptance() -> None:
     tosctl("agent", "service", "send", "--operation", "respond", "--address", actor, "--from", "provider",
            "--request-id", str(request_id), "--response-hash", response_hash, "--attestor-controller", "service-attestor", "--yes")
     responded = poll(lambda: (lambda r: r if r.get("state") == "responded" else None)(
-        json.loads(buyer("status", "--request-hash", request_hash).stdout)), 240, 4)
+        status_of(request_hash)), 240, 4)
     record("the buyer resolves the request as responded with the attested response hash",
-           bool(responded) and responded.get("response_hash") == response_hash, responded)
+           bool(responded) and responded.get("response_hash") == response_hash, responded or LAST_STATUS_ERROR[0])
     requests = buyer_retry("requests", "--actor", actor, "--caller", BUYER)
     record("the rebuilt request index shows the responded request", any(
         r["request_id"] == request_id and r["state"] == "responded" for r in requests.get("requests", [])), requests)

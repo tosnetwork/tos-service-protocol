@@ -218,6 +218,16 @@ func TestGetterStackIsReturnedInDeclaredOrder(t *testing.T) {
 	if _, err := decodeGetterStack([]json.RawMessage{json.RawMessage(`["tuple",{}]`)}); err == nil {
 		t.Fatal("an unsupported entry was accepted")
 	}
+	// The node serializes a TVM null as the empty list.
+	empty, err := decodeGetterStack([]json.RawMessage{json.RawMessage(`["list",{"elements":[]}]`)})
+	if err != nil || empty[0].Kind != "null" {
+		t.Fatalf("the served null was not read as null: %+v %v", empty, err)
+	}
+	for _, raw := range []string{`["list",{"elements":[["num","1"]]}]`, `["list",{}]`, `["list",{"elements":[],"x":1}]`} {
+		if _, err := decodeGetterStack([]json.RawMessage{json.RawMessage(raw)}); err == nil {
+			t.Fatalf("%s was accepted as null", raw)
+		}
+	}
 }
 
 // historyServer serves getTransactions pages from a fixed newest-first

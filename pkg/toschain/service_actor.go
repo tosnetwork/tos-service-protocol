@@ -14,6 +14,7 @@ import (
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/internal/jsonstrict"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tosutils-go/tlb"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
@@ -322,8 +323,19 @@ func decodeGetterStack(raw []json.RawMessage) ([]nativecore.TVMStackEntryV1, err
 			entries[position] = nativecore.TVMStackEntryV1{Kind: kind, Cell: value}
 		case "null":
 			entries[position] = nativecore.TVMStackEntryV1{Kind: "null"}
+		case "list":
+			// A TVM null is also the empty list, and the node serializes it as
+			// ["list",{"elements":[]}]; any non-empty list is refused.
+			_, value, _ := stackPair(raw, index)
+			var list struct {
+				Elements []json.RawMessage `json:"elements"`
+			}
+			if err := jsonstrict.Decode(value, &list); err != nil || list.Elements == nil || len(list.Elements) != 0 {
+				return nil, errors.New("unsupported getter list entry")
+			}
+			entries[position] = nativecore.TVMStackEntryV1{Kind: "null"}
 		default:
-			return nil, errors.New("unsupported getter stack entry")
+			return nil, fmt.Errorf("unsupported getter stack entry %q", kind)
 		}
 	}
 	return entries, nil
