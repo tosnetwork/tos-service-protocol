@@ -1,27 +1,23 @@
 // Package nativewallet provides local, review-before-signing support for
-// tos_service_v1 actions. It never submits a transaction or grants a gateway
-// access to controller keys.
+// tos_service_v1 actions. Controller keys are ML-DSA-44 keys held in tosctl
+// custody: this package names controllers and receives signatures, and it
+// never reads, holds or passes private key material. It never submits a
+// transaction or grants a gateway access to controller keys.
 package nativewallet
 
 import (
 	"bufio"
-	"crypto/ed25519"
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
-	"sort"
+	"fmt"
 	"strings"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
-	"github.com/tosnetwork/tos-service-protocol/internal/jsonstrict"
-	"github.com/tosnetwork/tos-service-protocol/internal/osguard"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"google.golang.org/protobuf/encoding/protojson"
 )
-
-const KeySchema = "tos.service.wallet-key.v1"
 
 type Review struct {
 	Protocol               string          `json:"protocol"`
@@ -36,62 +32,6 @@ type Review struct {
 	Action                 string          `json:"action"`
 	ActionHash             string          `json:"action_hash"`
 	SignedAction           json.RawMessage `json:"signed_action"`
-}
-
-type Key struct {
-	keyID   string
-	private ed25519.PrivateKey
-}
-
-func (k *Key) KeyID() string {
-	if k == nil {
-		return ""
-	}
-	return k.keyID
-}
-
-func (k *Key) Close() {
-	if k == nil {
-		return
-	}
-	for i := range k.private {
-		k.private[i] = 0
-	}
-	k.private = nil
-}
-
-func LoadKey(path string) (*Key, error) {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return nil, errors.New("Native wallet key path must be absolute and clean")
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || info.Size() <= 0 || info.Size() > 4096 {
-		return nil, errors.New("Native wallet key must be an owner-private regular file")
-	}
-	if !osguard.CurrentUserOwns(info) {
-		return nil, errors.New("Native wallet key owner mismatch")
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var encoded struct {
-		Schema         string `json:"schema"`
-		PrivateSeedHex string `json:"private_seed_hex"`
-	}
-	if err := jsonstrict.Decode(raw, &encoded); err != nil || encoded.Schema != KeySchema {
-		return nil, errors.New("invalid Native wallet key file")
-	}
-	seed, err := hex.DecodeString(encoded.PrivateSeedHex)
-	if err != nil || len(seed) != ed25519.SeedSize || encoded.PrivateSeedHex != hex.EncodeToString(seed) {
-		return nil, errors.New("invalid Native Ed25519 seed")
-	}
-	private := ed25519.NewKeyFromSeed(seed)
-	for i := range seed {
-		seed[i] = 0
-	}
-	public := private.Public().(ed25519.PublicKey)
-	return &Key{keyID: "ed25519:" + hex.EncodeToString(public), private: private}, nil
 }
 
 func ReviewAction(action *nativev1.NativeActionV1) (Review, nativecore.BuiltAction, error) {
@@ -110,24 +50,37 @@ func ReviewAction(action *nativev1.NativeActionV1) (Review, nativecore.BuiltActi
 		Action: actionName(action), ActionHash: built.HashString, SignedAction: signedAction}, built, nil
 }
 
-func Sign(built nativecore.BuiltAction, keys []*Key) ([]*nativev1.SignatureV1, error) {
-	if built.Cell == nil || len(keys) == 0 || len(keys) > nativecore.MaxSignatures {
+// Sign asks custody to sign the reviewed action once with each named
+// controller and returns the signature set in ascending key-ID byte order,
+// the only order the Registry accepts. It refuses an empty set, more than
+// the Registry's signature width, a repeated controller name, and two names
+// that resolve to the same key.
+func Sign(ctx context.Context, signer mldsa44.Signer, built nativecore.BuiltAction, controllers []string) ([]*nativev1.SignatureV1, error) {
+	if ctx == nil || signer == nil || built.Cell == nil || len(controllers) == 0 || len(controllers) > nativecore.MaxSignatures {
 		return nil, errors.New("invalid Native wallet signing request")
 	}
-	ordered := append([]*Key(nil), keys...)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].keyID < ordered[j].keyID })
-	result := make([]*nativev1.SignatureV1, len(ordered))
-	for i, key := range ordered {
-		if key == nil || len(key.private) != ed25519.PrivateKeySize || i > 0 && key.keyID == ordered[i-1].keyID {
-			return nil, errors.New("invalid or duplicate Native wallet key")
+	names := make(map[string]struct{}, len(controllers))
+	keys := make(map[string]string, len(controllers))
+	result := make([]*nativev1.SignatureV1, 0, len(controllers))
+	for _, controller := range controllers {
+		if strings.TrimSpace(controller) == "" {
+			return nil, errors.New("empty Native wallet controller name")
 		}
-		signature, err := nativecore.SignAction(key.private, key.keyID, built)
+		if _, duplicate := names[controller]; duplicate {
+			return nil, fmt.Errorf("Native wallet controller %q is named twice", controller)
+		}
+		names[controller] = struct{}{}
+		signature, err := nativecore.SignAction(ctx, signer, controller, built)
 		if err != nil {
 			return nil, err
 		}
-		result[i] = signature
+		if other, duplicate := keys[signature.KeyId]; duplicate {
+			return nil, fmt.Errorf("Native wallet controllers %q and %q hold the same key", other, controller)
+		}
+		keys[signature.KeyId] = controller
+		result = append(result, signature)
 	}
-	return result, nil
+	return nativecore.SortSignatures(result), nil
 }
 
 func actionName(action *nativev1.NativeActionV1) string {
