@@ -517,16 +517,22 @@ func lastMatches(last transactionID, anchor ActorTxID) bool {
 }
 
 func actorHistoryPageAt(ctx context.Context, node *rpcNode, address string, start transactionID) ([]tlb.Transaction, error) {
+	return historyPageAt(ctx, node, address, start, actorHistoryPage)
+}
+
+// historyPageAt reads up to limit finalized transactions of address, newest
+// first, starting exactly at start, with hash and logical-time continuity.
+func historyPageAt(ctx context.Context, node *rpcNode, address string, start transactionID, limit int) ([]tlb.Transaction, error) {
 	var values []rawTransaction
 	if err := node.client.Call(ctx, "getTransactions", struct {
 		Address string `json:"address"`
 		Limit   int    `json:"limit"`
 		LT      string `json:"lt"`
 		Hash    string `json:"hash"`
-	}{address, actorHistoryPage, start.LT, start.Hash}, &values); err != nil {
+	}{address, limit, start.LT, start.Hash}, &values); err != nil {
 		return nil, err
 	}
-	if len(values) == 0 || len(values) > actorHistoryPage || values[0].TransactionID.LT != start.LT || values[0].TransactionID.Hash != start.Hash {
+	if len(values) == 0 || len(values) > limit || values[0].TransactionID.LT != start.LT || values[0].TransactionID.Hash != start.Hash {
 		return nil, errors.New("Service Actor history page does not start at the requested transaction")
 	}
 	account := strings.SplitN(address, ":", 2)[1]
