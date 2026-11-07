@@ -536,7 +536,9 @@ func stackHashNum(fillByte byte) TVMStackEntryV1 {
 	return TVMStackEntryV1{Kind: "num", Number: new(big.Int).SetBytes(fill(fillByte))}
 }
 
-func stackSlice(cellValue *cell.Cell) TVMStackEntryV1 { return TVMStackEntryV1{Kind: "slice", Cell: cellValue} }
+func stackSlice(cellValue *cell.Cell) TVMStackEntryV1 {
+	return TVMStackEntryV1{Kind: "slice", Cell: cellValue}
+}
 
 // The values of the Rust decodes_pending_request_stack and
 // decodes_refund_stack cases, with the caller on workchain -1 as there.
@@ -564,15 +566,31 @@ func TestGetterStacksMatchTheRustCases(t *testing.T) {
 
 	clone := func(stack []TVMStackEntryV1) []TVMStackEntryV1 { return append([]TVMStackEntryV1(nil), stack...) }
 	bad := map[string][]TVMStackEntryV1{
-		"short":           request[:11],
-		"long":            append(clone(request), stackNum(0)),
-		"flag two":        func() []TVMStackEntryV1 { s := clone(request); s[10] = stackNum(2); return s }(),
-		"found two":       func() []TVMStackEntryV1 { s := clone(request); s[0] = stackNum(2); return s }(),
-		"negative":        func() []TVMStackEntryV1 { s := clone(request); s[7] = TVMStackEntryV1{Kind: "num", Number: big.NewInt(-1)}; return s }(),
-		"wide version":    func() []TVMStackEntryV1 { s := clone(request); s[7] = stackNum(1 << 32); return s }(),
-		"caller trailing": func() []TVMStackEntryV1 { s := clone(request); s[1] = stackSlice(stdAddress(cell.BeginCell(), 0, 1).MustStoreBoolBit(true).EndCell()); return s }(),
-		"caller none":     func() []TVMStackEntryV1 { s := clone(request); s[1] = stackSlice(cell.BeginCell().MustStoreUInt(0, 2).EndCell()); return s }(),
-		"coins too wide":  func() []TVMStackEntryV1 { s := clone(request); s[2] = TVMStackEntryV1{Kind: "num", Number: MaxServiceActorCoins}; return s }(),
+		"short":     request[:11],
+		"long":      append(clone(request), stackNum(0)),
+		"flag two":  func() []TVMStackEntryV1 { s := clone(request); s[10] = stackNum(2); return s }(),
+		"found two": func() []TVMStackEntryV1 { s := clone(request); s[0] = stackNum(2); return s }(),
+		"negative": func() []TVMStackEntryV1 {
+			s := clone(request)
+			s[7] = TVMStackEntryV1{Kind: "num", Number: big.NewInt(-1)}
+			return s
+		}(),
+		"wide version": func() []TVMStackEntryV1 { s := clone(request); s[7] = stackNum(1 << 32); return s }(),
+		"caller trailing": func() []TVMStackEntryV1 {
+			s := clone(request)
+			s[1] = stackSlice(stdAddress(cell.BeginCell(), 0, 1).MustStoreBoolBit(true).EndCell())
+			return s
+		}(),
+		"caller none": func() []TVMStackEntryV1 {
+			s := clone(request)
+			s[1] = stackSlice(cell.BeginCell().MustStoreUInt(0, 2).EndCell())
+			return s
+		}(),
+		"coins too wide": func() []TVMStackEntryV1 {
+			s := clone(request)
+			s[2] = TVMStackEntryV1{Kind: "num", Number: MaxServiceActorCoins}
+			return s
+		}(),
 		"not found value": {stackNum(0), {Kind: "null"}, stackNum(1), stackNum(0), stackNum(0), stackNum(0), stackNum(0), stackNum(0), stackNum(0), stackNum(0), stackNum(0), stackNum(0)},
 		"not found caller": {stackNum(0), stackSlice(caller), stackNum(0), stackNum(0), stackNum(0), stackNum(0), stackNum(0),
 			stackNum(0), stackNum(0), stackNum(0), stackNum(0), stackNum(0)},
