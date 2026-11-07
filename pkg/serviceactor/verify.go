@@ -124,6 +124,73 @@ func Gather(ctx context.Context, session Session, network *nativev1.NetworkDomai
 	return evidence, nil
 }
 
+// TransitionSession reads, in the session that gathered the evidence, the
+// finalized transaction that first tombstoned a Registry object or revoked a
+// Capability version.
+type TransitionSession interface {
+	RegistryTransition(ctx context.Context, objectID string, kind nativecore.RegistryTransitionKind,
+		version string) (*toschain.RegistryTransitionTx, error)
+}
+
+// Acceptance judges step 1's liveness at the call for an existing request:
+// each terminal transition the evidence shows is admitted only with the
+// object's finalized transition transaction, and only if that transaction's
+// logical time is greater than the call's. A nil proof means none was proven.
+type Acceptance struct {
+	Call                toschain.ActorTxID
+	CapabilityTombstone *toschain.RegistryTransitionTx
+	VersionRevocation   *toschain.RegistryTransitionTx
+	AgentTombstone      *toschain.RegistryTransitionTx
+}
+
+// ProveAcceptance reads, for each of the Capability tombstone, the version
+// revocation and the owner Agent tombstone that the evidence shows, the
+// transition transaction from the object's history in session. A transition
+// the history does not prove is left nil, so the verification refuses it; any
+// other read failure is returned.
+func ProveAcceptance(ctx context.Context, session TransitionSession, evidence *Evidence, call toschain.ActorTransaction) (*Acceptance, error) {
+	if session == nil || evidence == nil || evidence.Capability.GetCapability() == nil {
+		return nil, stepError("binding", 1, "the Capability is not in finalized state")
+	}
+	capability := evidence.Capability.GetCapability()
+	acceptance := &Acceptance{Call: toschain.ActorTxID{LT: call.LT, Hash: call.Hash}}
+	prove := func(objectID string, kind nativecore.RegistryTransitionKind, version string) (*toschain.RegistryTransitionTx, error) {
+		transition, err := session.RegistryTransition(ctx, objectID, kind, version)
+		if errors.Is(err, toschain.ErrRegistryTransitionUnproven) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return transition, nil
+	}
+	var err error
+	if capability.Tombstoned {
+		if acceptance.CapabilityTombstone, err = prove(capability.CapabilityId, nativecore.RegistryCapabilityTombstone, ""); err != nil {
+			return nil, err
+		}
+	}
+	for _, candidate := range capability.Versions {
+		if candidate != nil && candidate.Version == evidence.Version && candidate.Revoked {
+			if acceptance.VersionRevocation, err = prove(capability.CapabilityId, nativecore.RegistryVersionRevocation, evidence.Version); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if agent := evidence.Agent.GetAgent(); agent != nil && agent.Tombstoned {
+		if acceptance.AgentTombstone, err = prove(agent.AgentId, nativecore.RegistryAgentTombstone, ""); err != nil {
+			return nil, err
+		}
+	}
+	return acceptance, nil
+}
+
+// afterCall reports whether a transition proof exists and its transaction is
+// finalized after the call transaction.
+func (a *Acceptance) afterCall(proof *toschain.RegistryTransitionTx) bool {
+	return a != nil && proof != nil && proof.LT > a.Call.LT
+}
+
 // Binding is the result of the common steps 1-4.
 type Binding struct {
 	Actor         string
@@ -137,9 +204,12 @@ type Binding struct {
 // VerifyBinding runs steps 1-4. rail is the parsed Quote rail or nil for
 // discovery without a Quote. destination is the call destination (before a
 // call: the message the buyer builds; after: the call transaction's account).
-// allowRevoked admits a version revoked after the call (existing requests).
+// acceptance is nil for admission, where step 1 refuses any tombstone or
+// revocation at the checkpoint; for an existing request it admits only a
+// transition proven finalized after the call. A tombstone is terminal, so its
+// proof must also be the action the state records as its last.
 func VerifyBinding(evidence *Evidence, pinnedCodeHash [32]byte, rail *nativecore.ServiceActorQuoteRailV1,
-	proposal *nativev1.QuoteProposalV1, destination string, allowRevoked bool) (*Binding, error) {
+	proposal *nativev1.QuoteProposalV1, destination string, acceptance *Acceptance) (*Binding, error) {
 	const procedure = "binding"
 	if evidence == nil || evidence.Capability == nil || evidence.Capability.GetCapability() == nil {
 		return nil, stepError(procedure, 1, "the Capability is not in finalized state")
@@ -150,7 +220,15 @@ func VerifyBinding(evidence *Evidence, pinnedCodeHash [32]byte, rail *nativecore
 		return nil, stepError(procedure, 1, "the Capability state is not from the evidence checkpoint and network")
 	}
 	if capability.Tombstoned {
-		return nil, stepError(procedure, 1, "the Capability is tombstoned")
+		if acceptance == nil {
+			return nil, stepError(procedure, 1, "the Capability is tombstoned")
+		}
+		if !acceptance.afterCall(acceptance.CapabilityTombstone) {
+			return nil, stepError(procedure, 1, "the Capability is tombstoned and no tombstone after the call is proven")
+		}
+		if acceptance.CapabilityTombstone.ActionHash != capability.LastActionHash {
+			return nil, stepError(procedure, 1, "the proven Capability tombstone is not the state's last action")
+		}
 	}
 	var version *nativev1.CapabilityVersionV1
 	for _, candidate := range capability.Versions {
@@ -161,15 +239,28 @@ func VerifyBinding(evidence *Evidence, pinnedCodeHash [32]byte, rail *nativecore
 	if version == nil || version.ManifestDigest != evidence.ManifestDigest {
 		return nil, stepError(procedure, 1, "the version is absent or names another manifest")
 	}
-	if version.Revoked && !allowRevoked {
-		return nil, stepError(procedure, 1, "the version is revoked")
+	if version.Revoked {
+		if acceptance == nil {
+			return nil, stepError(procedure, 1, "the version is revoked")
+		}
+		if !acceptance.afterCall(acceptance.VersionRevocation) {
+			return nil, stepError(procedure, 1, "the version is revoked and no revocation after the call is proven")
+		}
 	}
 	if evidence.Agent == nil || evidence.Agent.GetAgent() == nil || evidence.Agent.GetAgent().AgentId != capability.OwnerAgentId ||
 		evidence.Agent.Reference == nil || evidence.Agent.Reference.FinalizedCheckpoint != evidence.Checkpoint {
 		return nil, stepError(procedure, 1, "the owner Agent is not in finalized state at the checkpoint")
 	}
-	if evidence.Agent.GetAgent().Tombstoned {
-		return nil, stepError(procedure, 1, "the owner Agent is tombstoned")
+	if agent := evidence.Agent.GetAgent(); agent.Tombstoned {
+		if acceptance == nil {
+			return nil, stepError(procedure, 1, "the owner Agent is tombstoned")
+		}
+		if !acceptance.afterCall(acceptance.AgentTombstone) {
+			return nil, stepError(procedure, 1, "the owner Agent is tombstoned and no tombstone after the call is proven")
+		}
+		if acceptance.AgentTombstone.ActionHash != agent.LastActionHash {
+			return nil, stepError(procedure, 1, "the proven Agent tombstone is not the state's last action")
+		}
 	}
 	canonical, digest, err := nativecore.CanonicalSoftwareWorkManifest(evidence.Manifest)
 	if err != nil || digest != evidence.ManifestDigest || len(canonical) == 0 || evidence.Manifest.Version != evidence.Version {
@@ -257,7 +348,7 @@ func VerifyAdmission(evidence *Evidence, pinnedCodeHash [32]byte, rail *nativeco
 	if rail != nil {
 		destination = rail.Actor
 	}
-	binding, err := VerifyBinding(evidence, pinnedCodeHash, rail, proposal, destination, false)
+	binding, err := VerifyBinding(evidence, pinnedCodeHash, rail, proposal, destination, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -334,18 +425,22 @@ type ExistingRequest struct {
 	Snapshot nativecore.ServiceActorRequestSnapshotV1
 }
 
-// VerifyExistingRequest runs steps 1-4 (a version revoked after the call is
-// admitted) and then 5-8 from the finalized call transaction and its request
-// snapshot alone; the actor's current policy is never consulted. callAccount
-// is the account whose finalized history holds the call transaction.
+// VerifyExistingRequest runs steps 1-4, with step 1's liveness judged at the
+// call through acceptance (from ProveAcceptance for this call), and then 5-8
+// from the finalized call transaction and its request snapshot alone; the
+// actor's current policy is never consulted. callAccount is the account whose
+// finalized history holds the call transaction.
 func VerifyExistingRequest(evidence *Evidence, pinnedCodeHash [32]byte, rail *nativecore.ServiceActorQuoteRailV1,
 	proposal *nativev1.QuoteProposalV1, callAccount string, call toschain.ActorTransaction, buyer string,
-	requestHash [32]byte) (*ExistingRequest, error) {
+	requestHash [32]byte, acceptance *Acceptance) (*ExistingRequest, error) {
 	const procedure = "existing-request"
 	if rail == nil || proposal == nil {
 		return nil, stepError(procedure, 2, "an existing request is verified against its Quote")
 	}
-	binding, err := VerifyBinding(evidence, pinnedCodeHash, rail, proposal, callAccount, true)
+	if acceptance == nil || acceptance.Call != (toschain.ActorTxID{LT: call.LT, Hash: call.Hash}) {
+		return nil, stepError("binding", 1, "the liveness proof is not for this call transaction")
+	}
+	binding, err := VerifyBinding(evidence, pinnedCodeHash, rail, proposal, callAccount, acceptance)
 	if err != nil {
 		return nil, err
 	}

@@ -56,15 +56,22 @@ type saChain struct {
 	data       *nativecore.ServiceActorDataV1
 	history    []toschain.ActorTransaction
 	getterLie  bool
+	// transitions are the Registry transition transactions the objects'
+	// histories hold, by kind; an absent kind is unproven.
+	transitions map[nativecore.RegistryTransitionKind]toschain.RegistryTransitionTx
 }
 
 func (c *saChain) BeginBuyerSession(context.Context) (ServiceActorSession, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.checkpoint++
+	transitions := make(map[nativecore.RegistryTransitionKind]toschain.RegistryTransitionTx, len(c.transitions))
+	for kind, transition := range c.transitions {
+		transitions[kind] = transition
+	}
 	return &saSession{checkpoint: c.checkpoint, capability: proto.Clone(c.capability).(*nativev1.NativeStateV1),
 		agent: proto.Clone(c.agent).(*nativev1.NativeStateV1), data: c.data, history: append([]toschain.ActorTransaction(nil), c.history...),
-		getterLie: c.getterLie}, nil
+		getterLie: c.getterLie, transitions: transitions}, nil
 }
 
 type saSession struct {
@@ -73,6 +80,26 @@ type saSession struct {
 	data              *nativecore.ServiceActorDataV1
 	history           []toschain.ActorTransaction
 	getterLie         bool
+	transitions       map[nativecore.RegistryTransitionKind]toschain.RegistryTransitionTx
+}
+
+func (s *saSession) RegistryTransition(_ context.Context, object string, kind nativecore.RegistryTransitionKind,
+	version string) (*toschain.RegistryTransitionTx, error) {
+	transition, found := s.transitions[kind]
+	wantObject, wantVersion := saCapability, ""
+	switch kind {
+	case nativecore.RegistryAgentTombstone:
+		wantObject = saAgent
+	case nativecore.RegistryVersionRevocation:
+		wantVersion = "1.0.0"
+	}
+	if object != wantObject || version != wantVersion {
+		return nil, errors.New("a transition of another object was requested")
+	}
+	if !found {
+		return nil, toschain.ErrRegistryTransitionUnproven
+	}
+	return &transition, nil
 }
 
 func (s *saSession) Checkpoint() uint64   { return s.checkpoint }
@@ -509,6 +536,72 @@ func TestBuyerResolveRefusesInconsistentEvidence(t *testing.T) {
 		f.chain.mu.Unlock()
 		if report, err := f.buyer.Resolve(ctx, record.RequestHash); err == nil {
 			t.Errorf("%s resolved: %+v", name, report)
+		}
+	}
+}
+
+// A provider may tombstone its Capability or Agent, or revoke the version, at
+// any time; a request admitted before that still resolves, and one whose
+// transition precedes the call or is not proven does not. A new call is
+// refused either way.
+func TestBuyerResolvesARequestRetiredAfterTheCall(t *testing.T) {
+	ctx := context.Background()
+	const capabilityAction, agentAction = "sha256:" + "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+		"sha256:" + "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+	retire := map[string]struct {
+		kind   nativecore.RegistryTransitionKind
+		action string
+		edit   func(*saChain)
+	}{
+		"Capability tombstoned": {nativecore.RegistryCapabilityTombstone, capabilityAction, func(c *saChain) {
+			c.capability.GetCapability().Tombstoned = true
+		}},
+		"version revoked": {nativecore.RegistryVersionRevocation, "sha256:" + strings.Repeat("d1", 32), func(c *saChain) {
+			c.capability.GetCapability().Versions[0].Revoked = true
+		}},
+		"owner Agent tombstoned": {nativecore.RegistryAgentTombstone, agentAction, func(c *saChain) {
+			c.agent.GetAgent().Tombstoned = true
+		}},
+	}
+	for name, change := range retire {
+		for _, proof := range []struct {
+			name string
+			lt   uint64 // 0: no transition in the history
+			ok   bool
+		}{{"after the call", 11, true}, {"before the call", 9, false}, {"unproven", 0, false}} {
+			f := newBuyerFixture(t, defaultLimits())
+			record, err := f.buyer.Prepare(ctx, f.request, f.pkg, digest32(1), digest32(2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.buyer.Call(ctx, record.RequestHash); err != nil {
+				t.Fatal(err)
+			}
+			call := f.land(t, record, 0, true)
+			f.chain.mu.Lock()
+			f.chain.capability.GetCapability().LastActionHash, f.chain.agent.GetAgent().LastActionHash = capabilityAction, agentAction
+			change.edit(f.chain)
+			if proof.lt != 0 {
+				f.chain.transitions = map[nativecore.RegistryTransitionKind]toschain.RegistryTransitionTx{
+					change.kind: {LT: proof.lt, Hash: strings.Repeat("0b", 32), ActionHash: change.action}}
+			}
+			f.chain.mu.Unlock()
+			if call.LT != 10 {
+				t.Fatalf("the call landed at LT %d", call.LT)
+			}
+			report, err := f.buyer.Resolve(ctx, record.RequestHash)
+			if proof.ok && (err != nil || !report.Found || report.Phase != PhaseAdmitted) {
+				t.Errorf("%s %s: %+v %v", name, proof.name, report, err)
+			}
+			if !proof.ok && err == nil {
+				t.Errorf("%s %s: resolved %+v", name, proof.name, report)
+			}
+			next, err := f.buyer.Prepare(ctx, f.request, f.pkg, digest32(3), digest32(4))
+			if err == nil {
+				if called, err := f.buyer.Call(ctx, next.RequestHash); err == nil || called.Phase != PhasePrepared {
+					t.Errorf("%s %s: a new call went ahead: %+v %v", name, proof.name, called, err)
+				}
+			}
 		}
 	}
 }
