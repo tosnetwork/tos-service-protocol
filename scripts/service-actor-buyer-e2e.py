@@ -46,7 +46,8 @@ REGISTRY_BOC = Path(os.environ["REGISTRY_CODE_BOC"])
 ACTOR_CODE_HASH = os.environ["ACTOR_CODE_HASH"]
 BASE_PORT = int(os.environ["E2E_BASE_PORT"])
 RPC_PORTS = [int(port) for port in os.environ["E2E_RPC_PORTS"].split(",")]
-NETWORK_LABEL = os.environ.get("E2E_NETWORK_LABEL", "tos:local-service-actor-buyer-e2e")
+# The registry identity domain names the chain by its global id.
+NETWORK_LABEL = os.environ.get("E2E_NETWORK_LABEL", "tos:global-id:3")
 MASTER_KEY = secrets.token_hex(32)
 NANO = 1_000_000_000
 
