@@ -25,7 +25,28 @@ type frozenVectorSet struct {
 	Signature              frozenSignature              `json:"signature"`
 	AgentRegistration      frozenAgentRegistration      `json:"agent_registration"`
 	CapabilityRegistration frozenCapabilityRegistration `json:"capability_registration"`
+	Revocations            []frozenRevocation           `json:"revocations"`
 	NegativeMutations      []frozenNegativeMutation     `json:"negative_mutations"`
+}
+
+// frozenRevocation is one revocation the contract executed, with the exact
+// inbound body the revoked object's own account received.
+type frozenRevocation struct {
+	Name                       string `json:"name"`
+	ObjectID                   string `json:"object_id"`
+	ContractAddress            string `json:"contract_address"`
+	Generation                 uint64 `json:"generation"`
+	Sequence                   uint64 `json:"sequence"`
+	Predecessor                string `json:"predecessor"`
+	Nonce                      string `json:"nonce"`
+	ActionHash                 string `json:"action_hash"`
+	ActionBOCBase64            string `json:"action_boc_base64"`
+	SignatureSHA256            string `json:"signature_sha256"`
+	SubmissionBodyHash         string `json:"submission_body_hash"`
+	ObjectInboundOpcode        string `json:"object_inbound_opcode"`
+	ObjectInboundBodyBOCBase64 string `json:"object_inbound_body_boc_base64"`
+	StateHashAfter             string `json:"state_hash_after"`
+	TombstoneAfter             bool   `json:"tombstone_after"`
 }
 
 type frozenNetwork struct {
