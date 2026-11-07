@@ -1,6 +1,7 @@
 package serviceactor
 
 import (
+	"bytes"
 	"encoding/base64"
 	"math/big"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
+	tosaddress "github.com/tosnetwork/tosutils-go/address"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
 
@@ -263,4 +265,41 @@ func mustRequest(t *testing.T, call toschain.ActorTransaction) *Request {
 		t.Fatal(err)
 	}
 	return request
+}
+
+func TestLifecycleAcceptsZeroPriceRefundsAndVariableOwners(t *testing.T) {
+	f := newFixture(t)
+	terms := nativecore.TermsOfPolicy(f.evidence.Actor.Data.Policy)
+	terms.PricePerCall = big.NewInt(0)
+	request, err := NewRequest(callFixture(t, f, callNow, terms, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := f.evidence.Actor.Data.Owner
+	if err := request.Apply(transition(toschain.ActorTxExpire, 0, callNow+3600, testOwner), owner); err != nil {
+		t.Fatal(err)
+	}
+	claim := transition(toschain.ActorTxClaim, 0, callNow+3601, testBuyer)
+	claim.Destination = testBuyer
+	if err := request.Apply(claim, owner); err != nil || request.State != StateRefunded {
+		t.Fatalf("a zero-price refund without a principal payout was refused: %v", err)
+	}
+
+	variable := tosaddress.NewAddressVar(0, 3, 72, bytes.Repeat([]byte{0x2d}, 9))
+	ownerCell := cell.BeginCell().MustStoreAddr(variable).EndCell()
+	variableOwner, err := nativecore.DecodeMsgAddressCell(ownerCell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paid, err := NewRequest(callFixture(t, f, callNow, nativecore.TermsOfPolicy(f.evidence.Actor.Data.Policy), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := paid.Apply(transition(toschain.ActorTxRespond, 0, callNow+1, variableOwner.Text()), variableOwner); err != nil {
+		t.Fatalf("a respond from an addr_var owner was refused: %v", err)
+	}
+	other, _ := NewRequest(callFixture(t, f, callNow, nativecore.TermsOfPolicy(f.evidence.Actor.Data.Policy), nil))
+	if err := other.Apply(transition(toschain.ActorTxRespond, 0, callNow+1, testOwner), variableOwner); err == nil {
+		t.Fatal("a respond from another sender was accepted for an addr_var owner")
+	}
 }

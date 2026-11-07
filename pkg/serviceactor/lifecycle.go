@@ -76,11 +76,10 @@ func (r *Request) Apply(transaction toschain.ActorTransaction, owner nativecore.
 	caller := r.Snapshot.Caller.Text()
 	switch transaction.Kind {
 	case toschain.ActorTxRespond:
-		ownerRaw, ok := owner.RawStandard()
 		if r.State != StatePending || now >= r.Snapshot.ResponseDeadline {
 			return fmt.Errorf("respond to request %d outside its response window", r.Snapshot.RequestID)
 		}
-		if !ok || transaction.Sender != ownerRaw {
+		if !owner.IsInternal() || transaction.Sender != owner.Text() {
 			return errors.New("respond was not sent by the actor owner")
 		}
 		if transaction.Signed != r.Snapshot.Terms.HasAttestor {
@@ -96,7 +95,8 @@ func (r *Request) Apply(transaction toschain.ActorTransaction, owner nativecore.
 		if r.State != StateExpired || now >= r.Snapshot.RefundClaimDeadline || transaction.Sender != caller {
 			return fmt.Errorf("claim_refund of request %d is not the caller's claim within the window", r.Snapshot.RequestID)
 		}
-		if !hasPayout(transaction.Payouts, transaction.Destination, price) {
+		// A zero price is admitted by the contract and pays no principal.
+		if price.Sign() > 0 && !hasPayout(transaction.Payouts, transaction.Destination, price) {
 			return errors.New("claim_refund did not pay the price to its destination")
 		}
 		r.State, r.Terminal = StateRefunded, &transaction
