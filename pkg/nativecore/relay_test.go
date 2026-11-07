@@ -2,7 +2,6 @@ package nativecore
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
 	"os"
@@ -49,7 +48,7 @@ func testRelayer(t *testing.T, locator *Locator, sender ContractCellSender, reso
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &Relayer{Locator: locator, Sender: sender, FundingNanoTOS: MinimumRelayFundingNanoTOS, Journal: journal, Resolver: resolver,
+	return &Relayer{Locator: locator, Sender: sender, Verifier: fakeKeys, FundingNanoTOS: MinimumRelayFundingNanoTOS, Journal: journal, Resolver: resolver,
 		Limits: RelaySpendLimits{Window: time.Hour, MaxActionsPerTarget: 100, MaxFundingPerTargetNanoTOS: 100 * MinimumRelayFundingNanoTOS,
 			MaxActionsPerWallet: 1000, MaxFundingPerWalletNanoTOS: 1000 * MinimumRelayFundingNanoTOS},
 		RecoverySafety: MinimumRecoveryRelaySafety}
@@ -61,7 +60,7 @@ func (s *senderStub) SendContractCell(_ context.Context, destination string, _ u
 	return s.sendErr
 }
 
-func signedAgentRegistration(t *testing.T, locator *Locator, policy *nativev1.ControllerPolicyV1, privateKey ed25519.PrivateKey, objectNonce, actionNonce []byte) (*nativev1.SignedNativeActionV1, BuiltAction) {
+func signedAgentRegistration(t *testing.T, locator *Locator, policy *nativev1.ControllerPolicyV1, controller string, objectNonce, actionNonce []byte) (*nativev1.SignedNativeActionV1, BuiltAction) {
 	t.Helper()
 	id, err := DeriveAgentID(locator.Network, objectNonce, policy)
 	if err != nil {
@@ -74,7 +73,7 @@ func signedAgentRegistration(t *testing.T, locator *Locator, policy *nativev1.Co
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := SignAction(privateKey, policy.Controllers[0].KeyId, built)
+	signature, err := SignAction(context.Background(), fakeKeys, controller, built)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +124,7 @@ func TestRelayerMirrorsContractCounterpartySignatureShape(t *testing.T) {
 
 func TestRelayerDeduplicatesCanonicalActionAcrossRequestKeys(t *testing.T) {
 	l := testLocator(t)
-	policy, privateKey := testPolicy(t)
+	policy, controller := testPolicy(t)
 	objectNonce := bytes32('o')
 	id, err := DeriveAgentID(l.Network, objectNonce, policy)
 	if err != nil {
@@ -138,7 +137,7 @@ func TestRelayerDeduplicatesCanonicalActionAcrossRequestKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := SignAction(privateKey, policy.Controllers[0].KeyId, built)
+	signature, err := SignAction(context.Background(), fakeKeys, controller, built)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,9 +162,9 @@ func TestRelayerDeduplicatesCanonicalActionAcrossRequestKeys(t *testing.T) {
 
 func TestRelayerFencesConflictingRegistrationNonceVariants(t *testing.T) {
 	l := testLocator(t)
-	policy, privateKey := testPolicy(t)
-	first, firstBuilt := signedAgentRegistration(t, l, policy, privateKey, bytes32('o'), bytes32('a'))
-	second, secondBuilt := signedAgentRegistration(t, l, policy, privateKey, bytes32('o'), bytes32('b'))
+	policy, controller := testPolicy(t)
+	first, firstBuilt := signedAgentRegistration(t, l, policy, controller, bytes32('o'), bytes32('a'))
+	second, secondBuilt := signedAgentRegistration(t, l, policy, controller, bytes32('o'), bytes32('b'))
 	if firstBuilt.HashString == secondBuilt.HashString {
 		t.Fatal("nonce variants unexpectedly produced one action hash")
 	}
@@ -187,8 +186,8 @@ func TestRelayerFencesConflictingRegistrationNonceVariants(t *testing.T) {
 
 func TestRelayerRejectsExistingRegistrationBeforePaidBroadcast(t *testing.T) {
 	l := testLocator(t)
-	policy, privateKey := testPolicy(t)
-	submission, _ := signedAgentRegistration(t, l, policy, privateKey, bytes32('x'), bytes32('a'))
+	policy, controller := testPolicy(t)
+	submission, _ := signedAgentRegistration(t, l, policy, controller, bytes32('x'), bytes32('a'))
 	id := submission.Action.TargetObjectId
 	state := &nativev1.NativeStateV1{TvmStateHash: "tvm-cell-sha256:" + strings.Repeat("11", 32),
 		State: &nativev1.NativeStateV1_Agent{Agent: &nativev1.AgentStateV1{AgentId: id, Generation: 1, Sequence: 1, Policy: policy}}}
@@ -204,7 +203,7 @@ func TestRelayerRejectsExistingRegistrationBeforePaidBroadcast(t *testing.T) {
 
 func TestRelayerRejectsInvalidCapabilityStateBeforePaidBroadcast(t *testing.T) {
 	l := testLocator(t)
-	policy, privateKey := testPolicy(t)
+	policy, controller := testPolicy(t)
 	ownerNonce := bytes32('o')
 	owner, err := DeriveAgentID(l.Network, ownerNonce, policy)
 	if err != nil {
@@ -227,7 +226,7 @@ func TestRelayerRejectsInvalidCapabilityStateBeforePaidBroadcast(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		signature, err := SignAction(privateKey, policy.Controllers[0].KeyId, built)
+		signature, err := SignAction(context.Background(), fakeKeys, controller, built)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -264,7 +263,7 @@ func TestRelayerRejectsInvalidCapabilityStateBeforePaidBroadcast(t *testing.T) {
 
 func TestCapabilityRegistrationIsAuthorizedByCanonicalOwnerAgent(t *testing.T) {
 	l := testLocator(t)
-	policy, privateKey := testPolicy(t)
+	policy, controller := testPolicy(t)
 	ownerNonce := bytes32('o')
 	owner, err := DeriveAgentID(l.Network, ownerNonce, policy)
 	if err != nil {
@@ -284,7 +283,7 @@ func TestCapabilityRegistrationIsAuthorizedByCanonicalOwnerAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := SignAction(privateKey, policy.Controllers[0].KeyId, built)
+	signature, err := SignAction(context.Background(), fakeKeys, controller, built)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +307,7 @@ func TestCapabilityRegistrationIsAuthorizedByCanonicalOwnerAgent(t *testing.T) {
 
 func TestRelayerResolvesAmbiguousIntentWithoutRebroadcast(t *testing.T) {
 	l := testLocator(t)
-	policy, privateKey := testPolicy(t)
+	policy, controller := testPolicy(t)
 	objectNonce := bytes32('q')
 	id, err := DeriveAgentID(l.Network, objectNonce, policy)
 	if err != nil {
@@ -321,7 +320,7 @@ func TestRelayerResolvesAmbiguousIntentWithoutRebroadcast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := SignAction(privateKey, policy.Controllers[0].KeyId, built)
+	signature, err := SignAction(context.Background(), fakeKeys, controller, built)
 	if err != nil {
 		t.Fatal(err)
 	}

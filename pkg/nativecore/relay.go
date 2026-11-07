@@ -12,6 +12,7 @@ import (
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 // ContractCellSender is a fee-paying transport boundary. Implementations must
@@ -33,8 +34,10 @@ const (
 )
 
 type Relayer struct {
-	Locator        *Locator
-	Sender         ContractCellSender
+	Locator  *Locator
+	Sender   ContractCellSender
+	Verifier mldsa44.Verifier
+	// FundingNanoTOS is attached to every broadcast.
 	FundingNanoTOS uint64
 	Journal        RelayJournal
 	Resolver       RelayStateResolver
@@ -43,8 +46,14 @@ type Relayer struct {
 	Now            func() time.Time
 }
 
+func (r *Relayer) configured() bool {
+	return r != nil && r.Locator != nil && r.Sender != nil && r.Verifier != nil && r.Journal != nil && r.Resolver != nil &&
+		r.FundingNanoTOS >= MinimumRelayFundingNanoTOS && r.FundingNanoTOS <= MaximumRelayFundingNanoTOS &&
+		r.Limits.permitsSingle(r.FundingNanoTOS) && validRecoverySafety(r.RecoverySafety)
+}
+
 func (r *Relayer) CheckReady(ctx context.Context) error {
-	if r == nil || r.Locator == nil || r.Sender == nil || r.Journal == nil || r.Resolver == nil || r.FundingNanoTOS < MinimumRelayFundingNanoTOS || r.FundingNanoTOS > MaximumRelayFundingNanoTOS || !r.Limits.permitsSingle(r.FundingNanoTOS) || !validRecoverySafety(r.RecoverySafety) {
+	if !r.configured() {
 		return errors.New("simplified Native relayer is not configured")
 	}
 	if ready, ok := r.Sender.(interface{ CheckContractCellReady(context.Context) error }); ok {
@@ -68,7 +77,7 @@ func (r *Relayer) SubmitIdempotent(ctx context.Context, submission *nativev1.Sig
 }
 
 func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeActionV1, idempotencyKey string) (string, error) {
-	if r == nil || r.Locator == nil || r.Sender == nil || r.Journal == nil || r.Resolver == nil || r.FundingNanoTOS < MinimumRelayFundingNanoTOS || r.FundingNanoTOS > MaximumRelayFundingNanoTOS || !r.Limits.permitsSingle(r.FundingNanoTOS) || !validRecoverySafety(r.RecoverySafety) || ctx == nil || submission == nil || submission.Action == nil {
+	if !r.configured() || ctx == nil || submission == nil || submission.Action == nil {
 		return "", errors.New("simplified Native relayer is not configured")
 	}
 	built, err := BuildAction(submission.Action)
@@ -83,11 +92,7 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	}
 	actionIdentity := canonicalRelayActionIdentity(submission.Action, built.HashString)
 	stateSlotIdentity := canonicalRelayStateSlotIdentity(submission.Action)
-	digest := sha256.Sum256([]byte(actionIdentity))
-	queryID := binary.BigEndian.Uint64(digest[:8])
-	if queryID == 0 {
-		queryID = 1
-	}
+	queryID := relayQueryID(actionIdentity)
 	bodyBuilder := MessageBody
 	destinationID := submission.Action.TargetObjectId
 	stateInit := ""
@@ -148,10 +153,12 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 		if payload == nil {
 			return "", nativeError(ErrBadAction, "missing Agent registration policy")
 		}
-		if err := VerifyPolicyPossession(payload.InitialPolicy, submission.AuthoritySignatures, built.Hash); err != nil {
+		// Possession proves every controller signed; consent is then the
+		// policy's Agent-control weight, as the Registry computes it.
+		if err := VerifyPolicyPossession(ctx, r.Verifier, payload.InitialPolicy, submission.AuthoritySignatures, built); err != nil {
 			return "", err
 		}
-		if err := VerifySignatures(payload.InitialPolicy, submission.AuthoritySignatures, PurposeAgentControl, false, built.Hash); err != nil {
+		if err := VerifyRegistrationConsent(payload.InitialPolicy); err != nil {
 			return "", err
 		}
 	} else if err := r.verifyLiveAuthorization(ctx, submission, built, targetState); err != nil {
@@ -213,6 +220,17 @@ func canonicalRelayActionIdentity(action *nativev1.NativeActionV1, actionHash st
 		_, _ = hash.Write([]byte(field))
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+// relayQueryID derives the outbound query ID from the canonical action
+// identity, so a caller cannot change the body by changing its request key.
+func relayQueryID(actionIdentity string) uint64 {
+	digest := sha256.Sum256([]byte(actionIdentity))
+	queryID := binary.BigEndian.Uint64(digest[:8])
+	if queryID == 0 {
+		queryID = 1
+	}
+	return queryID
 }
 
 func canonicalRelayStateSlotIdentity(action *nativev1.NativeActionV1) string {
@@ -288,21 +306,21 @@ func (r *Relayer) verifyLiveAuthorization(ctx context.Context, submission *nativ
 	if state == nil || state.GetAgent() == nil || state.GetAgent().AgentId != authorityAgent || state.GetAgent().Tombstoned {
 		return nativeError(ErrBadSignature, "live Native authority is unavailable")
 	}
-	if err := VerifySignatures(state.GetAgent().Policy, submission.AuthoritySignatures, purpose, recovery, built.Hash); err != nil {
+	if err := VerifySignatures(ctx, r.Verifier, state.GetAgent().Policy, submission.AuthoritySignatures, purpose, recovery, built); err != nil {
 		return err
 	}
 	switch payload := action.Payload.(type) {
 	case *nativev1.NativeActionV1_UpdateAgentPolicy:
-		return VerifyPolicyPossession(payload.UpdateAgentPolicy.NewPolicy, submission.CounterpartySignatures, built.Hash)
+		return VerifyPolicyPossession(ctx, r.Verifier, payload.UpdateAgentPolicy.NewPolicy, submission.CounterpartySignatures, built)
 	case *nativev1.NativeActionV1_InitiateRecovery:
-		return VerifyPolicyPossession(payload.InitiateRecovery.NewPolicy, submission.CounterpartySignatures, built.Hash)
+		return VerifyPolicyPossession(ctx, r.Verifier, payload.InitiateRecovery.NewPolicy, submission.CounterpartySignatures, built)
 	case *nativev1.NativeActionV1_TransferCapability:
 		newState, found, err := r.Resolver.ResolveState(ctx, payload.TransferCapability.NewOwnerAgentId, "")
 		if err != nil || !found || newState == nil || newState.GetAgent() == nil ||
 			newState.GetAgent().AgentId != payload.TransferCapability.NewOwnerAgentId || newState.GetAgent().Tombstoned {
 			return nativeError(ErrBadSignature, "new Capability owner authority is unavailable")
 		}
-		return VerifySignatures(newState.GetAgent().Policy, submission.CounterpartySignatures, PurposeCapabilityControl, false, built.Hash)
+		return VerifySignatures(ctx, r.Verifier, newState.GetAgent().Policy, submission.CounterpartySignatures, PurposeCapabilityControl, false, built)
 	}
 	return nil
 }

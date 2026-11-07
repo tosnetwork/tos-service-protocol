@@ -1,7 +1,7 @@
 package nativecore
 
 import (
-	"crypto/ed25519"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +10,9 @@ import (
 	"testing"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
+	"github.com/tosnetwork/tosutils-go/tvm/cell"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -19,6 +22,7 @@ type frozenVectorSet struct {
 	ContractCodeHash       string                       `json:"contract_code_hash"`
 	ContractCodeBOCBase64  string                       `json:"contract_code_boc_base64"`
 	Network                frozenNetwork                `json:"network"`
+	Signature              frozenSignature              `json:"signature"`
 	AgentRegistration      frozenAgentRegistration      `json:"agent_registration"`
 	CapabilityRegistration frozenCapabilityRegistration `json:"capability_registration"`
 	NegativeMutations      []frozenNegativeMutation     `json:"negative_mutations"`
@@ -30,8 +34,15 @@ type frozenNetwork struct {
 	GenesisFileHash string `json:"genesis_file_hash"`
 }
 
+type frozenSignature struct {
+	Suite   string `json:"suite"`
+	Context string `json:"context"`
+	Signing string `json:"signing"`
+}
+
 type frozenController struct {
 	PublicKeyHex string `json:"public_key_hex"`
+	KeyID        string `json:"key_id"`
 	Weight       uint32 `json:"weight"`
 	PurposeMask  uint32 `json:"purpose_mask"`
 	Recovery     bool   `json:"recovery"`
@@ -50,6 +61,7 @@ type frozenExpected struct {
 	ActionHash      string `json:"action_hash"`
 	ActionBOCBase64 string `json:"action_boc_base64"`
 	SignatureHex    string `json:"signature_hex"`
+	SubmissionBody  string `json:"submission_body_hash"`
 }
 
 type frozenAgentRegistration struct {
@@ -77,18 +89,58 @@ type frozenNegativeMutation struct {
 
 func TestFrozenRegistrationVectors(t *testing.T) {
 	vectors := loadFrozenVectors(t)
+	if vectors.ContractCodeHash != "tvm-cell-sha256:d3bb66d0011a1f362dd0be8408ed688f4e740d096a0e2dc2a79fc0ffc628b28a" {
+		t.Fatalf("frozen vectors pin another Registry code: %s", vectors.ContractCodeHash)
+	}
+	if vectors.Signature.Suite != "ML-DSA-44" || vectors.Signature.Context != "TOS-NATIVE-REGISTRY" {
+		t.Fatalf("frozen vectors use another signature scheme: %+v", vectors.Signature)
+	}
+	helper := mldsa44test.RequireTosctl(t)
+	ctx := context.Background()
 	network := vectorNetwork(vectors.Network)
-	policy, key := vectorPolicy(t, vectors.AgentRegistration)
+	policy := vectorPolicy(t, vectors.AgentRegistration)
 
 	agent := vectorAgentAction(t, vectors, network, policy)
 	assertFrozenAction(t, "Agent", agent, vectors.AgentRegistration.Expected)
 	assertFrozenLocation(t, vectors, network, vectors.AgentRegistration.Expected)
-	assertFrozenSignature(t, key, policy.Controllers[0].KeyId, agent, vectors.AgentRegistration.Expected.SignatureHex)
+	agentSignatures := assertFrozenSignature(t, policy, agent, vectors.AgentRegistration.Expected.SignatureHex)
+	assertFrozenSubmission(t, "Agent", MessageBody, agent, agentSignatures, vectors.AgentRegistration.Expected)
+	// The relayer's registration preflight admits the frozen registration.
+	if err := VerifyPolicyPossession(ctx, helper, policy, agentSignatures, agent); err != nil {
+		t.Fatalf("frozen registration possession refused: %v", err)
+	}
+	if err := VerifyRegistrationConsent(policy); err != nil {
+		t.Fatal(err)
+	}
 
 	capability := vectorCapabilityAction(t, vectors, network)
 	assertFrozenAction(t, "Capability", capability, vectors.CapabilityRegistration.Expected)
 	assertFrozenLocation(t, vectors, network, vectors.CapabilityRegistration.Expected)
-	assertFrozenSignature(t, key, policy.Controllers[0].KeyId, capability, vectors.CapabilityRegistration.Expected.SignatureHex)
+	capabilitySignatures := assertFrozenSignature(t, policy, capability, vectors.CapabilityRegistration.Expected.SignatureHex)
+	assertFrozenSubmission(t, "Capability", AgentAuthorizationBody, capability, capabilitySignatures, vectors.CapabilityRegistration.Expected)
+	if err := VerifySignatures(ctx, helper, policy, capabilitySignatures, PurposeCapabilityControl, false, capability); err != nil {
+		t.Fatalf("frozen Capability authorization refused: %v", err)
+	}
+	// A signature over one action never authorizes the other.
+	err := VerifySignatures(ctx, helper, policy, agentSignatures, PurposeCapabilityControl, false, capability)
+	if code, _ := ErrorCodeOf(err); code != ErrBadSignature {
+		t.Fatalf("the Agent registration signature over the Capability action: code %v, %v", code, err)
+	}
+}
+
+type submissionBuilder func(BuiltAction, []*nativev1.SignatureV1, []*nativev1.SignatureV1, uint64) (*cell.Cell, error)
+
+func assertFrozenSubmission(t *testing.T, name string, build submissionBuilder, built BuiltAction,
+	signatures []*nativev1.SignatureV1, expected frozenExpected) {
+	t.Helper()
+	// The executed vectors submit with query ID 1 and no counterparty set.
+	body, err := build(built, signatures, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash := "tvm-cell-sha256:" + hex.EncodeToString(body.Hash()); hash != expected.SubmissionBody {
+		t.Fatalf("%s submission body hash = %s", name, hash)
+	}
 }
 
 func assertFrozenLocation(t *testing.T, vectors frozenVectorSet, network *nativev1.NetworkDomain, expected frozenExpected) {
@@ -109,7 +161,7 @@ func assertFrozenLocation(t *testing.T, vectors frozenVectorSet, network *native
 func TestFrozenNegativeRegistrationMutations(t *testing.T) {
 	vectors := loadFrozenVectors(t)
 	network := vectorNetwork(vectors.Network)
-	policy, _ := vectorPolicy(t, vectors.AgentRegistration)
+	policy := vectorPolicy(t, vectors.AgentRegistration)
 	agent := vectorAgentProto(t, vectors, network, policy)
 	capability := vectorCapabilityProto(t, vectors, network)
 
@@ -160,21 +212,29 @@ func vectorNetwork(network frozenNetwork) *nativev1.NetworkDomain {
 	return &nativev1.NetworkDomain{NetworkId: network.NetworkID, GenesisRootHash: network.GenesisRootHash, GenesisFileHash: network.GenesisFileHash}
 }
 
-func vectorPolicy(t *testing.T, registration frozenAgentRegistration) (*nativev1.ControllerPolicyV1, ed25519.PrivateKey) {
+// vectorPolicy builds the frozen policy from its public keys alone. The
+// vectors also publish the key-generation seed of their deliberately public
+// test controller; this module never derives keys and does not use it.
+func vectorPolicy(t *testing.T, registration frozenAgentRegistration) *nativev1.ControllerPolicyV1 {
 	t.Helper()
-	seed := mustVectorHex(t, registration.PrivateSeedHex)
-	key := ed25519.NewKeyFromSeed(seed)
 	policy := &nativev1.ControllerPolicyV1{Threshold: registration.Policy.Threshold, RecoveryThreshold: registration.Policy.RecoveryThreshold,
 		RecoveryTimelockSeconds: registration.Policy.RecoveryTimelockSeconds}
 	for _, controller := range registration.Policy.Controllers {
 		publicKey := mustVectorHex(t, controller.PublicKeyHex)
-		policy.Controllers = append(policy.Controllers, &nativev1.ControllerV1{KeyId: "ed25519:" + controller.PublicKeyHex,
-			Ed25519PublicKey: publicKey, Weight: controller.Weight, PurposeMask: controller.PurposeMask, Recovery: controller.Recovery})
+		if len(publicKey) != mldsa44.PublicKeySize {
+			t.Fatalf("frozen controller key is %d bytes", len(publicKey))
+		}
+		id, err := mldsa44.KeyID(publicKey)
+		if err != nil || mldsa44.KeyIDText(id) != controller.KeyID {
+			t.Fatalf("frozen key ID %s does not derive from its key", controller.KeyID)
+		}
+		policy.Controllers = append(policy.Controllers, &nativev1.ControllerV1{KeyId: controller.KeyID,
+			Mldsa44PublicKey: publicKey, Weight: controller.Weight, PurposeMask: controller.PurposeMask, Recovery: controller.Recovery})
 	}
-	if len(policy.Controllers) != 1 || !strings.EqualFold(hex.EncodeToString(key.Public().(ed25519.PublicKey)), registration.Policy.Controllers[0].PublicKeyHex) {
-		t.Fatal("frozen private seed does not match controller")
+	if len(policy.Controllers) != 1 || len(registration.PrivateSeedHex) != 64 {
+		t.Fatal("frozen registration must name exactly one public test controller")
 	}
-	return policy, key
+	return policy
 }
 
 func vectorAgentProto(t *testing.T, vectors frozenVectorSet, network *nativev1.NetworkDomain, policy *nativev1.ControllerPolicyV1) *nativev1.NativeActionV1 {
@@ -244,16 +304,28 @@ func assertFrozenAction(t *testing.T, name string, built BuiltAction, expected f
 	}
 }
 
-func assertFrozenSignature(t *testing.T, key ed25519.PrivateKey, keyID string, built BuiltAction, expected string) {
+// assertFrozenSignature verifies the recorded deterministic signature
+// through the real ML-DSA-44 helper. Signing may be hedged, so the vector's
+// signature is data to verify, not bytes to reproduce.
+func assertFrozenSignature(t *testing.T, policy *nativev1.ControllerPolicyV1, built BuiltAction, expected string) []*nativev1.SignatureV1 {
 	t.Helper()
-	signature, err := SignAction(key, keyID, built)
-	if err != nil {
-		t.Fatal(err)
+	signature := mustVectorHex(t, expected)
+	if len(signature) != mldsa44.SignatureSize {
+		t.Fatalf("frozen signature is %d bytes", len(signature))
 	}
-	actual := hex.EncodeToString(signature.Ed25519Signature)
-	if actual != expected {
-		t.Fatalf("signature = %q", actual)
+	signatures := []*nativev1.SignatureV1{{KeyId: policy.Controllers[0].KeyId, Mldsa44Signature: signature}}
+	helper := mldsa44test.RequireTosctl(t)
+	if err := VerifySignatures(context.Background(), helper, policy, signatures, PurposeAgentControl, false, built); err != nil {
+		t.Fatalf("frozen signature refused: %v", err)
 	}
+	flipped := append([]byte(nil), signature...)
+	flipped[len(flipped)-1] ^= 0x80
+	err := VerifySignatures(context.Background(), helper, policy,
+		[]*nativev1.SignatureV1{{KeyId: policy.Controllers[0].KeyId, Mldsa44Signature: flipped}}, PurposeAgentControl, false, built)
+	if code, _ := ErrorCodeOf(err); code != ErrBadSignature {
+		t.Fatalf("flipped frozen signature: code %v, %v", code, err)
+	}
+	return signatures
 }
 
 func applyFrozenMutation(t *testing.T, action *nativev1.NativeActionV1, mutation string) {
