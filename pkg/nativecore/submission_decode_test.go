@@ -106,9 +106,25 @@ func TestSignatureSetDecoderRefusesNonCanonicalSets(t *testing.T) {
 	library := libraryCell(t)
 	shortSignature := storedBytesCell(a.Mldsa44Signature[:len(a.Mldsa44Signature)-1])
 	longSignature := storedBytesCell(append(append([]byte(nil), a.Mldsa44Signature...), 0))
-	unaligned := cell.BeginCell().MustStoreUInt(uint64(len(a.Mldsa44Signature)), 32).
-		MustStoreRef(cell.BeginCell().MustStoreSlice(a.Mldsa44Signature[:126], 126*8).
-			MustStoreRef(cell.BeginCell().MustStoreSlice(a.Mldsa44Signature[126:253], 127*8).EndCell()).EndCell()).EndCell()
+	// All 2,420 bytes, but the first chain cell holds 126 instead of 127: only
+	// the canonical-chain check can refuse it, not the length check.
+	unaligned := func() *cell.Cell {
+		data := a.Mldsa44Signature
+		bounds := []int{0, 126}
+		for bounds[len(bounds)-1] < len(data) {
+			bounds = append(bounds, min(bounds[len(bounds)-1]+127, len(data)))
+		}
+		var chain *cell.Cell
+		for i := len(bounds) - 2; i >= 0; i-- {
+			part := data[bounds[i]:bounds[i+1]]
+			builder := cell.BeginCell().MustStoreSlice(part, uint(len(part))*8)
+			if chain != nil {
+				builder.MustStoreRef(chain)
+			}
+			chain = builder.EndCell()
+		}
+		return cell.BeginCell().MustStoreUInt(uint64(len(data)), 32).MustStoreRef(chain).EndCell()
+	}()
 	for name, value := range map[string]*cell.Cell{
 		"count above entries":  root(3, entry(a, stored(a), entry(b, stored(b), nil, false), false)),
 		"count below entries":  root(1, entry(a, stored(a), entry(b, stored(b), nil, false), false)),
