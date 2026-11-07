@@ -6,6 +6,7 @@
 package buyersdk
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -172,7 +173,7 @@ func (b *ServiceActorBuyer) Prepare(ctx context.Context, request *nativev1.Reque
 	if err != nil {
 		return CallRecord{}, err
 	}
-	packageBytes, err := proto.Marshal(value)
+	packageBytes, err := canonicalPackageBytes(value)
 	if err != nil {
 		return CallRecord{}, err
 	}
@@ -191,6 +192,30 @@ func (b *ServiceActorBuyer) Prepare(ctx context.Context, request *nativev1.Reque
 		return CallRecord{}, err
 	}
 	return record, nil
+}
+
+// canonicalPackageBytes serializes a Quote package for the journal, refusing
+// one that carries fields this protocol does not define at any depth. Unknown
+// fields are not part of the validated offer, and keeping them would let a
+// gateway grow a journal record without bound.
+func canonicalPackageBytes(value *nativev1.QuoteProposalPackageV1) ([]byte, error) {
+	deterministic := proto.MarshalOptions{Deterministic: true}
+	raw, err := deterministic.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	known := &nativev1.QuoteProposalPackageV1{}
+	if err := (proto.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(raw, known); err != nil {
+		return nil, err
+	}
+	stripped, err := deterministic.Marshal(known)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(raw, stripped) {
+		return nil, errors.New("the Quote package carries fields this protocol does not define")
+	}
+	return raw, nil
 }
 
 func (b *ServiceActorBuyer) queryID() (uint64, error) {

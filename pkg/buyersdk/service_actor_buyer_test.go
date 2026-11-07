@@ -19,6 +19,7 @@ import (
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/serviceactor"
 	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -586,5 +587,57 @@ func TestBuyerRechecksExpiryAndBudgetAtTheSendInstant(t *testing.T) {
 	g.buyer.config.Now = func() time.Time { return saNow.Add(5 * time.Minute) }
 	if _, err := g.buyer.Prepare(ctx, g.request, g.pkg, digest32(3), digest32(4)); err == nil {
 		t.Fatal("an ambiguous call's reservation aged out of the window")
+	}
+}
+
+func TestBuyerRefusesAQuotePackageWithUndefinedFields(t *testing.T) {
+	ctx := context.Background()
+	for _, nested := range []bool{false, true} {
+		f := newBuyerFixture(t, defaultLimits())
+		bloated := proto.Clone(f.pkg).(*nativev1.QuoteProposalPackageV1)
+		// Field 1000, length-delimited: a field the protocol does not define,
+		// sized so the record would pass the reader's limit if it were kept.
+		unknown := protowire.AppendTag(nil, 1000, protowire.BytesType)
+		unknown = protowire.AppendBytes(unknown, bytes.Repeat([]byte{0x41}, 800<<10))
+		target := bloated.ProtoReflect()
+		if nested {
+			target = bloated.Proposal.ProtoReflect()
+		}
+		target.SetUnknown(append(target.GetUnknown(), unknown...))
+		if _, err := f.buyer.Prepare(ctx, f.request, bloated, digest32(1), digest32(2)); err == nil ||
+			!strings.Contains(err.Error(), "does not define") {
+			t.Fatalf("nested=%v: a package with undefined fields was prepared: %v", nested, err)
+		}
+		// Nothing was journaled, so the unchanged package still prepares.
+		if _, err := f.buyer.Prepare(ctx, f.request, f.pkg, digest32(1), digest32(2)); err != nil {
+			t.Fatalf("nested=%v: the defined package no longer prepares: %v", nested, err)
+		}
+	}
+}
+
+func TestJournalNeverWritesARecordItCannotRead(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := OpenServiceActorJournal(dir, saNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := CallRecord{Schema: callRecordSchema, RequestHash: strings.Repeat("ab", 32),
+		PackageBase64: strings.Repeat("A", maxCallRecordBytes)}
+	if err := journal.writeUnlocked(record); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("an oversized record was written: %v", err)
+	}
+	after, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("a refused write left %d new entries", len(after)-len(before))
 	}
 }

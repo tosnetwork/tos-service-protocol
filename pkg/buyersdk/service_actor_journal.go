@@ -317,7 +317,7 @@ func (j *ServiceActorJournal) readUnlocked(requestHash string) (CallRecord, erro
 	if err != nil {
 		return record, err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || !osguard.CurrentUserOwns(info) || info.Size() > 1<<20 {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || !osguard.CurrentUserOwns(info) || info.Size() > maxCallRecordBytes {
 		return record, errors.New("journal record is not an owner-private regular file")
 	}
 	raw, err := os.ReadFile(path)
@@ -339,10 +339,19 @@ func (j *ServiceActorJournal) readUnlocked(requestHash string) (CallRecord, erro
 	return record, nil
 }
 
+// maxCallRecordBytes bounds one journal record file. The writer enforces it
+// before publishing, so a record the reader would refuse is never written:
+// startup and budget checks read every record, and one unreadable record
+// would make the whole journal unusable.
+const maxCallRecordBytes = 1 << 20
+
 func (j *ServiceActorJournal) writeUnlocked(record CallRecord) error {
 	raw, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(raw)+1 > maxCallRecordBytes {
+		return fmt.Errorf("journal record is %d bytes, above the %d-byte limit", len(raw)+1, maxCallRecordBytes)
 	}
 	file, err := os.CreateTemp(j.directory, ".call-*.tmp")
 	if err != nil {
