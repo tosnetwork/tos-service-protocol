@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	"github.com/tosnetwork/tos-service-protocol/internal/jsonstrict"
 	"github.com/tosnetwork/tos-service-protocol/pkg/chain"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
@@ -460,5 +461,46 @@ func TestAccountInformationAcceptsTheServedShape(t *testing.T) {
 	var info accountInformation
 	if err := jsonstrict.Decode([]byte(raw), &info); err != nil {
 		t.Fatalf("served account shape refused: %v", err)
+	}
+}
+
+// CheckEndpointGenesis decodes the masterchain info exactly as the node
+// serves it and compares the genesis with the pinned network.
+func TestCheckEndpointGenesisReadsTheServedShape(t *testing.T) {
+	root, file := bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)
+	serve := func(rootHash []byte) string {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+			var call struct {
+				ID uint64 `json:"id"`
+			}
+			_ = json.NewDecoder(request.Body).Decode(&call)
+			block := func(r []byte, seqno int) map[string]any {
+				return map[string]any{"@type": "tos.blockIdExt", "workchain": -1, "shard": "-9223372036854775808", "seqno": seqno,
+					"root_hash": base64.StdEncoding.EncodeToString(r), "file_hash": base64.StdEncoding.EncodeToString(file)}
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(response).Encode(map[string]any{"jsonrpc": "2.0", "id": call.ID, "result": map[string]any{
+				"@type": "blocks.masterchainInfo", "last": block(bytes.Repeat([]byte{9}, 32), 50),
+				"state_root_hash": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)), "init": block(rootHash, 0)}})
+		}))
+		t.Cleanup(server.Close)
+		return server.URL
+	}
+	good, other := serve(root), serve(bytes.Repeat([]byte{0x33}, 32))
+	third := serve(root)
+	adapter, err := New(Config{Network: "tos:genesis-test", Endpoints: []string{good, other, third}, Quorum: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &ServiceActorReader{chain: adapter, network: &nativev1.NetworkDomain{NetworkId: "tos:genesis-test",
+		GenesisRootHash: "sha256:" + hex.EncodeToString(root), GenesisFileHash: "sha256:" + hex.EncodeToString(file)}}
+	if err := reader.CheckEndpointGenesis(context.Background(), good); err != nil {
+		t.Fatalf("the served shape with the pinned genesis was refused: %v", err)
+	}
+	if err := reader.CheckEndpointGenesis(context.Background(), other); err == nil {
+		t.Fatal("an endpoint with another genesis was accepted")
+	}
+	if err := reader.CheckEndpointGenesis(context.Background(), "http://127.0.0.1:1/jsonRPC"); err == nil {
+		t.Fatal("an endpoint outside the configured set was accepted")
 	}
 }
