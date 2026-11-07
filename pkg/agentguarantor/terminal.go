@@ -814,7 +814,7 @@ func verifyPortableStage(stage PortableStageActionAdmissionEvidenceV1, bound *Gu
 		return errors.New("portable Guarantor stage admission is signed by the wrong authority or at the wrong time")
 	}
 	stageBodyDigest, _ := codec.Digest("tos.service.agent-guarantor-stage-action-admission.v1", stage.Body)
-	return VerifyObjectAuthorization(stage.ActionAdmissionAuthorization, "stage-action-admission-evidence", stageBodyDigest,
+	return verifyStageActionAdmissionAuthorizationV1(stage.ActionAdmissionAuthorization, "stage-action-admission-evidence", stageBodyDigest,
 		"tos.service.agent-guarantor-stage-action-admission-signature.v1", authorityResolver, now)
 }
 

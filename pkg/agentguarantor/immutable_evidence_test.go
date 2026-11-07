@@ -7,6 +7,7 @@ import (
 )
 
 type immutableEvidenceTestResolver struct {
+	nativeTestAuthority
 	wire []byte
 	err  error
 }
@@ -19,7 +20,7 @@ func (resolver immutableEvidenceTestResolver) ResolveImmutableGuarantorEvidence(
 	return append([]byte(nil), resolver.wire...), resolver.err
 }
 
-type signatureOnlyEvidenceTestResolver struct{}
+type signatureOnlyEvidenceTestResolver struct{ nativeTestAuthority }
 
 func (signatureOnlyEvidenceTestResolver) ResolveGuarantorAuthority(AuthorityResolutionScopeV1, string, time.Time, []byte) error {
 	return nil

@@ -68,9 +68,18 @@ type AuthorizationStatementV1 struct {
 	ValidationTimeUnix   uint64 `json:"validation_time_unix"`
 }
 
-type NativeEd25519AgentAuthorizationEvidenceV1 struct {
-	PublicKey                string `json:"public_key"`
-	Signature                string `json:"signature"`
+// NativeMLDSA44AgentAuthorizationEvidenceV1 is native Agent authorization
+// evidence: a Pure ML-DSA-44 signature under TOS-AGENT-GUARANTOR-V1 by one of
+// the subject's Native Registry controllers. It carries no public key; the
+// verifier takes the key stored for KeyID in the Agent state that
+// HistoricalAuthorityProof locates.
+type NativeMLDSA44AgentAuthorizationEvidenceV1 struct {
+	// KeyID is mldsa44:<64 lowercase hex>.
+	KeyID string `json:"key_id"`
+	// Signature is mldsa44:<unpadded URL-safe Base64 of 2,420 bytes>.
+	Signature string `json:"signature"`
+	// HistoricalAuthorityProof is the canonical CBOR of
+	// NativeAgentHistoricalAuthorityProofV1.
 	HistoricalAuthorityProof []byte `json:"historical_authority_proof"`
 }
 
@@ -83,10 +92,44 @@ type ProfileQualifiedObjectAuthorizationV1 struct {
 	AuthorizedBodyDigest string                                    `json:"authorized_body_digest"`
 	ValidationTimeUnix   uint64                                    `json:"validation_time_unix"`
 	EvidenceContentType  string                                    `json:"evidence_content_type"`
-	Evidence             NativeEd25519AgentAuthorizationEvidenceV1 `json:"evidence"`
+	Evidence             NativeMLDSA44AgentAuthorizationEvidenceV1 `json:"evidence"`
 }
 
 func (authorization ProfileQualifiedObjectAuthorizationV1) AuthorizationStatement() AuthorizationStatementV1 {
+	return AuthorizationStatementV1{SchemaVersion: SchemaVersionV1,
+		AuthoritySubject: authorization.AuthoritySubject, ProfileURI: authorization.ProfileURI,
+		ProfileVersion: authorization.ProfileVersion, ProfileDigest: authorization.ProfileDigest,
+		AuthorizedObjectKind: authorization.AuthorizedObjectKind,
+		AuthorizedBodyDigest: authorization.AuthorizedBodyDigest,
+		ValidationTimeUnix:   authorization.ValidationTimeUnix}
+}
+
+// ActionAuthorityEd25519EvidenceV1 is the stage-admission evidence of a
+// scalar Action Authority under its Semantic Action Identity scheme. It is
+// never native Agent evidence.
+type ActionAuthorityEd25519EvidenceV1 struct {
+	PublicKey                string `json:"public_key"`
+	Signature                string `json:"signature"`
+	HistoricalAuthorityProof []byte `json:"historical_authority_proof"`
+}
+
+// StageActionAdmissionAuthorizationV1 authorizes a portable stage admission.
+// Its wire fields are those of a profile-qualified authorization, but its
+// evidence is the Action Authority's, so native Agent evidence cannot be
+// placed here.
+type StageActionAdmissionAuthorizationV1 struct {
+	AuthoritySubject     string                           `json:"authority_subject"`
+	ProfileURI           string                           `json:"profile_uri"`
+	ProfileVersion       uint64                           `json:"profile_version"`
+	ProfileDigest        string                           `json:"profile_digest"`
+	AuthorizedObjectKind string                           `json:"authorized_object_kind"`
+	AuthorizedBodyDigest string                           `json:"authorized_body_digest"`
+	ValidationTimeUnix   uint64                           `json:"validation_time_unix"`
+	EvidenceContentType  string                           `json:"evidence_content_type"`
+	Evidence             ActionAuthorityEd25519EvidenceV1 `json:"evidence"`
+}
+
+func (authorization StageActionAdmissionAuthorizationV1) AuthorizationStatement() AuthorizationStatementV1 {
 	return AuthorizationStatementV1{SchemaVersion: SchemaVersionV1,
 		AuthoritySubject: authorization.AuthoritySubject, ProfileURI: authorization.ProfileURI,
 		ProfileVersion: authorization.ProfileVersion, ProfileDigest: authorization.ProfileDigest,
