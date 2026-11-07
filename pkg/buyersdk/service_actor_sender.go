@@ -450,7 +450,7 @@ func (r *execRunner) runWithConfigPath(ctx context.Context, binary string, args 
 	}
 	command := exec.CommandContext(ctx, "/proc/self/fd/3", append(append([]string(nil), args...), "-c", path)...)
 	command.ExtraFiles = []*os.File{executable}
-	command.Env = append([]string(nil), r.environment...)
+	command.Env = r.childEnvironment()
 	output := cappedBuffer{limit: 1 << 20}
 	command.Stdout, command.Stderr = &output, &output
 	if err := command.Start(); err != nil {

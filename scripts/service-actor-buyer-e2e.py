@@ -311,7 +311,7 @@ def acceptance() -> None:
            ("request_hash", "query_id", "terms_hash", "payment_nanotos")})
     request_hash = prepared["request_hash"]
     call_flags = ["--request-hash", request_hash, "--tosctl", str(TOSCTL), "--tosctl-sha256", TOSCTL_SHA256,
-                  "--tosctl-config", str(CONFIG), "--wallet", "buyer", "--vault-url", VAULT_URL]
+                  "--tosctl-config", str(CONFIG), "--wallet", "buyer"]  # VAULT_URL comes from run()'s environment
     called = buyer("call", *call_flags, check=False)
     called_record = last_json(called.stdout) or {}
     record("buyer called through tosctl agent service send with the quoted terms hash",

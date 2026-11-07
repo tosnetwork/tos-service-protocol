@@ -94,4 +94,7 @@ by `refused`.
 
 `cmd/tos-service-buyer` exposes `discover`, `prepare`, `call`, `status` and
 `requests` (the derived request index of `pkg/serviceactorindex`), printing
-JSON.
+JSON. `call` reads the tosctl vault URL, which carries the vault master key,
+from the `VAULT_URL` environment variable and hands it to tosctl only as its
+sole environment variable; there is no command-line flag for it, so it never
+appears in the process table.

@@ -79,3 +79,40 @@ func TestRequestsPassesTheCursorToTheIndex(t *testing.T) {
 		t.Fatalf("the index read the first page instead of continuing after 100: %v", recorder.after)
 	}
 }
+
+// The vault URL carries the vault master key, so call takes it only from
+// VAULT_URL: there is no flag that would put it on the command line, and a
+// leftover --vault-url is refused without being echoed.
+func TestCallReadsTheVaultURLOnlyFromTheEnvironment(t *testing.T) {
+	const masterKey = "6d61737465722d6b65792d6d61737465722d6b65792d6d61737465722d6b6579"
+	secret := "file:///private/vault.json?master_key=" + masterKey
+	t.Setenv("VAULT_URL", secret)
+	if config := callSenderConfig("/bin/tosctl", "", "/config.json", "buyer", nil); config.VaultURL != secret {
+		t.Fatalf("call does not take the vault URL from VAULT_URL: %q", config.VaultURL)
+	}
+	var usage bytes.Buffer
+	previous := usageOutput
+	usageOutput = &usage
+	t.Cleanup(func() { usageOutput = previous })
+
+	var out bytes.Buffer
+	if err := run([]string{"call", "--help"}, &out); err != nil {
+		t.Fatalf("call --help: %v", err)
+	}
+	if !strings.Contains(usage.String(), "-tosctl-config") {
+		t.Fatalf("call --help printed no flag usage: %q", usage.String())
+	}
+	if strings.Contains(usage.String(), "vault") {
+		t.Fatalf("call still documents a vault flag: %q", usage.String())
+	}
+	usage.Reset()
+	err := run([]string{"call", "--vault-url", secret}, &out)
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("a --vault-url flag was not refused: %v", err)
+	}
+	for name, text := range map[string]string{"error": err.Error(), "usage": usage.String(), "stdout": out.String()} {
+		if strings.Contains(text, secret) || strings.Contains(text, masterKey) {
+			t.Fatalf("the refused vault URL was echoed on %s: %q", name, text)
+		}
+	}
+}
