@@ -15,6 +15,7 @@ import (
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"google.golang.org/protobuf/proto"
 )
@@ -70,7 +71,10 @@ func (p *Provider) PublishManifest(ctx context.Context, prepared *PreparedPublic
 }
 
 type Config struct {
-	Client           NativeClient
+	Client NativeClient
+	// Verifier checks controller signatures against the finalized owner
+	// policy before anything is relayed. It is required.
+	Verifier         mldsa44.Verifier
 	Network          *nativev1.NetworkDomain
 	RegistryCodeHash string
 	CallerID         string
@@ -81,6 +85,7 @@ type Config struct {
 
 type Provider struct {
 	client           NativeClient
+	verifier         mldsa44.Verifier
 	network          *nativev1.NetworkDomain
 	registryCodeHash string
 	callerID         string
@@ -98,7 +103,7 @@ type PreparedPublication struct {
 }
 
 func New(config Config) (*Provider, error) {
-	if config.Client == nil || config.Network == nil || config.CallerID == "" ||
+	if config.Client == nil || config.Verifier == nil || config.Network == nil || config.CallerID == "" ||
 		len(config.CallerID) > 256 || config.RegistryCodeHash == "" {
 		return nil, errors.New("invalid provider SDK configuration")
 	}
@@ -133,7 +138,7 @@ func New(config Config) (*Provider, error) {
 	if _, err := nativecore.BuildAction(probe); err != nil {
 		return nil, fmt.Errorf("invalid provider Native domain: %w", err)
 	}
-	return &Provider{client: config.Client, network: proto.Clone(config.Network).(*nativev1.NetworkDomain),
+	return &Provider{client: config.Client, verifier: config.Verifier, network: proto.Clone(config.Network).(*nativev1.NetworkDomain),
 		registryCodeHash: config.RegistryCodeHash, callerID: config.CallerID,
 		pollInterval: config.PollInterval, finalityTimeout: config.FinalityTimeout, now: config.Now}, nil
 }
@@ -192,8 +197,8 @@ func (p *Provider) PublishCapability(ctx context.Context, prepared *PreparedPubl
 		!p.validStateEnvelope(owner) {
 		return nil, errors.New("Capability owner is not a live finalized Agent")
 	}
-	if err := nativecore.VerifySignatures(owner.GetAgent().Policy, signatures,
-		nativecore.PurposeCapabilityControl, false, built.Hash); err != nil {
+	if err := nativecore.VerifySignatures(ctx, p.verifier, owner.GetAgent().Policy, signatures,
+		nativecore.PurposeCapabilityControl, false, built); err != nil {
 		return nil, fmt.Errorf("verify Capability controller signatures: %w", err)
 	}
 	requestContext, err := p.requestContext(idempotencyKey)
