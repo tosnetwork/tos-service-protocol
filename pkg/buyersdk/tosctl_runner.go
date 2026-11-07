@@ -132,12 +132,19 @@ func (r *execRunner) run(ctx context.Context, binary string, args ...string) ([]
 	command := exec.CommandContext(ctx, "/proc/self/fd/4", args...)
 	command.ExtraFiles = []*os.File{config, executable}
 	// Custody must not inherit loader, proxy, HOME, PATH, certificate, or
-	// wallet-selection variables from the long-running OpenFox process.
-	command.Env = append([]string(nil), r.environment...)
+	// wallet-selection variables from the long-running caller process.
+	command.Env = r.childEnvironment()
 	output := cappedBuffer{limit: 1 << 20}
 	command.Stdout, command.Stderr = &output, &output
 	err = command.Run()
 	return output.Bytes(), err
+}
+
+// childEnvironment is the complete environment custody runs with: only the
+// configured VAULT_URL, if any. It is never nil, because exec.Cmd treats a
+// nil Env as "inherit the parent's environment".
+func (r *execRunner) childEnvironment() []string {
+	return append(make([]string, 0, len(r.environment)), r.environment...)
 }
 
 func openAndIdentifyExecutable(path string) (*os.File, executableIdentity, error) {

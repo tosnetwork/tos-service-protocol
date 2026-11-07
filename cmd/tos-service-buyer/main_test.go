@@ -2,11 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/tosnetwork/tos-service-protocol/pkg/buyersdk"
 	"github.com/tosnetwork/tos-service-protocol/pkg/serviceactorindex"
 )
 
@@ -77,5 +81,78 @@ func TestRequestsPassesTheCursorToTheIndex(t *testing.T) {
 	}
 	if recorder.after == nil || *recorder.after != 100 {
 		t.Fatalf("the index read the first page instead of continuing after 100: %v", recorder.after)
+	}
+}
+
+type fixedEndpoints struct{}
+
+func (fixedEndpoints) Endpoints() []string                                { return []string{"https://a.example/jsonRPC"} }
+func (fixedEndpoints) CheckEndpointGenesis(context.Context, string) error { return nil }
+
+// The vault URL carries the vault master key, so call takes it only from
+// VAULT_URL: there is no flag that would put it on the command line, and a
+// leftover --vault-url is refused without being echoed.
+func TestCallReadsTheVaultURLOnlyFromTheEnvironment(t *testing.T) {
+	const masterKey = "6d61737465722d6b65792d6d61737465722d6b65792d6d61737465722d6b6579"
+	secret := "file:///private/vault.json?master_key=" + masterKey
+	t.Setenv("VAULT_URL", secret)
+
+	// The sender call builds hands tosctl exactly VAULT_URL, recorded from
+	// the fake tosctl's exec-time environment.
+	directory := t.TempDir()
+	binary, config := filepath.Join(directory, "tosctl"), filepath.Join(directory, "config.json")
+	script := "#!/bin/sh\ncat /proc/$$/environ > " + directory + "/environ\n" +
+		"printf '%s\\n' \"$@\" > " + directory + "/argv\necho 'OK Service Actor call message submitted to x'\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte(`{"chain_rpc":{"urls":["https://a.example"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(script))
+	sender, err := newCallSender(binary, hex.EncodeToString(digest[:]), config, "buyer", fixedEndpoints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.SendCall(context.Background(), buyersdk.ServiceActorCallIntent{
+		Actor: "0:" + strings.Repeat("21", 32), QueryID: 7}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	environ, err := os.ReadFile(filepath.Join(directory, "environ"))
+	if err != nil {
+		t.Fatalf("custody did not run: %v", err)
+	}
+	if string(environ) != "VAULT_URL="+secret+"\x00" {
+		t.Fatalf("custody environment carries %d bytes, not exactly VAULT_URL from the environment", len(environ))
+	}
+	argv, err := os.ReadFile(filepath.Join(directory, "argv"))
+	if err != nil || len(argv) == 0 || bytes.Contains(argv, []byte(masterKey)) {
+		t.Fatalf("custody argv is missing or carries the vault key: %v", err)
+	}
+
+	var usage bytes.Buffer
+	previous := usageOutput
+	usageOutput = &usage
+	t.Cleanup(func() { usageOutput = previous })
+
+	var out bytes.Buffer
+	if err := run([]string{"call", "--help"}, &out); err != nil {
+		t.Fatalf("call --help: %v", err)
+	}
+	if !strings.Contains(usage.String(), "-tosctl-config") {
+		t.Fatalf("call --help printed no flag usage: %q", usage.String())
+	}
+	if strings.Contains(usage.String(), "vault") {
+		t.Fatalf("call still documents a vault flag: %q", usage.String())
+	}
+	usage.Reset()
+	err = run([]string{"call", "--vault-url", secret}, &out)
+	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatalf("a --vault-url flag was not refused: %v", err)
+	}
+	for name, text := range map[string]string{"error": err.Error(), "usage": usage.String(), "stdout": out.String()} {
+		if strings.Contains(text, secret) || strings.Contains(text, masterKey) {
+			t.Fatalf("the refused vault URL was echoed on %s: %q", name, text)
+		}
 	}
 }
