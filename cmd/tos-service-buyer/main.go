@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,31 @@ import (
 )
 
 const usage = "usage: tos-service-buyer <discover|prepare|call|status|requests> [flags]"
+
+// requestLister is the index surface the requests command pages through.
+type requestLister interface {
+	Requests(actor string, filter serviceactorindex.RequestFilter, pageSize int, after *uint64) (*serviceactorindex.RequestPage, error)
+}
+
+// requestPage reads one page, continuing after the caller's cursor so every
+// request is reachable however many an actor holds.
+func requestPage(index requestLister, actor string, filter serviceactorindex.RequestFilter, pageSize int,
+	after *uint64) (*serviceactorindex.RequestPage, error) {
+	return index.Requests(actor, filter, pageSize, after)
+}
+
+// parseAfterRequestID reads a page cursor: empty for the first page, else a
+// canonical unsigned decimal request ID (no sign, no leading zeros).
+func parseAfterRequestID(value string) (*uint64, error) {
+	if value == "" {
+		return nil, nil
+	}
+	id, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || strconv.FormatUint(id, 10) != value {
+		return nil, fmt.Errorf("--after-request-id must be a canonical unsigned decimal request ID, not %q", value)
+	}
+	return &id, nil
+}
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -50,6 +76,7 @@ func run(arguments []string, out io.Writer) error {
 	var capabilityID, version, packagePath, executionID, inputDigest, requestHash, actor, caller string
 	var tosctlPath, tosctlSHA, tosctlConfig, wallet, vaultURL string
 	var pageSize int
+	var afterRequestID string
 	switch command {
 	case "discover":
 		set.StringVar(&capabilityID, "capability-id", "", "Capability ID")
@@ -72,6 +99,8 @@ func run(arguments []string, out io.Writer) error {
 		set.StringVar(&caller, "caller", "", "optional raw caller address filter")
 		set.StringVar(&requestHash, "request-hash", "", "optional request_hash filter")
 		set.IntVar(&pageSize, "page-size", 50, "page size, at most 100")
+		set.StringVar(&afterRequestID, "after-request-id", "",
+			"continue after this request ID: the previous page's next_after_request_id")
 	default:
 		return errors.New(usage)
 	}
@@ -79,6 +108,10 @@ func run(arguments []string, out io.Writer) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
+		return err
+	}
+	after, err := parseAfterRequestID(afterRequestID)
+	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), common.timeout)
@@ -96,7 +129,7 @@ func run(arguments []string, out io.Writer) error {
 		if _, err := index.Refresh(ctx, actor); err != nil {
 			return err
 		}
-		page, err := index.Requests(actor, serviceactorindex.RequestFilter{Caller: caller, RequestHash: requestHash}, pageSize, nil)
+		page, err := requestPage(index, actor, serviceactorindex.RequestFilter{Caller: caller, RequestHash: requestHash}, pageSize, after)
 		if err != nil {
 			return err
 		}
