@@ -465,6 +465,15 @@ func TestBuyerResolveRefusesInconsistentEvidence(t *testing.T) {
 		"two matching calls": func(f *buyerFixture, record CallRecord) {
 			f.chain.history = append([]toschain.ActorTransaction{f.chain.history[0]}, f.chain.history...)
 		},
+		"illegal transition elsewhere": func(f *buyerFixture, _ CallRecord) {
+			f.chain.history = append([]toschain.ActorTransaction{servicefixture.Transition(toschain.ActorTxRespond, 9, uint32(saNow.Unix()), 30, saOwner)},
+				f.chain.history...)
+		},
+		"aborted twin of the call": func(f *buyerFixture, _ CallRecord) {
+			twin := f.chain.history[0]
+			twin.Kind, twin.Snapshot, twin.ExitCode, twin.LT, twin.Hash = toschain.ActorTxFailed, nil, 1926, 31, strings.Repeat("31", 32)
+			f.chain.history = append([]toschain.ActorTransaction{twin}, f.chain.history...)
+		},
 		"state unexplained": func(f *buyerFixture, _ CallRecord) {
 			f.chain.data, _ = servicefixture.ActorData(saOwner, f.policy, 1, nil, nil)
 		},

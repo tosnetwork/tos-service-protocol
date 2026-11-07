@@ -36,6 +36,7 @@ type chainState struct {
 	history    []toschain.ActorTransaction
 	readErr    error
 	historyErr error
+	staleHead  bool
 	walks      []string
 }
 
@@ -83,6 +84,9 @@ func (s *fakeSession) History(_ context.Context, _ string, anchor *toschain.Acto
 	head := toschain.ActorTxID{}
 	if len(s.history) > 0 {
 		head = toschain.ActorTxID{LT: s.history[0].LT, Hash: s.history[0].Hash}
+	}
+	if s.chain.staleHead {
+		head.LT++
 	}
 	if anchor == nil {
 		return &toschain.ActorHistory{Result: toschain.HistoryComplete, Head: head, Transactions: s.history}, nil
@@ -205,13 +209,18 @@ func TestIndexRefusesInconsistentHistoryAndKeepsThePublishedView(t *testing.T) {
 			chain.history = []toschain.ActorTransaction{servicefixture.Transition(toschain.ActorTxRespond, 9, callNow+1, 13, owner), call0}
 			chain.data = data(t, 1, map[uint64]nativecore.ServiceActorRequestSnapshotV1{0: snap0}, nil)
 		},
+		"history head is not the account head": func() {
+			chain.history = []toschain.ActorTransaction{call0}
+			chain.data = data(t, 1, map[uint64]nativecore.ServiceActorRequestSnapshotV1{0: snap0}, nil)
+			chain.staleHead = true
+		},
 		"read failure":    func() { chain.readErr = errors.New("quorum not reached") },
 		"history failure": func() { chain.historyErr = toschain.ErrHistoryBoundExceeded },
 	}
 	for name, edit := range cases {
 		chain.mu.Lock()
 		chain.checkpoint++
-		chain.readErr, chain.historyErr = nil, nil
+		chain.readErr, chain.historyErr, chain.staleHead = nil, nil, false
 		edit()
 		chain.mu.Unlock()
 		if _, err := index.Refresh(context.Background(), actor); err == nil {
@@ -224,7 +233,7 @@ func TestIndexRefusesInconsistentHistoryAndKeepsThePublishedView(t *testing.T) {
 	}
 	// A checkpoint older than the published one is refused.
 	chain.mu.Lock()
-	chain.checkpoint, chain.readErr, chain.historyErr = 4, nil, nil
+	chain.checkpoint, chain.readErr, chain.historyErr, chain.staleHead = 4, nil, nil, false
 	chain.history, chain.data = []toschain.ActorTransaction{call0}, data(t, 1, map[uint64]nativecore.ServiceActorRequestSnapshotV1{0: snap0}, nil)
 	chain.mu.Unlock()
 	if _, err := index.Refresh(context.Background(), actor); err == nil {
