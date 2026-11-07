@@ -37,5 +37,21 @@ set +e
 wait "$pg"
 status=$?
 set -e
-tail -n 3 "$E2E_WORKDIR/run.log"
-exit "$status"
+# After the run has exited, no artifact may hold the run's vault master key
+# or any master_key value. Only file names are printed, never the value.
+leaks=0
+for artifact in "$E2E_WORKDIR/run.log" "$E2E_WORKDIR/cli-transcript.jsonl" "$E2E_WORKDIR/rpc-transcript.jsonl" "$E2E_WORKDIR/evidence.json"; do
+  [ -f "$artifact" ] || continue
+  if { [ -s "$E2E_WORKDIR/private/scan-secrets" ] && grep -qF -f "$E2E_WORKDIR/private/scan-secrets" "$artifact"; } ||
+     grep -qE 'master_key=[0-9A-Fa-f]{8,}' "$artifact"; then
+    echo "secret found in $artifact" >&2
+    leaks=1
+  fi
+done
+tail -n 2 "$E2E_WORKDIR/run.log"
+if [ "$status" = 0 ] && [ "$leaks" = 0 ]; then
+  echo "ALL PASS"
+  exit 0
+fi
+echo "FAIL"
+exit 1

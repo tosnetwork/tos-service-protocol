@@ -37,6 +37,8 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from service_actor_e2e_redact import redact, redact_value, register_secret, run_logged  # noqa: E402
 SOURCE = Path(os.environ["TOS_SOURCE"])
 BUILD = Path(os.environ["TOS_BUILD"])
 TOSCTL = Path(os.environ["TOSCTL"])
@@ -61,13 +63,16 @@ steps: list[dict] = []
 PRIVATE = WORK / "private"
 CONFIG = PRIVATE / "tosctl-config.json"
 VAULT_URL = f"file://{PRIVATE}/vault.json?master_key={MASTER_KEY}"
+register_secret(MASTER_KEY)
+register_secret(VAULT_URL)
 TRANSCRIPT = WORK / "cli-transcript.jsonl"
 
 
 def record(name: str, ok: bool, detail=None) -> None:
+    detail = redact_value(detail)
     steps.append({"name": name, "pass": bool(ok), "detail": detail,
                   "at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
-    print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  {detail}"), flush=True)
+    print(("PASS " if ok else "FAIL ") + name + ("" if ok else f"  {redact(str(detail))}"), flush=True)
 
 
 def run(command: list[str], *, check: bool = True, timeout: int = 240, env_extra=None) -> subprocess.CompletedProcess:
@@ -75,15 +80,7 @@ def run(command: list[str], *, check: bool = True, timeout: int = 240, env_extra
     env["VAULT_URL"] = VAULT_URL
     if env_extra:
         env.update(env_extra)
-    started = time.time()
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=env)
-    with TRANSCRIPT.open("a") as transcript:
-        transcript.write(json.dumps({"argv": [str(part) for part in command], "exit": result.returncode,
-                                     "seconds": round(time.time() - started, 2), "stdout": result.stdout[-20000:],
-                                     "stderr": result.stderr[-20000:]}) + "\n")
-    if check and result.returncode != 0:
-        raise RuntimeError(f"{' '.join(map(str, command[:6]))} failed ({result.returncode}): {result.stderr[-2000:]}{result.stdout[-2000:]}")
-    return result
+    return run_logged(command, TRANSCRIPT, env=env, check=check, timeout=timeout)
 
 
 def tosctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -109,7 +106,12 @@ def rpc(method: str, **params):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
     request = urllib.request.Request(rpc_endpoints()[0], data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=10) as response:
-        return json.loads(response.read())
+        raw = response.read()
+    # The raw responses are kept so the served shapes (for example storage_stat)
+    # can be checked against the decoders; they carry no secret.
+    with (WORK / "rpc-transcript.jsonl").open("a") as transcript:
+        transcript.write(json.dumps({"method": method, "params": params, "response": redact(raw.decode())}) + "\n")
+    return json.loads(raw)
 
 
 def poll(predicate, timeout: float, interval: float = 2.0):
@@ -374,6 +376,10 @@ async def main() -> int:
         directory.chmod(0o700)
     for state in ("buyer", "wrong-code", "provider-quote"):
         (PRIVATE / state).mkdir(mode=0o700, exist_ok=True)
+    # The launcher scans every artifact for this value after the run exits.
+    secret_file = PRIVATE / "scan-secrets"
+    secret_file.write_text(MASTER_KEY + "\n")
+    secret_file.chmod(0o600)
     TOSCTL_SHA256 = hashlib.sha256(TOSCTL.read_bytes()).hexdigest()
     evidence.update({"schema": "tos.service.service-actor-buyer.local-acceptance.v1",
                      "qualifies_as_public_acceptance": False,
@@ -421,7 +427,7 @@ async def main() -> int:
     evidence["finished_utc"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     passed = bool(steps) and all(step["pass"] for step in steps)
     evidence["result"] = "ALL PASS" if passed else "FAIL"
-    (WORK / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
+    (WORK / "evidence.json").write_text(json.dumps(redact_value(evidence), indent=2) + "\n")
     print(f"evidence: {WORK / 'evidence.json'}")
     print("ALL PASS" if passed else "FAIL")
     return 0 if passed else 1
