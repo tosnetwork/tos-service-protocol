@@ -193,7 +193,7 @@ func TestClassifyActorTransactions(t *testing.T) {
 			t.Errorf("%s was accepted", name)
 		}
 	}
-	if _, err := ClassifyActorTransactions("0:"+strings.Repeat("78", 32), history); err == nil {
+	if _, err := ClassifyActorTransactions("0:"+strings.Repeat("78", 32), []tlb.Transaction{malformed}); err == nil {
 		t.Error("another account's history was accepted")
 	}
 }
