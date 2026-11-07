@@ -87,6 +87,7 @@ func TestSenderPreflightBindsWalletNetworkAndAmount(t *testing.T) {
 		"foreign endpoint":      {validConfig, vetter{endpoints: []string{"https://a.example", "https://b.example"}}, output, intent, nil},
 		"wrong genesis":         {validConfig, vetter{endpoints: good.endpoints, bad: map[string]bool{"https://b.example": true}}, output, intent, nil},
 		"no chain_rpc":          {`{"wallets":{}}`, good, output, intent, nil},
+		"key case differential": {`{"chain_rpc":{"urls":["https://foreign.example"],"URLS":["https://a.example"]}}`, good, output, intent, nil},
 		"empty endpoints":       {`{"chain_rpc":{"urls":["  "],"url":""}}`, good, output, intent, nil},
 		"price beyond 64 bits":  {validConfig, good, output, func() ServiceActorCallIntent { i := intent; i.Price = new(big.Int).Lsh(big.NewInt(1), 64); return i }(), ErrUnsupportedAmount},
 		"payment beyond 64 bit": {validConfig, good, output, func() ServiceActorCallIntent { i := intent; i.Price = new(big.Int).SetUint64(^uint64(0) - 1); return i }(), ErrUnsupportedAmount},
@@ -108,8 +109,27 @@ func TestEffectiveEndpointsMirrorTheCustodyResolution(t *testing.T) {
 	if err != nil || len(duplicate) != 1 {
 		t.Fatalf("duplicates = %v %v", duplicate, err)
 	}
-	if _, err := effectiveChainEndpoints([]byte(`{"chain_rpc":{"urls":[7]}}`)); err == nil {
-		t.Fatal("a malformed entry was accepted")
+	for name, config := range map[string]string{
+		"malformed entry":       `{"chain_rpc":{"urls":[7]}}`,
+		"key case differential": `{"chain_rpc":{"urls":["https://foreign.example"],"URLS":["https://a.example"]}}`,
+		"duplicate urls":        `{"chain_rpc":{"urls":["https://a.example"],"urls":["https://foreign.example"]}}`,
+		"duplicate chain_rpc":   `{"chain_rpc":{"urls":["https://a.example"]},"chain_rpc":{"urls":["https://foreign.example"]}}`,
+		"object without key":    `{"chain_rpc":{"urls":[{"url":"https://a.example"}]}}`,
+		"null urls":             `{"chain_rpc":{"urls":null}}`,
+		"upper-case only":       `{"chain_rpc":{"URLS":["https://a.example"]}}`,
+	} {
+		endpoints, err := effectiveChainEndpoints([]byte(config))
+		if name == "key case differential" {
+			// tosctl ignores URLS and submits through the foreign endpoint;
+			// the preflight must see exactly that.
+			if err != nil || len(endpoints) != 1 || endpoints[0] != "https://foreign.example" {
+				t.Errorf("%s: %v %v", name, endpoints, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%s was accepted: %v", name, endpoints)
+		}
 	}
 }
 

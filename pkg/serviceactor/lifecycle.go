@@ -45,8 +45,7 @@ func NewRequest(call toschain.ActorTransaction) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	caller, ok := snapshot.Caller.RawStandard()
-	if !ok || caller != call.Sender {
+	if snapshot.Caller.Text() != call.Sender {
 		return nil, errors.New("request snapshot caller is not the call sender")
 	}
 	if snapshot.ResponseDeadline != uint64(call.Now)+uint64(snapshot.Terms.ResponseSLA) {
@@ -74,7 +73,7 @@ func (r *Request) Apply(transaction toschain.ActorTransaction, owner nativecore.
 	}
 	now := uint64(transaction.Now)
 	price := r.Snapshot.Terms.PricePerCall
-	caller, _ := r.Snapshot.Caller.RawStandard()
+	caller := r.Snapshot.Caller.Text()
 	switch transaction.Kind {
 	case toschain.ActorTxRespond:
 		ownerRaw, ok := owner.RawStandard()

@@ -218,38 +218,51 @@ func (s *TOSCTLServiceActorSender) SendCall(ctx context.Context, intent ServiceA
 
 // effectiveChainEndpoints mirrors tosctl's resolved_endpoints: the legacy
 // url first, then urls entries (string or {url, api_key}), each trimmed,
-// empty entries dropped and duplicates removed. An empty list, where tosctl
-// would fall back to its built-in endpoint, is refused.
+// empty entries dropped and duplicates removed. Keys are matched exactly and
+// a duplicated key is refused, as tosctl's parser treats them; an empty
+// list, where tosctl would fall back to its built-in endpoint, is refused.
 func effectiveChainEndpoints(config []byte) ([]string, error) {
-	var parsed struct {
-		ChainRPC *struct {
-			URLs []json.RawMessage `json:"urls"`
-			URL  *string           `json:"url"`
-		} `json:"chain_rpc"`
+	top, err := strictObject(config)
+	if err != nil {
+		return nil, fmt.Errorf("tosctl configuration: %w", err)
 	}
-	if err := json.Unmarshal(config, &parsed); err != nil {
-		return nil, errors.New("tosctl configuration is not JSON")
-	}
-	if parsed.ChainRPC == nil {
+	chainRaw, ok := top["chain_rpc"]
+	if !ok {
 		return nil, errors.New("tosctl configuration names no chain_rpc endpoints; it would use its built-in default")
 	}
-	var candidates []string
-	if parsed.ChainRPC.URL != nil {
-		candidates = append(candidates, *parsed.ChainRPC.URL)
+	chainRPC, err := strictObject(chainRaw)
+	if err != nil {
+		return nil, fmt.Errorf("tosctl chain_rpc: %w", err)
 	}
-	for _, entry := range parsed.ChainRPC.URLs {
-		var text string
-		if err := json.Unmarshal(entry, &text); err == nil {
-			candidates = append(candidates, text)
-			continue
+	var candidates []string
+	if raw, ok := chainRPC["url"]; ok && string(raw) != "null" {
+		var legacy string
+		if err := json.Unmarshal(raw, &legacy); err != nil {
+			return nil, errors.New("tosctl chain_rpc url is not a string")
 		}
-		var object struct {
-			URL string `json:"url"`
+		candidates = append(candidates, legacy)
+	}
+	if raw, ok := chainRPC["urls"]; ok {
+		var entries []json.RawMessage
+		if err := json.Unmarshal(raw, &entries); err != nil || entries == nil {
+			return nil, errors.New("tosctl chain_rpc urls is not an array")
 		}
-		if err := json.Unmarshal(entry, &object); err != nil {
-			return nil, errors.New("tosctl chain_rpc entry is neither a URL nor an endpoint object")
+		for _, entry := range entries {
+			var text string
+			if err := json.Unmarshal(entry, &text); err == nil {
+				candidates = append(candidates, text)
+				continue
+			}
+			object, err := strictObject(entry)
+			if err != nil {
+				return nil, errors.New("tosctl chain_rpc entry is neither a URL nor an endpoint object")
+			}
+			var url, key string
+			if json.Unmarshal(object["url"], &url) != nil || json.Unmarshal(object["api_key"], &key) != nil {
+				return nil, errors.New("tosctl chain_rpc endpoint object needs string url and api_key")
+			}
+			candidates = append(candidates, url)
 		}
-		candidates = append(candidates, object.URL)
 	}
 	seen := map[string]bool{}
 	var result []string
@@ -263,6 +276,41 @@ func effectiveChainEndpoints(config []byte) ([]string, error) {
 	}
 	if len(result) == 0 {
 		return nil, errors.New("tosctl configuration names no usable chain_rpc endpoint; it would use its built-in default")
+	}
+	return result, nil
+}
+
+// strictObject decodes one JSON object with exact, unique keys.
+func strictObject(raw []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, errors.New("not a JSON object")
+	}
+	result := map[string]json.RawMessage{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, errors.New("invalid JSON object key")
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, errors.New("invalid JSON object key")
+		}
+		if _, duplicate := result[key]; duplicate {
+			return nil, fmt.Errorf("duplicate key %q", key)
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, errors.New("invalid JSON object value")
+		}
+		result[key] = value
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return nil, errors.New("unterminated JSON object")
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, errors.New("trailing data after JSON object")
 	}
 	return result, nil
 }

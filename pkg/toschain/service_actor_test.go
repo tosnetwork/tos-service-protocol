@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -336,5 +337,115 @@ func TestActorHistoryWalkIsCompleteOrAnchoredNeverPartial(t *testing.T) {
 	})
 	if _, _, err := walkActorHistory(ctx, foreign, testActor, headID(history[0]), nil, 1000); err == nil {
 		t.Fatal("another account's transaction was accepted")
+	}
+}
+
+// sessionServer is a fake finalized endpoint serving one checkpoint: the
+// account's last transaction, its history and a get_attestor_key result
+// whose block identity can be made to differ from the account read.
+func sessionServer(t *testing.T, history []tlb.Transaction, seqno uint64, root, getterRoot []byte) string {
+	t.Helper()
+	block := func(rootHash []byte) map[string]any {
+		return map[string]any{"@type": "tos.blockIdExt", "workchain": -1, "shard": "8000000000000000", "seqno": seqno,
+			"root_hash": base64.StdEncoding.EncodeToString(rootHash), "file_hash": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xf1}, 32))}
+	}
+	node := historyServer(t, history, nil)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var call struct {
+			ID     uint64          `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		raw, _ := io.ReadAll(request.Body)
+		if err := json.Unmarshal(raw, &call); err != nil {
+			http.Error(response, "bad request", http.StatusBadRequest)
+			return
+		}
+		var result any
+		switch call.Method {
+		case "getAddressInformation":
+			result = map[string]any{"@type": "raw.fullAccountState", "block_id": block(root), "state": "active",
+				"last_transaction_id": map[string]string{"@type": "internal.transactionId", "lt": strconv.FormatUint(history[0].LT, 10),
+					"hash": base64.StdEncoding.EncodeToString(history[0].Hash)}}
+		case "getTransactions":
+			var params struct {
+				Address string `json:"address"`
+				Limit   int    `json:"limit"`
+				LT      string `json:"lt"`
+				Hash    string `json:"hash"`
+			}
+			_ = json.Unmarshal(call.Params, &params)
+			var page []rawTransaction
+			if err := node.client.Call(request.Context(), "getTransactions", params, &page); err != nil {
+				http.Error(response, err.Error(), http.StatusBadGateway)
+				return
+			}
+			result = page
+		case "runGetMethod":
+			result = map[string]any{"@type": "smc.runResult", "exit_code": 0, "block_id": block(getterRoot), "stack": []any{[]any{"null"}}}
+		default:
+			http.Error(response, "unknown method", http.StatusBadRequest)
+			return
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(response).Encode(map[string]any{"jsonrpc": "2.0", "id": call.ID, "result": result})
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func testSession(t *testing.T, urls ...string) *ServiceActorSession {
+	t.Helper()
+	adapter, err := New(Config{Network: "tos:session-test", Endpoints: urls, Quorum: len(urls)/2 + 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &ServiceActorSession{reader: &ServiceActorReader{chain: adapter, maxHistory: 1000}, seqno: 42, nodes: adapter.nodes}
+}
+
+func TestSessionVotesOnAnchorMissingAndPinsEveryRead(t *testing.T) {
+	history := linearHistory(t, 5)
+	root := bytes.Repeat([]byte{0xa1}, 32)
+	urls := []string{sessionServer(t, history, 42, root, root), sessionServer(t, history, 42, root, root), sessionServer(t, history, 42, root, root)}
+	session := testSession(t, urls...)
+	ctx := context.Background()
+	if _, err := session.History(ctx, testActor, &ActorTxID{LT: 1, Hash: strings.Repeat("ab", 32)}); !errors.Is(err, ErrHistoryAnchorMissing) {
+		t.Fatalf("a quorum-agreed missing anchor is not ErrHistoryAnchorMissing: %v", err)
+	}
+	full, err := session.History(ctx, testActor, nil)
+	if err != nil || full.Result != HistoryComplete || len(full.Transactions) != 5 {
+		t.Fatalf("full history: %+v %v", full, err)
+	}
+	if _, err := session.GetAttestorKey(ctx, testActor); err != nil {
+		t.Fatalf("getter at the pinned block: %v", err)
+	}
+	other := bytes.Repeat([]byte{0xa2}, 32)
+	forked := testSession(t, sessionServer(t, history, 42, root, other), sessionServer(t, history, 42, root, other),
+		sessionServer(t, history, 42, root, other))
+	if _, err := forked.History(ctx, testActor, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := forked.GetAttestorKey(ctx, testActor); err == nil {
+		t.Fatal("a getter from another block at the same sequence number was accepted")
+	}
+}
+
+// A refund claimed to an addr_var destination classifies with the same
+// destination text as the payout that the claim sends to it.
+func TestVariableAddressDestinationMatchesItsPayout(t *testing.T) {
+	destination := address.NewAddressVar(0, 7, 72, bytes.Repeat([]byte{0x3c}, 9))
+	claim := cell.BeginCell().MustStoreUInt(nativecore.ServiceActorClaimRefundOpcode, 32).MustStoreUInt(2, 64).MustStoreUInt(0, 64).
+		MustStoreAddr(destination).EndCell()
+	out := &tlb.Message{MsgType: tlb.MsgTypeInternal, Msg: &tlb.InternalMessage{IHRDisabled: true,
+		SrcAddr: rawAddress(t, testActor), DstAddr: destination, Amount: tlb.FromNanoTONU(300_000_000),
+		IHRFee: tlb.ZeroCoins, FwdFee: tlb.ZeroCoins, Body: cell.BeginCell().EndCell()}}
+	transaction := buildTransaction(t, 30, 1000, nil, internalIn(t, testBuyer, claim), true, 0, out)
+	got, err := ClassifyActorTransactions(testActor, []tlb.Transaction{transaction})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[0].Destination == "" || !strings.HasPrefix(got[0].Destination, "raw:") || len(got[0].Payouts) != 1 ||
+		got[0].Payouts[0].Destination != got[0].Destination {
+		t.Fatalf("destination %q, payouts %+v", got[0].Destination, got[0].Payouts)
 	}
 }

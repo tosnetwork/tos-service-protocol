@@ -49,6 +49,28 @@ func (a MsgAddressV1) RawStandard() (string, bool) {
 	return fmt.Sprintf("%d:%s", a.Workchain, hex.EncodeToString(a.Address)), true
 }
 
+// Text is a stable text form of the exact stored address: "wc:hex" for an
+// addr_std without anycast, otherwise "raw:<hex bits>/<bit length>".
+func (a MsgAddressV1) Text() string {
+	if raw, ok := a.RawStandard(); ok {
+		return raw
+	}
+	return fmt.Sprintf("raw:%s/%d", hex.EncodeToString(a.Bits), a.BitLen)
+}
+
+// DecodeMsgAddressCell decodes a cell holding exactly one MsgAddress.
+func DecodeMsgAddressCell(value *cell.Cell) (MsgAddressV1, error) {
+	s, err := beginOrdinary(value, "address")
+	if err != nil {
+		return MsgAddressV1{}, err
+	}
+	address, err := loadMsgAddress(s)
+	if err != nil {
+		return address, err
+	}
+	return address, exhausted(s, "address")
+}
+
 // Equal compares stored encodings bit for bit.
 func (a MsgAddressV1) Equal(b MsgAddressV1) bool {
 	return a.BitLen == b.BitLen && bytes.Equal(a.Bits, b.Bits)

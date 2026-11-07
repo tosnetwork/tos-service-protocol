@@ -139,9 +139,15 @@ type fakeSender struct {
 	preflightErr error
 	sendErr      error
 	sends        []ServiceActorCallIntent
+	onPreflight  func()
 }
 
-func (f *fakeSender) Preflight(context.Context, ServiceActorCallIntent) error { return f.preflightErr }
+func (f *fakeSender) Preflight(context.Context, ServiceActorCallIntent) error {
+	if f.onPreflight != nil {
+		f.onPreflight()
+	}
+	return f.preflightErr
+}
 func (f *fakeSender) SendCall(_ context.Context, intent ServiceActorCallIntent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -545,5 +551,40 @@ func TestJournalExcludesConcurrentStarts(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".call-") {
 			t.Fatalf("temporary file %s left behind", filepath.Join(f.dir, entry.Name()))
 		}
+	}
+}
+
+func TestBuyerRechecksExpiryAndBudgetAtTheSendInstant(t *testing.T) {
+	ctx := context.Background()
+	// The Quote expires while admission and the custody preflight run.
+	f := newBuyerFixture(t, defaultLimits())
+	record, err := f.buyer.Prepare(ctx, f.request, f.pkg, digest32(1), digest32(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.sender.onPreflight = func() { f.buyer.config.Now = func() time.Time { return saNow.Add(31 * time.Minute) } }
+	if called, err := f.buyer.Call(ctx, record.RequestHash); err == nil || called.Phase != PhasePrepared || len(f.sender.sends) != 0 {
+		t.Fatalf("a Quote that expired during preflight was sent: %+v %v", called, err)
+	}
+
+	// An outstanding reservation does not age out of the window.
+	limits := defaultLimits()
+	limits.Window, limits.MaxCalls = time.Minute, 1
+	g := newBuyerFixture(t, limits)
+	first, err := g.buyer.Prepare(ctx, g.request, g.pkg, digest32(1), digest32(2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.buyer.config.Now = func() time.Time { return saNow.Add(61 * time.Second) }
+	if _, err := g.buyer.Prepare(ctx, g.request, g.pkg, digest32(3), digest32(4)); err == nil {
+		t.Fatal("a prepared call's reservation aged out of the window")
+	}
+	g.sender.sendErr = errors.New("ambiguous")
+	if _, err := g.buyer.Call(ctx, first.RequestHash); err == nil {
+		t.Fatal("expected an ambiguous send")
+	}
+	g.buyer.config.Now = func() time.Time { return saNow.Add(5 * time.Minute) }
+	if _, err := g.buyer.Prepare(ctx, g.request, g.pkg, digest32(3), digest32(4)); err == nil {
+		t.Fatal("an ambiguous call's reservation aged out of the window")
 	}
 }

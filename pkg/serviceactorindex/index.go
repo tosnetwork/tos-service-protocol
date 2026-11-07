@@ -137,7 +137,7 @@ func (x *Index) Refresh(ctx context.Context, actor string) (*ActorSnapshot, erro
 	for id, request := range requests {
 		hash := hex.EncodeToString(request.Snapshot.RequestHash[:])
 		snapshot.byHash[hash] = append(snapshot.byHash[hash], id)
-		caller, _ := request.Snapshot.Caller.RawStandard()
+		caller := request.Snapshot.Caller.Text()
 		snapshot.byCaller[caller] = append(snapshot.byCaller[caller], id)
 	}
 	for _, ids := range snapshot.byHash {
@@ -230,7 +230,7 @@ func (x *Index) Requests(actor string, filter RequestFilter, pageSize int, after
 		}
 		request := snapshot.requests[id]
 		if filter.Caller != "" {
-			if caller, _ := request.Snapshot.Caller.RawStandard(); caller != filter.Caller {
+			if request.Snapshot.Caller.Text() != filter.Caller {
 				continue
 			}
 		}
@@ -249,7 +249,7 @@ func (x *Index) Requests(actor string, filter RequestFilter, pageSize int, after
 
 func record(snapshot *ActorSnapshot, id uint64, request *serviceactor.Request) RequestRecord {
 	s, terms := request.Snapshot, request.Snapshot.Terms
-	caller, _ := s.Caller.RawStandard()
+	caller := s.Caller.Text()
 	hash := hex.EncodeToString(s.RequestHash[:])
 	result := RequestRecord{RequestID: id, Caller: caller, RequestHash: hash, TermsHash: hex.EncodeToString(s.TermsHash[:]),
 		PriceNanoTOS: terms.PricePerCall.String(), StorageFeeNanoTOS: terms.StorageFee.String(),

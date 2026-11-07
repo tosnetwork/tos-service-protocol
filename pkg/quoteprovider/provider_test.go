@@ -14,25 +14,44 @@ import (
 	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/quoteexchange"
+	"github.com/tosnetwork/tos-service-protocol/pkg/serviceactor"
+	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
+	"google.golang.org/protobuf/proto"
 )
 
-type resolver struct {
-	response *nativev1.ResolveNativeStateResponse
-}
-
-func (r resolver) ResolveNativeState(context.Context, *nativev1.ResolveNativeStateRequest) (*nativev1.ResolveNativeStateResponse, error) {
-	return r.response, nil
-}
-
+// actors is a fake finalized checkpoint holding the Capability and actor.
 type actors struct {
-	policy nativecore.ServiceActorPolicyV1
-	err    error
-	actor  string
+	state      *nativev1.NativeStateV1
+	policy     nativecore.ServiceActorPolicyV1
+	err        error
+	actor      string
+	sessions   int
+	stateDrift bool
 }
 
-func (a *actors) ResolveActorPolicy(_ context.Context, actor string) (nativecore.ServiceActorPolicyV1, error) {
-	a.actor = actor
-	return a.policy, a.err
+func (a *actors) BeginSession(context.Context) (serviceactor.Session, error) {
+	a.sessions++
+	return session{a}, nil
+}
+
+type session struct{ a *actors }
+
+func (s session) Checkpoint() uint64   { return 10 }
+func (s session) ChainTime() time.Time { return time.Unix(2_000_000_000, 0) }
+func (s session) ResolveRegistry(context.Context, string) (*nativev1.NativeStateV1, bool, error) {
+	state := proto.Clone(s.a.state).(*nativev1.NativeStateV1)
+	if s.a.stateDrift {
+		state.Reference.FinalizedCheckpoint = 9
+	}
+	return state, true, nil
+}
+
+func (s session) ReadActor(_ context.Context, actor string) (*toschain.ActorAccount, bool, error) {
+	s.a.actor = actor
+	if s.a.err != nil {
+		return nil, false, s.a.err
+	}
+	return &toschain.ActorAccount{Address: actor, Data: &nativecore.ServiceActorDataV1{Active: true, Policy: s.a.policy}}, true, nil
 }
 
 func setup(t *testing.T) (*Provider, *actors, *nativev1.RequestQuoteProposalRequest, *nativev1.NetworkDomain, time.Time) {
@@ -57,13 +76,13 @@ func setup(t *testing.T) (*Provider, *actors, *nativev1.RequestQuoteProposalRequ
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &actors{policy: nativecore.ServiceActorPolicyV1{PolicyVersion: 2, PricePerCall: big.NewInt(300_000_000),
+	source := &actors{state: state, policy: nativecore.ServiceActorPolicyV1{PolicyVersion: 2, PricePerCall: big.NewInt(300_000_000),
 		StorageFee: big.NewInt(200_000_000), CleanupBounty: big.NewInt(100_000_000), ResponseSLA: 3600, RefundClaimWindow: 3600,
 		OpenAccess: true, MetadataHash: metadata, ProofSchemeHash: nativecore.ServiceActorSoftwareWorkProofScheme,
 		HasAttestor: true, AttestorKeyID: keyID}}
 	now := time.Unix(2_000_000_000, 0)
-	provider, err := New(Config{Resolver: resolver{&nativev1.ResolveNativeStateResponse{Found: true, State: state}}, Network: network,
-		RegistryCodeHash: codeHash, ProviderAgentID: agentID, Actors: source,
+	provider, err := New(Config{Sessions: source, Network: network,
+		RegistryCodeHash: codeHash, ProviderAgentID: agentID,
 		ManifestCBOR: manifestCBOR, Transport: nativecore.TransportBindingV1{SecurityMode: nativecore.TransportHTTPS,
 			MaxRequestBytes: 1 << 20, BaseURL: "https://provider.example"},
 		CallerID: "provider", Now: func() time.Time { return now }, Random: func(value []byte) error {
@@ -93,7 +112,7 @@ func TestProviderQuotesTheFinalizedActorPolicy(t *testing.T) {
 	terms, _ := nativecore.ServiceActorTermsHash(nativecore.TermsOfPolicy(source.policy))
 	if value.Proposal.TermsHash != hex.EncodeToString(terms[:]) || value.Proposal.PolicyVersion != 2 ||
 		value.Proposal.PriceNanotos != "300000000" || value.Proposal.StorageFeeNanotos != "200000000" ||
-		source.actor != "0:"+strings.Repeat("77", 32) {
+		source.actor != "0:"+strings.Repeat("77", 32) || source.sessions != 1 {
 		t.Fatalf("proposal does not carry the actor policy: %+v", value.Proposal)
 	}
 }
@@ -113,7 +132,8 @@ func TestProviderRefusesMisboundActorsAndWrongCapabilities(t *testing.T) {
 		"zero price": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) {
 			a.policy.PricePerCall = big.NewInt(0)
 		},
-		"actor missing": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) { a.err = errors.New("absent") },
+		"actor missing":      func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) { a.err = errors.New("absent") },
+		"another checkpoint": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) { a.stateDrift = true },
 	} {
 		provider, source, request, _, _ := setup(t)
 		edit(provider, source, request)

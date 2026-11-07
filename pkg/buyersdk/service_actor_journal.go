@@ -69,6 +69,7 @@ type CallRecord struct {
 	Phase              CallPhase `json:"phase"`
 	CreatedUnix        int64     `json:"created_unix"`
 	UpdatedUnix        int64     `json:"updated_unix"`
+	SentUnix           int64     `json:"sent_unix,omitempty"`
 	RequestID          *uint64   `json:"request_id,omitempty"`
 	CallTransactionLT  uint64    `json:"call_transaction_lt,omitempty"`
 	CallTransactionHex string    `json:"call_transaction_hash,omitempty"`
@@ -139,16 +140,46 @@ func validHex64(value string) bool {
 	return err == nil && len(raw) == 32 && hex.EncodeToString(raw) == value && !bytes.Equal(raw, make([]byte, 32))
 }
 
-// reserves reports whether a record still holds its budget reservation.
-func (r CallRecord) reserves(now time.Time) bool {
+// reservation reports what a record holds against the budget at now: an
+// outstanding call (prepared and unexpired, sending, submitted or
+// ambiguous) holds its payment whatever its age; an admitted call counts
+// while its send time is inside the window; a refused call holds nothing.
+func (r CallRecord) reservation(now time.Time, window time.Duration) bool {
 	switch r.Phase {
 	case PhaseRefused:
 		return false
 	case PhasePrepared:
 		return uint64(now.Unix()) < r.ExpiresAtUnix
+	case PhaseAdmitted:
+		return r.SentUnix > now.Add(-window).Unix()
 	default:
 		return true
 	}
+}
+
+// fitsBudget checks the limits with candidate counted once, in addition to
+// every other record's reservation.
+func fitsBudget(records []CallRecord, candidate CallRecord, limits ServiceActorLimits, now time.Time) error {
+	payment, ok := new(big.Int).SetString(candidate.PaymentNanoTOS, 10)
+	if !ok || payment.Sign() <= 0 || payment.Cmp(limits.MaxPerCallNanoTOS) > 0 {
+		return errors.New("the call payment exceeds the per-call limit")
+	}
+	total, calls := new(big.Int).Set(payment), 1
+	for _, existing := range records {
+		if existing.RequestHash == candidate.RequestHash || !existing.reservation(now, limits.Window) {
+			continue
+		}
+		amount, ok := new(big.Int).SetString(existing.PaymentNanoTOS, 10)
+		if !ok {
+			return errors.New("a journal record carries an invalid payment")
+		}
+		total.Add(total, amount)
+		calls++
+	}
+	if calls > limits.MaxCalls || total.Cmp(limits.MaxWindowNanoTOS) > 0 {
+		return errors.New("the call exceeds the buyer's window budget")
+	}
+	return nil
 }
 
 // Create stores a new prepared record after checking that its request hash
@@ -160,17 +191,11 @@ func (j *ServiceActorJournal) Create(record CallRecord, limits ServiceActorLimit
 	if !limits.valid() {
 		return errors.New("invalid buyer limits")
 	}
-	payment, ok := new(big.Int).SetString(record.PaymentNanoTOS, 10)
-	if !ok || payment.Sign() <= 0 || payment.Cmp(limits.MaxPerCallNanoTOS) > 0 {
-		return errors.New("the call payment exceeds the per-call limit")
-	}
 	return j.withLock(func() error {
 		records, err := j.recordsUnlocked()
 		if err != nil {
 			return err
 		}
-		total, calls := new(big.Int).Set(payment), 1
-		windowStart := now.Add(-limits.Window).Unix()
 		for _, existing := range records {
 			if existing.RequestHash == record.RequestHash {
 				return errors.New("this request_hash was already used; a request_hash is never reused")
@@ -178,20 +203,48 @@ func (j *ServiceActorJournal) Create(record CallRecord, limits ServiceActorLimit
 			if existing.QueryID == record.QueryID {
 				return errors.New("this query_id was already used")
 			}
-			if existing.CreatedUnix > windowStart && existing.reserves(now) {
-				amount, ok := new(big.Int).SetString(existing.PaymentNanoTOS, 10)
-				if !ok {
-					return errors.New("a journal record carries an invalid payment")
-				}
-				total.Add(total, amount)
-				calls++
-			}
 		}
-		if calls > limits.MaxCalls || total.Cmp(limits.MaxWindowNanoTOS) > 0 {
-			return errors.New("the call exceeds the buyer's window budget")
+		if err := fitsBudget(records, record, limits, now); err != nil {
+			return err
 		}
 		return j.writeUnlocked(record)
 	})
+}
+
+// BeginSend moves a prepared record to sending under the lock, after
+// rechecking at that instant that its Quote is unexpired and that its
+// reservation still fits the limits.
+func (j *ServiceActorJournal) BeginSend(requestHash string, limits ServiceActorLimits, now time.Time) (CallRecord, error) {
+	var result CallRecord
+	if !limits.valid() {
+		return result, errors.New("invalid buyer limits")
+	}
+	err := j.withLock(func() error {
+		records, err := j.recordsUnlocked()
+		if err != nil {
+			return err
+		}
+		record, err := j.readUnlocked(requestHash)
+		if err != nil {
+			return err
+		}
+		if record.Phase != PhasePrepared {
+			return fmt.Errorf("call %s is %s and is never sent again", requestHash, record.Phase)
+		}
+		if uint64(now.Unix()) >= record.ExpiresAtUnix {
+			return errors.New("the Quote has expired")
+		}
+		if err := fitsBudget(records, record, limits, now); err != nil {
+			return err
+		}
+		record.Phase, record.UpdatedUnix, record.SentUnix = PhaseSending, now.Unix(), now.Unix()
+		if err := j.writeUnlocked(record); err != nil {
+			return err
+		}
+		result = record
+		return nil
+	})
+	return result, err
 }
 
 // Transition moves a record from one phase to the next under the lock, so

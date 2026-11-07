@@ -147,19 +147,37 @@ func (s *ServiceActorSession) BlockHashes() (string, string) {
 }
 
 func (s *ServiceActorSession) pin(vote nativeAccountVote) error {
+	return s.pinHashes(vote.BlockRoot, vote.BlockFile)
+}
+
+// pinHashes records the session's block identity on the first read and
+// requires every later read to report the same one.
+func (s *ServiceActorSession) pinHashes(root, file string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if vote.BlockRoot == "" || vote.BlockFile == "" {
-		return errors.New("account read carries no block identity")
+	if root == "" || file == "" {
+		return errors.New("read carries no block identity")
 	}
 	if s.root == "" {
-		s.root, s.file = vote.BlockRoot, vote.BlockFile
+		s.root, s.file = root, file
 		return nil
 	}
-	if s.root != vote.BlockRoot || s.file != vote.BlockFile {
+	if s.root != root || s.file != file {
 		return nativecore.NewProtocolError(nativecore.ErrBadSequence, "reads of one session saw different checkpoint blocks", nil)
 	}
 	return nil
+}
+
+func blockHashes(block blockID) (string, string, error) {
+	root, err := decodeBase64Hash(block.RootHash)
+	if err != nil {
+		return "", "", err
+	}
+	file, err := decodeBase64Hash(block.FileHash)
+	if err != nil {
+		return "", "", err
+	}
+	return "sha256:" + hex.EncodeToString(root), "sha256:" + hex.EncodeToString(file), nil
 }
 
 // ResolveRegistry resolves a Native Registry object at the session checkpoint.
@@ -267,6 +285,13 @@ func (s *ServiceActorSession) actorGetter(ctx context.Context, actor, method str
 	if err != nil {
 		return nil, fmt.Errorf("Service Actor getter %s: %w", method, err)
 	}
+	root, file, err := blockHashes(result.BlockID)
+	if err != nil || result.BlockID.Workchain != -1 {
+		return nil, fmt.Errorf("Service Actor getter %s carries no masterchain block identity", method)
+	}
+	if err := s.pinHashes(root, file); err != nil {
+		return nil, err
+	}
 	return decodeGetterStack(result.Stack)
 }
 
@@ -339,6 +364,8 @@ const (
 	HistoryComplete HistoryResult = "complete"
 	// HistoryAnchorReached reached the requested anchor (excluded).
 	HistoryAnchorReached HistoryResult = "anchor_reached"
+	historyAnchorMissing HistoryResult = "anchor_missing"
+	historyBoundExceeded HistoryResult = "bound_exceeded"
 )
 
 var (
@@ -354,6 +381,8 @@ type ActorHistory struct {
 	Result       HistoryResult      `json:"result"`
 	Head         ActorTxID          `json:"head"`
 	Transactions []ActorTransaction `json:"transactions"`
+	BlockRoot    string             `json:"block_root"`
+	BlockFile    string             `json:"block_file"`
 }
 
 // History walks the actor's finalized transactions from the account's last
@@ -365,12 +394,19 @@ func (s *ServiceActorSession) History(ctx context.Context, actor string, anchor 
 		return nil, err
 	}
 	history, _, err := quorumRead(ctx, s.nodes, s.reader.chain.quorum, func(ctx context.Context, node *rpcNode) (ActorHistory, error) {
-		last, err := finalizedAccountLastTransaction(ctx, node, canonical, s.seqno)
+		last, root, file, err := finalizedActorLastTransaction(ctx, node, canonical, s.seqno)
 		if err != nil {
 			return ActorHistory{}, err
 		}
 		raw, result, err := walkActorHistory(ctx, node, canonical, last, anchor, s.reader.maxHistory)
-		if err != nil {
+		// An absent anchor or an exhausted bound is a finalized fact the
+		// endpoints vote on, not an endpoint failure.
+		switch {
+		case errors.Is(err, ErrHistoryAnchorMissing):
+			return ActorHistory{Result: historyAnchorMissing, BlockRoot: root, BlockFile: file}, nil
+		case errors.Is(err, ErrHistoryBoundExceeded):
+			return ActorHistory{Result: historyBoundExceeded, BlockRoot: root, BlockFile: file}, nil
+		case err != nil:
 			return ActorHistory{}, err
 		}
 		classified, err := ClassifyActorTransactions(canonical, raw)
@@ -383,12 +419,42 @@ func (s *ServiceActorSession) History(ctx context.Context, actor string, anchor 
 		} else if anchor != nil {
 			head = *anchor
 		}
-		return ActorHistory{Result: result, Head: head, Transactions: classified}, nil
+		return ActorHistory{Result: result, Head: head, Transactions: classified, BlockRoot: root, BlockFile: file}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	if err := s.pinHashes(history.BlockRoot, history.BlockFile); err != nil {
+		return nil, err
+	}
+	switch history.Result {
+	case historyAnchorMissing:
+		return nil, ErrHistoryAnchorMissing
+	case historyBoundExceeded:
+		return nil, ErrHistoryBoundExceeded
+	}
 	return &history, nil
+}
+
+// finalizedActorLastTransaction reads the account's last transaction and
+// the block identity of the checkpoint it was read at.
+func finalizedActorLastTransaction(ctx context.Context, node *rpcNode, address string, seqno uint64) (transactionID, string, string, error) {
+	var info accountInformation
+	if err := node.client.Call(ctx, "getAddressInformation", struct {
+		Address string `json:"address"`
+		Seqno   uint64 `json:"seqno"`
+	}{address, seqno}, &info); err != nil {
+		return transactionID{}, "", "", err
+	}
+	if info.BlockID.Type != "tos.blockIdExt" || info.BlockID.Workchain != -1 || info.BlockID.Seqno != seqno ||
+		info.LastTransactionID.Type != "internal.transactionId" {
+		return transactionID{}, "", "", errors.New("Service Actor account response is not checkpoint-finalized")
+	}
+	root, file, err := blockHashes(info.BlockID)
+	if err != nil {
+		return transactionID{}, "", "", err
+	}
+	return info.LastTransactionID, root, file, nil
 }
 
 // walkActorHistory pages backwards with hash and logical-time continuity.
@@ -488,23 +554,6 @@ func actorHistoryPageAt(ctx context.Context, node *rpcNode, address string, star
 		previous = &transactions[len(transactions)-1]
 	}
 	return transactions, nil
-}
-
-// ResolveActorPolicy reads the decoded current policy of an actor at a fresh
-// checkpoint, for quote construction.
-func (r *ServiceActorReader) ResolveActorPolicy(ctx context.Context, actor string) (nativecore.ServiceActorPolicyV1, error) {
-	session, err := r.Begin(ctx)
-	if err != nil {
-		return nativecore.ServiceActorPolicyV1{}, err
-	}
-	account, found, err := session.ReadActor(ctx, actor)
-	if err != nil {
-		return nativecore.ServiceActorPolicyV1{}, err
-	}
-	if !found {
-		return nativecore.ServiceActorPolicyV1{}, errors.New("Service Actor account is not active")
-	}
-	return account.Data.Policy, nil
 }
 
 // CheckEndpointGenesis reads one endpoint, without a quorum, and requires its

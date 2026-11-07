@@ -1,6 +1,6 @@
 // Package quoteprovider constructs non-canonical, complete-preimage Quote
-// Proposal packages from freshly finalized Capability state and the finalized
-// policy of the Service Actor that manifest key 21 names. The proposal is a
+// Proposal packages from the Capability state and the policy of the Service
+// Actor that manifest key 21 names, both read at one finalized checkpoint. The proposal is a
 // convenience; a buyer verifies every rail field itself before calling.
 package quoteprovider
 
@@ -17,25 +17,34 @@ import (
 	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/quoteexchange"
+	"github.com/tosnetwork/tos-service-protocol/pkg/serviceactor"
+	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
 	"google.golang.org/protobuf/proto"
 )
 
-type NativeResolver interface {
-	ResolveNativeState(context.Context, *nativev1.ResolveNativeStateRequest) (*nativev1.ResolveNativeStateResponse, error)
+// SessionSource opens one finalized checkpoint through which the
+// Capability and the actor are both read, so a proposal never combines
+// states that did not coexist.
+type SessionSource interface {
+	BeginSession(ctx context.Context) (serviceactor.Session, error)
 }
 
-// ActorPolicySource reads the decoded current policy of a Service Actor
-// from finalized state.
-type ActorPolicySource interface {
-	ResolveActorPolicy(ctx context.Context, actor string) (nativecore.ServiceActorPolicyV1, error)
+type chainSessions struct{ reader *toschain.ServiceActorReader }
+
+func (c chainSessions) BeginSession(ctx context.Context) (serviceactor.Session, error) {
+	return c.reader.Begin(ctx)
+}
+
+// FromChain adapts a finalized Service Actor reader.
+func FromChain(reader *toschain.ServiceActorReader) SessionSource {
+	return chainSessions{reader: reader}
 }
 
 type Config struct {
-	Resolver          NativeResolver
+	Sessions          SessionSource
 	Network           *nativev1.NetworkDomain
 	RegistryCodeHash  string
 	ProviderAgentID   string
-	Actors            ActorPolicySource
 	ManifestCBOR      []byte
 	Transport         nativecore.TransportBindingV1
 	ProposalTTL       time.Duration
@@ -53,7 +62,7 @@ type Provider struct {
 }
 
 func New(config Config) (*Provider, error) {
-	if config.Resolver == nil || config.Actors == nil || config.Network == nil || config.Network.NetworkId == "" ||
+	if config.Sessions == nil || config.Network == nil || config.Network.NetworkId == "" ||
 		config.RegistryCodeHash == "" || config.ProviderAgentID == "" ||
 		len(config.ManifestCBOR) == 0 || config.CallerID == "" || len(config.CallerID) > 256 {
 		return nil, errors.New("invalid Quote provider configuration")
@@ -105,15 +114,16 @@ func (p *Provider) RequestQuoteProposal(ctx context.Context, request *nativev1.R
 	}
 	call, cancel := context.WithTimeout(ctx, p.config.ResolutionTimeout)
 	defer cancel()
-	resolved, err := p.config.Resolver.ResolveNativeState(call, &nativev1.ResolveNativeStateRequest{Context: &nativev1.RequestContext{
-		RequestId: request.Context.RequestId + "-quote-state", CallerId: p.config.CallerID,
-		DeadlineUnixMillis: p.config.Now().Add(p.config.ResolutionTimeout).UnixMilli()}, ObjectId: request.CapabilityId})
-	if err != nil || resolved == nil || !resolved.Found || resolved.State == nil {
+	session, err := p.config.Sessions.BeginSession(call)
+	if err != nil {
+		return nil, errors.New("finalized state is unavailable")
+	}
+	state, found, err := session.ResolveRegistry(call, request.CapabilityId)
+	if err != nil || !found || state == nil {
 		return nil, errors.New("Quote Capability is not available from finalized state")
 	}
-	state := resolved.State
 	capability := state.GetCapability()
-	if !proto.Equal(state.Network, p.config.Network) || state.Reference == nil || state.Reference.FinalizedCheckpoint == 0 ||
+	if !proto.Equal(state.Network, p.config.Network) || state.Reference == nil || state.Reference.FinalizedCheckpoint != session.Checkpoint() ||
 		state.Reference.ContractCodeHash != p.config.RegistryCodeHash || capability == nil || capability.Tombstoned ||
 		capability.CapabilityId != request.CapabilityId || capability.OwnerAgentId != p.config.ProviderAgentID {
 		return nil, errors.New("Quote Capability does not match provider authority")
@@ -128,10 +138,11 @@ func (p *Provider) RequestQuoteProposal(ctx context.Context, request *nativev1.R
 		return nil, errors.New("Quote Capability version is not active")
 	}
 	actor := "0:" + hex.EncodeToString(p.settlement.ActorAccountID)
-	policy, err := p.config.Actors.ResolveActorPolicy(call, actor)
-	if err != nil {
-		return nil, errors.New("Quote Service Actor policy is not available from finalized state")
+	account, found, err := session.ReadActor(call, actor)
+	if err != nil || !found || account.Data == nil || !account.Data.Active {
+		return nil, errors.New("Quote Service Actor is not active in finalized state")
 	}
+	policy := account.Data.Policy
 	attestor, err := mldsa44.ParseKeyIDText(p.settlement.AttestorKey)
 	if err != nil || !policy.HasAttestor || policy.AttestorKeyID != attestor {
 		return nil, errors.New("Quote Service Actor attestor differs from manifest key 21")

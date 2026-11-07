@@ -280,14 +280,16 @@ func (b *ServiceActorBuyer) Call(ctx context.Context, requestHash string) (CallR
 	if err := b.config.Sender.Preflight(ctx, intent); err != nil {
 		return record, err
 	}
-	record, err = b.config.Journal.Transition(requestHash, []CallPhase{PhasePrepared}, func(r *CallRecord) error {
-		r.Phase, r.UpdatedUnix = PhaseSending, b.config.Now().Unix()
-		return nil
-	})
+	sending, err := b.config.Journal.BeginSend(requestHash, b.config.Limits, b.config.Now())
 	if err != nil {
 		return record, err
 	}
-	sendErr := b.config.Sender.SendCall(ctx, intent)
+	record = sending
+	// The Quote's expiry bounds custody too: a send still running at expiry
+	// is cancelled and recorded as ambiguous.
+	sendContext, cancel := context.WithDeadline(ctx, time.Unix(int64(record.ExpiresAtUnix), 0))
+	defer cancel()
+	sendErr := b.config.Sender.SendCall(sendContext, intent)
 	next := PhaseSubmitted
 	switch {
 	case errors.Is(sendErr, ErrCallNotStarted):

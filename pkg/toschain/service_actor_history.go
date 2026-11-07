@@ -139,10 +139,11 @@ func classifyActorTransaction(actor string, transaction *tlb.Transaction) (Actor
 		return result, nil
 	}
 	in := transaction.IO.In.AsInternal()
-	if in.SrcAddr == nil || in.SrcAddr.Type() != address.StdAddress {
-		return result, errors.New("inbound message has no internal sender")
+	sender, err := addressText(in.SrcAddr)
+	if err != nil {
+		return result, errors.New("inbound message has no decodable sender")
 	}
-	result.Sender = in.SrcAddr.StringRaw()
+	result.Sender = sender
 	result.ValueNano = in.Amount.Nano().String()
 	if in.Bounced {
 		result.Kind = ActorTxBounced
@@ -192,11 +193,7 @@ func classifyActorTransaction(actor string, transaction *tlb.Transaction) (Actor
 		result.Kind, result.RequestID = ActorTxExpire, decoded.RequestID
 	case nativecore.ServiceActorClaimRefundOpcode:
 		result.Kind, result.RequestID = ActorTxClaim, decoded.RequestID
-		destination, ok := decoded.Destination.RawStandard()
-		if !ok {
-			destination = "raw:" + hex.EncodeToString(decoded.Destination.Bits)
-		}
-		result.Destination = destination
+		result.Destination = decoded.Destination.Text()
 	case nativecore.ServiceActorSweepOpcode:
 		result.Kind, result.RequestID = ActorTxSweep, decoded.RequestID
 	default:
@@ -237,7 +234,11 @@ func actorOutputs(actor string, transaction *tlb.Transaction) ([]ActorPayout, []
 				return nil, nil, errors.New("internal out-message has no destination")
 			}
 			empty := out.Body == nil || out.Body.BitsSize() == 0 && out.Body.RefsNum() == 0
-			payouts = append(payouts, ActorPayout{Destination: out.DstAddr.StringRaw(), AmountNano: out.Amount.Nano().String(),
+			destination, err := addressText(out.DstAddr)
+			if err != nil {
+				return nil, nil, errors.New("internal out-message destination does not decode")
+			}
+			payouts = append(payouts, ActorPayout{Destination: destination, AmountNano: out.Amount.Nano().String(),
 				Bounce: out.Bounce, EmptyBody: empty})
 		case tlb.MsgTypeExternalOut:
 			out := message.AsExternalOut()
@@ -251,4 +252,25 @@ func actorOutputs(actor string, transaction *tlb.Transaction) ([]ActorPayout, []
 		}
 	}
 	return payouts, snapshots, nil
+}
+
+// addressText renders an address in nativecore's exact text form, so that
+// addresses from message headers and from message bodies compare equal
+// exactly when their encodings are equal.
+func addressText(value *address.Address) (string, error) {
+	if value == nil {
+		return "", errors.New("missing address")
+	}
+	builder := cell.BeginCell()
+	if err := builder.StoreAddr(value); err != nil {
+		return "", err
+	}
+	decoded, err := nativecore.DecodeMsgAddressCell(builder.EndCell())
+	if err != nil {
+		return "", err
+	}
+	if !decoded.IsInternal() {
+		return "", errors.New("not an internal address")
+	}
+	return decoded.Text(), nil
 }
