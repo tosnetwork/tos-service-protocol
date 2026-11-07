@@ -1,7 +1,6 @@
 package referencecodec
 
 import (
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -9,76 +8,104 @@ import (
 	"testing"
 )
 
-func referencePolicy(t *testing.T, width int) Policy {
-	t.Helper()
+// referenceKey is a deterministic 1,312-byte stand-in for an ML-DSA-44 key.
+// Policy encoding never parses the key, so any bytes of the right length
+// exercise the layout.
+func referenceKey(i int) string {
+	var key []byte
+	for block := 0; len(key) < publicKeyBytes; block++ {
+		digest := sha256.Sum256([]byte(fmt.Sprintf("reference-policy-width-%d-%d", i, block)))
+		key = append(key, digest[:]...)
+	}
+	return hex.EncodeToString(key[:publicKeyBytes])
+}
+
+func referenceController(i int) Controller {
+	key := referenceKey(i)
+	raw, _ := hex.DecodeString(key)
+	id := controllerKeyID(raw)
+	return Controller{PublicKeyHex: key, KeyID: "mldsa44:" + hex.EncodeToString(id[:]), Weight: 1, PurposeMask: 15, Recovery: true}
+}
+
+func referencePolicy(width int) Policy {
 	policy := Policy{Threshold: 1, RecoveryThreshold: 1}
 	for i := range width {
-		seed := sha256.Sum256([]byte(fmt.Sprintf("reference-policy-width-%d", i)))
-		public, ok := ed25519.NewKeyFromSeed(seed[:]).Public().(ed25519.PublicKey)
-		if !ok {
-			t.Fatal("invalid test key")
-		}
-		policy.Controllers = append(policy.Controllers, Controller{PublicKeyHex: hex.EncodeToString(public),
-			Weight: 1, PurposeMask: 15, Recovery: true})
+		policy.Controllers = append(policy.Controllers, referenceController(i))
 	}
 	return policy
 }
 
-// The Native Registry admits at most 20 controllers and refuses a wider
+// The Native Registry admits at most 8 controllers and refuses a wider
 // policy with exit code 2215.
 func TestReferencePolicyWidthMatchesTheRegistry(t *testing.T) {
-	if _, err := policyCell(referencePolicy(t, 20)); err != nil {
+	if _, err := policyCell(referencePolicy(8)); err != nil {
 		t.Fatalf("a policy at the Registry width was refused: %v", err)
 	}
-	_, err := policyCell(referencePolicy(t, 21))
+	_, err := policyCell(referencePolicy(9))
 	if code, ok := ErrorCodeOf(err); !ok || code != 2215 {
 		t.Fatalf("a policy one controller too wide: code %d, %v", code, err)
 	}
 }
 
-// The keys the Registry contract refuses with exit code 2214, and neighbours
-// it admits. The all-zero key is refused earlier as an invalid controller.
-func TestReferencePolicyRefusesWeakControllerKeys(t *testing.T) {
-	weak := []string{
-		"0100000000000000000000000000000000000000000000000000000000000000",
-		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
-		"0000000000000000000000000000000000000000000000000000000000000080",
-		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
-		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
-		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
-		"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-		"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-		"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-		"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-		"0100000000000000000000000000000000000000000000000000000000000080",
-		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-	}
-	admitted := []string{
-		"ebffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-		"ecfffffffffffffffffffffffffffffffffffffffffffffffeffffffffffff7f",
-		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7e",
-		"0200000000000000000000000000000000000000000000000000000000000000",
-		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc84",
-		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fb",
-	}
-	withKey := func(key string) Policy {
-		policy := referencePolicy(t, 1)
-		policy.Controllers = append(policy.Controllers, Controller{PublicKeyHex: key, Weight: 1, PurposeMask: 15, Recovery: true})
-		return policy
-	}
-	for _, key := range admitted {
-		if _, err := policyCell(withKey(key)); err != nil {
-			t.Fatalf("admissible key %s refused: %v", key, err)
+func TestReferencePolicyRefusesInconsistentControllers(t *testing.T) {
+	for name, mutate := range map[string]func(*Controller){
+		"short key":       func(c *Controller) { c.PublicKeyHex = c.PublicKeyHex[:64] },
+		"long key":        func(c *Controller) { c.PublicKeyHex += "00" },
+		"uppercase key":   func(c *Controller) { c.PublicKeyHex = strings.ToUpper(c.PublicKeyHex) },
+		"other key ID":    func(c *Controller) { c.KeyID = referenceController(7).KeyID },
+		"Ed25519 key ID":  func(c *Controller) { c.KeyID = "ed25519:" + strings.TrimPrefix(c.KeyID, "mldsa44:") },
+		"missing key ID":  func(c *Controller) { c.KeyID = "" },
+		"recovery flag":   func(c *Controller) { c.Recovery = false },
+		"unknown purpose": func(c *Controller) { c.PurposeMask = 16 },
+	} {
+		policy := referencePolicy(2)
+		mutate(&policy.Controllers[0])
+		if _, err := policyCell(policy); err == nil {
+			t.Fatalf("%s accepted", name)
+		} else if code, _ := ErrorCodeOf(err); code != 2207 {
+			t.Fatalf("%s: code %d", name, code)
 		}
 	}
-	for _, key := range weak {
-		_, err := policyCell(withKey(key))
-		if code, ok := ErrorCodeOf(err); !ok || code != 2214 {
-			t.Fatalf("weak key %s: code %d, %v", key, code, err)
-		}
+	duplicate := referencePolicy(1)
+	duplicate.Controllers = append(duplicate.Controllers, duplicate.Controllers[0])
+	if _, err := policyCell(duplicate); err == nil {
+		t.Fatal("duplicate controller accepted")
 	}
-	if _, err := policyCell(withKey(strings.Repeat("00", 32))); err == nil {
-		t.Fatal("the all-zero key was admitted")
+	isolated := referencePolicy(1)
+	isolated.Controllers[0].PurposeMask, isolated.Controllers[0].Recovery = 1|4, true
+	if _, err := policyCell(isolated); err == nil {
+		t.Fatal("a threshold no delegation or Capability controller can reach was accepted")
+	}
+}
+
+func TestReferenceStoredMaterialChain(t *testing.T) {
+	data := make([]byte, signatureBytes)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	stored := storedMaterial(data)
+	s := stored.MustBeginParse()
+	if s.MustLoadUInt(32) != signatureBytes || s.RefsNum() != 1 {
+		t.Fatal("stored wrapper layout")
+	}
+	cells, total := 0, 0
+	for current := s.MustLoadRef(); ; {
+		bits := current.BitsLeft()
+		total += int(bits / 8)
+		cells++
+		if current.RefsNum() == 0 {
+			if bits/8 != signatureBytes%chainCellBytes {
+				t.Fatalf("final chain cell holds %d bytes", bits/8)
+			}
+			break
+		}
+		if bits != chainCellBytes*8 {
+			t.Fatalf("chain cell %d holds %d bits", cells, bits)
+		}
+		current.MustLoadSlice(bits)
+		current = current.MustLoadRef()
+	}
+	if total != signatureBytes || cells != signatureBytes/chainCellBytes+1 {
+		t.Fatalf("chain carries %d bytes in %d cells", total, cells)
 	}
 }

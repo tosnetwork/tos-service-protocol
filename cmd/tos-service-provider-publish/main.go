@@ -18,7 +18,9 @@ import (
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 	"github.com/tosnetwork/tos-service-protocol/internal/osguard"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativeclient"
+	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/providersdk"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -31,6 +33,7 @@ type options struct {
 	network, genesisRoot, genesisFile, registryHash, owner string
 	manifestPath, objectNonce, actionNonce, signedAction   string
 	capabilityRetry, manifestRetry                         string
+	tosctl, tosctlSHA256                                   string
 	insecure                                               bool
 }
 
@@ -65,6 +68,8 @@ func run(arguments []string) error {
 	set.StringVar(&value.signedAction, "signed-action", "", "tos-service-wallet SignedNativeActionV1 JSON")
 	set.StringVar(&value.capabilityRetry, "capability-idempotency-key", "", "durable Capability publication retry key")
 	set.StringVar(&value.manifestRetry, "manifest-idempotency-key", "", "durable manifest publication retry key")
+	set.StringVar(&value.tosctl, "tosctl", "", "absolute path of the tosctl binary that verifies ML-DSA-44 signatures")
+	set.StringVar(&value.tosctlSHA256, "tosctl-sha256", "", "lowercase hex SHA-256 of that tosctl binary")
 	if err := set.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -95,8 +100,15 @@ func run(arguments []string) error {
 		return err
 	}
 	defer client.Close()
+	// Controller signatures are verified against the finalized owner policy
+	// before anything is relayed; the helper only verifies here, it holds no
+	// keys for this command.
+	verifier, err := mldsa44.NewTosctl(mldsa44.TosctlConfig{Binary: value.tosctl, SHA256: value.tosctlSHA256})
+	if err != nil {
+		return err
+	}
 	network := &nativev1.NetworkDomain{NetworkId: value.network, GenesisRootHash: value.genesisRoot, GenesisFileHash: value.genesisFile}
-	provider, err := providersdk.New(providersdk.Config{Client: client, Network: network,
+	provider, err := providersdk.New(providersdk.Config{Client: client, Verifier: verifier, Network: network,
 		RegistryCodeHash: value.registryHash, CallerID: value.caller, PollInterval: time.Second, FinalityTimeout: 10 * time.Minute})
 	if err != nil {
 		return err
@@ -150,7 +162,7 @@ func readSignedAction(path string) (*nativev1.SignedNativeActionV1, error) {
 	}
 	var result nativev1.SignedNativeActionV1
 	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(raw, &result); err != nil ||
-		result.Action == nil || len(result.AuthoritySignatures) == 0 || len(result.AuthoritySignatures) > 16 {
+		result.Action == nil || len(result.AuthoritySignatures) == 0 || len(result.AuthoritySignatures) > nativecore.MaxSignatures {
 		return nil, errors.New("invalid signed Capability action")
 	}
 	return &result, nil

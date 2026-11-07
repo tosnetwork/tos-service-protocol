@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 const maxWireBytes = 2 << 20
@@ -18,7 +20,7 @@ type Receiver interface {
 
 // Handler verifies a packet before invoking the application receiver. It has
 // no catalog, relay, or Gateway state and accepts only one bounded JSON body.
-func Handler(resolver AgentResolver, guard *ReplayGuard, receiver Receiver) http.Handler {
+func Handler(verifier mldsa44.Verifier, resolver AgentResolver, guard *ReplayGuard, receiver Receiver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.Header.Get("Content-Type") != "application/json" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -30,7 +32,7 @@ func Handler(resolver AgentResolver, guard *ReplayGuard, receiver Receiver) http
 			return
 		}
 		packet, err := DecodeJSON(body)
-		if err != nil || Verify(resolver, guard, packet, time.Now()) != nil {
+		if err != nil || Verify(request.Context(), verifier, resolver, guard, packet, time.Now()) != nil {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}

@@ -21,7 +21,11 @@ enum NativeErrorCodeV1 {
   NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION = 2211;
   NATIVE_ERROR_CODE_V1_TIMELOCK = 2212;
   NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE = 2213;
-  NATIVE_ERROR_CODE_V1_WEAK_KEY = 2214;
+  // 2214 (formerly WEAK_KEY, an Ed25519 weak-key refusal) is retired: the
+  // current Native Registry contract does not emit it and the number is never
+  // reused.
+  reserved 2214;
+  reserved "NATIVE_ERROR_CODE_V1_WEAK_KEY";
   NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE = 2215;
   NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST = 2300;
   NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND = 2301;
@@ -43,10 +47,33 @@ message NativeErrorV1 { NativeErrorCodeV1 code = 1; string identifier = 2; Retry
 message NetworkDomain { string network_id = 1; string genesis_root_hash = 2; string genesis_file_hash = 3; }
 message ChainReference { int32 workchain = 1; string account = 2; uint64 logical_time = 3; string transaction_hash = 4; string contract_code_hash = 5; uint64 finalized_checkpoint = 6; }
 message TOSAccountAddressV1 { int32 workchain = 1; bytes account_id = 2; }
-// key_id is exactly ed25519:<lowercase 32-byte-public-key-hex>.
-message ControllerV1 { string key_id = 1; bytes ed25519_public_key = 2; uint32 weight = 3; uint32 purpose_mask = 4; bool recovery = 5; }
+message ControllerV1 {
+  // Exactly mldsa44:<64 lowercase hex key_id>, where
+  // key_id = SHA-256("TOS-PQ-CONSENSUS-KEY-v1" || 0x01 0x00 || public_key).
+  // It must equal the id derived from mldsa44_public_key; Native v1 does not
+  // depend on an off-chain alias table to reconstruct controller identity.
+  string key_id = 1;
+  // ML-DSA-44 (FIPS 204) public key, exactly 1,312 bytes.
+  bytes mldsa44_public_key = 2;
+  reserved "ed25519_public_key";
+  uint32 weight = 3;
+  uint32 purpose_mask = 4;
+  bool recovery = 5;
+}
+// controllers holds 1..8 entries in strictly ascending key_id order; a wider
+// policy is refused with POLICY_TOO_WIDE.
 message ControllerPolicyV1 { uint32 threshold = 1; uint32 recovery_threshold = 2; uint64 recovery_timelock_seconds = 3; repeated ControllerV1 controllers = 4; }
-message SignatureV1 { string key_id = 1; bytes ed25519_signature = 2; }
+message SignatureV1 {
+  // Exactly mldsa44:<64 lowercase hex key_id> of a controller in the policy
+  // the signature is checked against.
+  string key_id = 1;
+  // Pure ML-DSA-44 (FIPS 204, no pre-hash) signature, exactly 2,420 bytes,
+  // over the 32 raw bytes of the action cell hash with context string
+  // "TOS-NATIVE-REGISTRY". Signing may be hedged, so the operation is
+  // identified by its action hash, never by these bytes.
+  bytes mldsa44_signature = 2;
+  reserved "ed25519_signature";
+}
 message CapabilityVersionV1 { string version = 1; string manifest_digest = 2; bool revoked = 3; }
 message RegisterAgentV1 { bytes object_nonce = 1; ControllerPolicyV1 initial_policy = 2; }
 message UpdateAgentPolicyV1 { ControllerPolicyV1 new_policy = 1; }
@@ -69,6 +96,8 @@ message NativeActionV1 {
     TransferCapabilityV1 transfer_capability = 28; RevokeCapabilityV1 revoke_capability = 29;
   }
 }
+// Each signature list holds at most 8 entries in strictly ascending key_id
+// order.
 message SignedNativeActionV1 { NativeActionV1 action = 1; repeated SignatureV1 authority_signatures = 2; repeated SignatureV1 counterparty_signatures = 3; reserved 4, 5; }
 message AgentStateV1 { string agent_id = 1; uint64 generation = 2; uint64 sequence = 3; string last_action_hash = 4; ControllerPolicyV1 policy = 5; repeated string delegation_digests = 6; uint64 recovery_execute_after_unix_seconds = 7; string recovery_initiation_action_hash = 8; ControllerPolicyV1 recovery_policy = 9; bool tombstoned = 10; string recovery_initiating_policy_hash = 11; }
 message CapabilityStateV1 { string capability_id = 1; uint64 generation = 2; uint64 sequence = 3; string last_action_hash = 4; string owner_agent_id = 5; reserved 6; repeated CapabilityVersionV1 versions = 7; bool tombstoned = 8; }

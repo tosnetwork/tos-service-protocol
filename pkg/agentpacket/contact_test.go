@@ -1,53 +1,69 @@
 package agentpacket
 
 import (
-	"crypto/ed25519"
+	"context"
+	"strings"
 	"testing"
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
-func TestContactCardIsFinalizedAndTimeBound(t *testing.T) {
-	private := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	agent := "agent_" + repeatHex("ab")
-	network := &nativev1.NetworkDomain{NetworkId: "test", GenesisRootHash: "sha256:" + repeatHex("01"), GenesisFileHash: "sha256:" + repeatHex("02")}
-	now := time.Unix(1000, 0)
-	card, err := SignContactAt(ContactCard{AgentID: agent, Network: network, Endpoint: "https://agent.example/packet", Capabilities: []string{"cap_" + repeatHex("cd")}, ExpiresAtUnix: 1500}, private, now)
+func fakeCard(t *testing.T, controller string, card ContactCard, now time.Time) ContactCard {
+	t.Helper()
+	card.KeyID = keyIDOf(t, fakeKeys.KeyID(controller))
+	signed, err := SignContactAt(context.Background(), fakeKeys, controller, card, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := &nativev1.AgentStateV1{AgentId: agent, Policy: &nativev1.ControllerPolicyV1{Controllers: []*nativev1.ControllerV1{{Ed25519PublicKey: private.Public().(ed25519.PublicKey)}}}}
-	if err := VerifyContact(resolver{agent: state}, card, now); err != nil {
+	return signed
+}
+
+func TestContactCardIsFinalizedAndTimeBound(t *testing.T) {
+	agent := "agent_" + repeatHex("ab")
+	network := &nativev1.NetworkDomain{NetworkId: "test", GenesisRootHash: "sha256:" + repeatHex("01"), GenesisFileHash: "sha256:" + repeatHex("02")}
+	now := time.Unix(1000, 0)
+	card := fakeCard(t, "card", ContactCard{AgentID: agent, Network: network, Endpoint: "https://agent.example/packet", Capabilities: []string{"cap_" + repeatHex("cd")}, ExpiresAtUnix: 1500}, now)
+	states := resolver{agent: fakeAgent(agent, "card")}
+	ctx := context.Background()
+	if err := VerifyContact(ctx, fakeKeys, states, card, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyContactForNetwork(resolver{agent: state}, &nativev1.NetworkDomain{NetworkId: "other", GenesisRootHash: network.GenesisRootHash, GenesisFileHash: network.GenesisFileHash}, card, now); err == nil {
+	if err := VerifyContactForNetwork(ctx, fakeKeys, states, &nativev1.NetworkDomain{NetworkId: "other", GenesisRootHash: network.GenesisRootHash, GenesisFileHash: network.GenesisFileHash}, card, now); err == nil {
 		t.Fatal("cross-network Contact Card accepted")
 	}
-	if err := VerifyContact(resolver{agent: state}, card, time.Unix(1500, 0)); err == nil {
+	if err := VerifyContact(ctx, fakeKeys, states, card, time.Unix(1500, 0)); err == nil {
 		t.Fatal("expired Contact Card accepted")
 	}
+	stranger := fakeCard(t, "stranger", ContactCard{AgentID: agent, Network: network, Endpoint: "https://agent.example/packet", ExpiresAtUnix: 1500}, now)
+	if err := VerifyContact(ctx, fakeKeys, states, stranger, now); err == nil {
+		t.Fatal("Contact Card by a key outside the finalized policy accepted")
+	}
 	card.Endpoint = "http://public.example/packet"
-	if err := VerifyContact(resolver{agent: state}, card, now); err == nil {
+	if err := VerifyContact(ctx, fakeKeys, states, card, now); err == nil {
 		t.Fatal("plaintext public endpoint accepted")
 	}
 }
 
 func TestContactCardJSONRoundTripIsStrict(t *testing.T) {
-	private := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
-	card, err := SignContactAt(ContactCard{AgentID: "agent_" + repeatHex("ef"), Network: &nativev1.NetworkDomain{NetworkId: "test", GenesisRootHash: "sha256:" + repeatHex("01"), GenesisFileHash: "sha256:" + repeatHex("02")}, Endpoint: "https://agent.example", ExpiresAtUnix: 1500}, private, time.Unix(1000, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
+	card := fakeCard(t, "card", ContactCard{AgentID: "agent_" + repeatHex("ef"), Network: &nativev1.NetworkDomain{NetworkId: "test", GenesisRootHash: "sha256:" + repeatHex("01"), GenesisFileHash: "sha256:" + repeatHex("02")}, Endpoint: "https://agent.example", ExpiresAtUnix: 1500}, time.Unix(1000, 0))
 	raw, err := EncodeContactJSON(card)
 	if err != nil {
 		t.Fatal(err)
 	}
 	decoded, err := DecodeContactJSON(raw)
-	if err != nil || decoded.AgentID != card.AgentID || string(decoded.Signature) != string(card.Signature) {
+	if err != nil || decoded.AgentID != card.AgentID || string(decoded.Signature) != string(card.Signature) || decoded.KeyID != card.KeyID {
 		t.Fatalf("decoded=%+v err=%v", decoded, err)
 	}
-	if _, err := DecodeContactJSON(append(raw, []byte("{}")...)); err == nil {
-		t.Fatal("trailing Contact Card JSON accepted")
+	if ContactKey(decoded) != card.AgentID+":"+fakeKeys.KeyID("card") {
+		t.Fatalf("contact key = %s", ContactKey(decoded))
+	}
+	for _, mutation := range [][]byte{
+		append(raw, []byte("{}")...),
+		[]byte(strings.Replace(string(raw), `"key_id":"mldsa44:`, `"key_id":"ed25519:`, 1)),
+	} {
+		if _, err := DecodeContactJSON(mutation); err == nil {
+			t.Fatal("non-strict Contact Card JSON accepted")
+		}
 	}
 }

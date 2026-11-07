@@ -1,34 +1,42 @@
 // Command tos-service-wallet reviews and signs tos_service_v1 action JSON.
+// Controller keys are ML-DSA-44 keys held in tosctl custody; the command
+// names controllers and never sees private key material.
 package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativewallet"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-type pathsFlag []string
+type namesFlag []string
 
-func (p *pathsFlag) String() string { return fmt.Sprint([]string(*p)) }
-func (p *pathsFlag) Set(value string) error {
+func (p *namesFlag) String() string { return fmt.Sprint([]string(*p)) }
+func (p *namesFlag) Set(value string) error {
 	*p = append(*p, value)
 	return nil
 }
 
 func main() {
-	var authorityPaths, counterpartyPaths pathsFlag
+	var authority, counterparty namesFlag
 	actionPath := flag.String("action", "", "absolute path to NativeActionV1 JSON")
 	outputPath := flag.String("output", "", "optional output path; stdout when empty")
-	flag.Var(&authorityPaths, "authority-key", "owner-private Ed25519 seed file; repeat for multisig")
-	flag.Var(&counterpartyPaths, "counterparty-key", "owner-private acceptance/new-policy seed file; repeat for multisig")
+	tosctl := flag.String("tosctl", "", "absolute path of the tosctl binary that holds the controller keys")
+	tosctlSHA256 := flag.String("tosctl-sha256", "", "lowercase hex SHA-256 of that tosctl binary")
+	tosctlConfig := flag.String("tosctl-config", "", "absolute path of the tosctl configuration")
+	flag.Var(&authority, "authority-controller", "tosctl registry controller name; repeat for multisig")
+	flag.Var(&counterparty, "counterparty-controller", "tosctl registry controller for acceptance or new-policy possession; repeat for multisig")
 	flag.Parse()
 
 	action, err := loadAction(*actionPath)
@@ -39,6 +47,16 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
+	if len(authority) == 0 {
+		fail(errors.New("at least one authority controller is required"))
+	}
+	// The vault URL carries custody credentials, so it is read from the
+	// environment tosctl itself uses rather than from a command-line flag.
+	signer, err := mldsa44.NewTosctl(mldsa44.TosctlConfig{Binary: *tosctl, SHA256: *tosctlSHA256,
+		ConfigPath: *tosctlConfig, VaultURL: os.Getenv("VAULT_URL")})
+	if err != nil {
+		fail(err)
+	}
 	reviewJSON, _ := json.MarshalIndent(review, "", "  ")
 	_, _ = fmt.Fprintf(os.Stderr, "%s\n", reviewJSON)
 	_, _ = fmt.Fprintf(os.Stderr, "Type the complete action hash to sign: ")
@@ -46,26 +64,15 @@ func main() {
 		fail(err)
 	}
 
-	authority, err := loadKeys(authorityPaths)
-	if err != nil {
-		fail(err)
-	}
-	defer closeKeys(authority)
-	counterparty, err := loadKeys(counterpartyPaths)
-	if err != nil {
-		fail(err)
-	}
-	defer closeKeys(counterparty)
-	if len(authority) == 0 {
-		fail(errors.New("at least one authority key is required"))
-	}
-	authoritySignatures, err := nativewallet.Sign(built, authority)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	authoritySignatures, err := nativewallet.Sign(ctx, signer, built, authority)
 	if err != nil {
 		fail(err)
 	}
 	var counterpartySignatures []*nativev1.SignatureV1
 	if len(counterparty) != 0 {
-		counterpartySignatures, err = nativewallet.Sign(built, counterparty)
+		counterpartySignatures, err = nativewallet.Sign(ctx, signer, built, counterparty)
 		if err != nil {
 			fail(err)
 		}
@@ -116,25 +123,6 @@ func loadAction(path string) (*nativev1.NativeActionV1, error) {
 		return nil, err
 	}
 	return &action, nil
-}
-
-func loadKeys(paths []string) ([]*nativewallet.Key, error) {
-	keys := make([]*nativewallet.Key, 0, len(paths))
-	for _, path := range paths {
-		key, err := nativewallet.LoadKey(path)
-		if err != nil {
-			closeKeys(keys)
-			return nil, err
-		}
-		keys = append(keys, key)
-	}
-	return keys, nil
-}
-
-func closeKeys(keys []*nativewallet.Key) {
-	for _, key := range keys {
-		key.Close()
-	}
 }
 
 func fail(err error) {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/tosnetwork/tos-service-protocol/internal/osguard"
 	"github.com/tosnetwork/tos-service-protocol/pkg/chainactionpublisher"
 	"github.com/tosnetwork/tos-service-protocol/pkg/dnsalias"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
 )
@@ -39,6 +41,15 @@ type nativeV1GatewayConfig struct {
 	RecoverySafetySeconds uint64                                   `json:"recovery_relay_safety_seconds"`
 	StateDirectory        string                                   `json:"state_directory"`
 	Sender                chainactionpublisher.TosctlBackendConfig `json:"sender"`
+	// SignatureHelper is the pinned tosctl binary that verifies ML-DSA-44
+	// controller signatures before any relay spend. It verifies only and is
+	// given no custody.
+	SignatureHelper nativeV1SignatureHelper `json:"signature_helper"`
+}
+
+type nativeV1SignatureHelper struct {
+	Binary string `json:"binary"`
+	SHA256 string `json:"sha256"`
 }
 
 func buildNativeV1(path string) (*nativecore.Relayer, *toschain.SimplifiedNativeResolver, *dnsalias.Resolver, func(), error) {
@@ -91,6 +102,10 @@ func buildNativeV1(path string) (*nativecore.Relayer, *toschain.SimplifiedNative
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
+	verifier, err := mldsa44.NewTosctl(mldsa44.TosctlConfig{Binary: config.SignatureHelper.Binary, SHA256: config.SignatureHelper.SHA256})
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("tos_service_v1 signature helper: %w", err)
+	}
 	stateInfo, err := os.Lstat(config.StateDirectory)
 	if err != nil || !stateInfo.IsDir() || stateInfo.Mode().Perm()&0o077 != 0 {
 		return nil, nil, nil, nil, errors.New("Native state directory must be owner-private")
@@ -113,7 +128,7 @@ func buildNativeV1(path string) (*nativecore.Relayer, *toschain.SimplifiedNative
 	limits := nativecore.RelaySpendLimits{Window: time.Duration(config.RelayWindowSeconds) * time.Second,
 		MaxActionsPerTarget: config.MaxActionsPerTarget, MaxFundingPerTargetNanoTOS: config.MaxFundingPerTarget,
 		MaxActionsPerWallet: config.MaxActionsPerWallet, MaxFundingPerWalletNanoTOS: config.MaxFundingPerWallet}
-	relayer := &nativecore.Relayer{Locator: locator, Sender: sender, FundingNanoTOS: config.FundingNanoTOS,
+	relayer := &nativecore.Relayer{Locator: locator, Sender: sender, Verifier: verifier, FundingNanoTOS: config.FundingNanoTOS,
 		Journal: journal, Resolver: resolver, Limits: limits,
 		RecoverySafety: time.Duration(config.RecoverySafetySeconds) * time.Second}
 	dnsChain, err := toschain.NewDNSResolver(chain)

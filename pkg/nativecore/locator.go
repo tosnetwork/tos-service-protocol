@@ -33,8 +33,11 @@ func NewLocator(network *nativev1.NetworkDomain, workchain int32, codeBOCBase64,
 	if _, err := domainCell(network); err != nil {
 		return nil, err
 	}
-	if workchain < -128 || workchain > 127 {
-		return nil, errors.New("Native workchain is outside addr_std range")
+	// Registry objects exist in workchain 0 only; the contract refuses to run
+	// anywhere else, so an address derived for another workchain names no
+	// Registry object.
+	if workchain != 0 {
+		return nil, errors.New("the Native Registry exists in workchain 0 only")
 	}
 	raw, err := base64.StdEncoding.DecodeString(codeBOCBase64)
 	if err != nil {

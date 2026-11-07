@@ -25,7 +25,7 @@ type PortableNetwork struct {
 }
 type PortableController struct {
 	KeyID       string `json:"key_id"`
-	PublicKey   string `json:"public_key"`
+	PublicKey   string `json:"mldsa44_public_key"`
 	Weight      uint32 `json:"weight"`
 	PurposeMask uint32 `json:"purpose_mask"`
 	Recovery    bool   `json:"recovery"`
@@ -119,7 +119,7 @@ func projectPolicy(value interface {
 		if controller == nil {
 			return PortablePolicy{}, errors.New("nil Native controller")
 		}
-		result[i] = PortableController{KeyID: controller.KeyId, PublicKey: "ed25519:" + hex.EncodeToString(controller.Ed25519PublicKey), Weight: controller.Weight, PurposeMask: controller.PurposeMask, Recovery: controller.Recovery}
+		result[i] = PortableController{KeyID: controller.KeyId, PublicKey: hex.EncodeToString(controller.Mldsa44PublicKey), Weight: controller.Weight, PurposeMask: controller.PurposeMask, Recovery: controller.Recovery}
 	}
 	return PortablePolicy{Threshold: value.GetThreshold(), RecoveryThreshold: value.GetRecoveryThreshold(), RecoveryTimelockSeconds: value.GetRecoveryTimelockSeconds(), Controllers: result}, nil
 }

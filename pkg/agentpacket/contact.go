@@ -2,17 +2,19 @@ package agentpacket
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 // ContactCard is a signed, non-canonical locator. It can be exchanged through
@@ -23,8 +25,11 @@ type ContactCard struct {
 	Endpoint      string
 	Capabilities  []string
 	ExpiresAtUnix uint64
-	PublicKey     ed25519.PublicKey
-	Signature     []byte
+	// KeyID is the key ID of the Agent controller that signs the card. It is
+	// part of the signed preimage; the key itself is read from the finalized
+	// Agent policy.
+	KeyID     [mldsa44.KeyIDSize]byte
+	Signature []byte
 }
 
 type wireContactCard struct {
@@ -36,7 +41,7 @@ type wireContactCard struct {
 	Endpoint      string   `json:"endpoint"`
 	Capabilities  []string `json:"capabilities,omitempty"`
 	ExpiresAtUnix uint64   `json:"expires_at_unix"`
-	PublicKeyHex  string   `json:"public_key_hex"`
+	KeyID         string   `json:"key_id"`
 	SignatureHex  string   `json:"signature_hex"`
 }
 
@@ -46,7 +51,7 @@ func EncodeContactJSON(card ContactCard) ([]byte, error) {
 	}
 	value := wireContactCard{Schema: "tos.service.agent-contact.v1", AgentID: card.AgentID, NetworkID: card.Network.NetworkId,
 		GenesisRoot: card.Network.GenesisRootHash, GenesisFile: card.Network.GenesisFileHash, Endpoint: card.Endpoint,
-		Capabilities: card.Capabilities, ExpiresAtUnix: card.ExpiresAtUnix, PublicKeyHex: hex.EncodeToString(card.PublicKey), SignatureHex: hex.EncodeToString(card.Signature)}
+		Capabilities: card.Capabilities, ExpiresAtUnix: card.ExpiresAtUnix, KeyID: mldsa44.KeyIDText(card.KeyID), SignatureHex: hex.EncodeToString(card.Signature)}
 	return json.Marshal(value)
 }
 
@@ -64,48 +69,53 @@ func DecodeContactJSON(raw []byte) (ContactCard, error) {
 	if value.Schema != "tos.service.agent-contact.v1" {
 		return ContactCard{}, errors.New("unsupported Contact Card schema")
 	}
-	publicKey, err := hex.DecodeString(value.PublicKeyHex)
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return ContactCard{}, errors.New("invalid Contact Card public key")
+	keyID, err := mldsa44.ParseKeyIDText(value.KeyID)
+	if err != nil {
+		return ContactCard{}, errors.New("invalid Contact Card key ID")
 	}
 	signature, err := hex.DecodeString(value.SignatureHex)
-	if err != nil || len(signature) != ed25519.SignatureSize {
+	if err != nil || len(signature) != mldsa44.SignatureSize || value.SignatureHex != hex.EncodeToString(signature) {
 		return ContactCard{}, errors.New("invalid Contact Card signature")
 	}
-	card := ContactCard{AgentID: value.AgentID, Network: &nativev1.NetworkDomain{NetworkId: value.NetworkID, GenesisRootHash: value.GenesisRoot, GenesisFileHash: value.GenesisFile}, Endpoint: value.Endpoint, Capabilities: value.Capabilities, ExpiresAtUnix: value.ExpiresAtUnix, PublicKey: ed25519.PublicKey(publicKey), Signature: signature}
+	card := ContactCard{AgentID: value.AgentID, Network: &nativev1.NetworkDomain{NetworkId: value.NetworkID, GenesisRootHash: value.GenesisRoot, GenesisFileHash: value.GenesisFile}, Endpoint: value.Endpoint, Capabilities: value.Capabilities, ExpiresAtUnix: value.ExpiresAtUnix, KeyID: keyID, Signature: signature}
 	if err := validateContact(card, true, time.Unix(int64(card.ExpiresAtUnix-1), 0)); err != nil {
 		return ContactCard{}, err
 	}
 	return card, nil
 }
 
-func SignContact(card ContactCard, privateKey ed25519.PrivateKey) (ContactCard, error) {
-	return SignContactAt(card, privateKey, time.Now())
+// SignContact asks custody to sign the card with the named controller, whose
+// key ID the card must already carry in KeyID.
+func SignContact(ctx context.Context, signer mldsa44.Signer, controller string, card ContactCard) (ContactCard, error) {
+	return SignContactAt(ctx, signer, controller, card, time.Now())
 }
 
 // SignContactAt is deterministic-clock support for tests and controlled
 // issuance services. Production callers should use SignContact.
-func SignContactAt(card ContactCard, privateKey ed25519.PrivateKey, now time.Time) (ContactCard, error) {
+func SignContactAt(ctx context.Context, signer mldsa44.Signer, controller string, card ContactCard, now time.Time) (ContactCard, error) {
 	card.Signature = nil
-	if now.IsZero() || len(privateKey) != ed25519.PrivateKeySize {
-		return ContactCard{}, errors.New("invalid Contact Card signing key")
+	if now.IsZero() {
+		return ContactCard{}, errors.New("invalid Contact Card signing time")
 	}
-	card.PublicKey = append(ed25519.PublicKey(nil), privateKey.Public().(ed25519.PublicKey)...)
 	if err := validateContact(card, false, now); err != nil {
 		return ContactCard{}, err
 	}
-	card.Signature = ed25519.Sign(privateKey, contactBytes(card))
+	signature, err := signAs(ctx, signer, controller, mldsa44.UseAgentContact, card.KeyID, contactBytes(card))
+	if err != nil {
+		return ContactCard{}, err
+	}
+	card.Signature = signature
 	return card, nil
 }
 
-func VerifyContact(resolver AgentResolver, card ContactCard, now time.Time) error {
-	return VerifyContactForNetwork(resolver, nil, card, now)
+func VerifyContact(ctx context.Context, verifier mldsa44.Verifier, resolver AgentResolver, card ContactCard, now time.Time) error {
+	return VerifyContactForNetwork(ctx, verifier, resolver, nil, card, now)
 }
 
 // VerifyContactForNetwork additionally binds the locator to the caller's
 // configured TOS network tuple. Pass a non-nil network in production.
-func VerifyContactForNetwork(resolver AgentResolver, network *nativev1.NetworkDomain, card ContactCard, now time.Time) error {
-	if resolver == nil || now.IsZero() {
+func VerifyContactForNetwork(ctx context.Context, verifier mldsa44.Verifier, resolver AgentResolver, network *nativev1.NetworkDomain, card ContactCard, now time.Time) error {
+	if ctx == nil || verifier == nil || resolver == nil || now.IsZero() {
 		return errors.New("invalid Contact Card verification context")
 	}
 	if err := validateContact(card, true, now); err != nil {
@@ -121,22 +131,15 @@ func VerifyContactForNetwork(resolver AgentResolver, network *nativev1.NetworkDo
 	if !found || state == nil || state.Tombstoned || state.Policy == nil {
 		return errors.New("Contact Card Agent is not finalized and live")
 	}
-	authorized := false
-	for _, controller := range state.Policy.Controllers {
-		if controller != nil && bytes.Equal(controller.Ed25519PublicKey, card.PublicKey) {
-			authorized = true
-			break
-		}
-	}
-	if !authorized || !ed25519.Verify(card.PublicKey, contactBytes(card), card.Signature) {
-		return errors.New("Contact Card signer is not authorized")
+	if err := verifyAs(ctx, verifier, state.Policy, mldsa44.UseAgentContact, card.KeyID, contactBytes(card), card.Signature); err != nil {
+		return fmt.Errorf("Contact Card signer is not authorized: %w", err)
 	}
 	return nil
 }
 
 func validateContact(card ContactCard, signed bool, now time.Time) error {
 	if !agentPattern.MatchString(card.AgentID) || card.Network == nil || strings.TrimSpace(card.Endpoint) != card.Endpoint ||
-		card.ExpiresAtUnix == 0 || len(card.PublicKey) != ed25519.PublicKeySize || (signed && len(card.Signature) != ed25519.SignatureSize) {
+		card.ExpiresAtUnix == 0 || card.KeyID == [mldsa44.KeyIDSize]byte{} || (signed && len(card.Signature) != mldsa44.SignatureSize) {
 		return errors.New("invalid Contact Card shape")
 	}
 	parsed, err := url.Parse(card.Endpoint)
@@ -176,10 +179,10 @@ func contactBytes(card ContactCard) []byte {
 		text(capability)
 	}
 	binary.Write(buffer, binary.BigEndian, card.ExpiresAtUnix)
-	buffer.Write(card.PublicKey)
+	buffer.Write(card.KeyID[:])
 	return buffer.Bytes()
 }
 
 func ContactKey(card ContactCard) string {
-	return card.AgentID + ":" + hex.EncodeToString(card.PublicKey)
+	return card.AgentID + ":" + mldsa44.KeyIDText(card.KeyID)
 }

@@ -4,14 +4,16 @@ package nativecore
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
 
@@ -30,8 +32,9 @@ const (
 	// MaxControllers is the Native Registry's policy width limit: a policy
 	// naming more controllers is refused with ErrPolicyTooWide before any
 	// controller is read, and a signature list may hold at most one
-	// signature per controller.
-	MaxControllers             = 20
+	// signature per controller (a longer authorizing list is refused with
+	// ErrThreshold before any entry is read).
+	MaxControllers             = 8
 	MaxSignatures              = MaxControllers
 	MaxControllerWeight        = 1_000_000
 	MaxRecoveryTimelockSeconds = 365 * 24 * 60 * 60
@@ -135,42 +138,87 @@ func BuildAction(action *nativev1.NativeActionV1) (BuiltAction, error) {
 	return BuiltAction{Cell: root, Hash: hash, HashString: "sha256:" + hex.EncodeToString(hash), Kind: kind, TargetKind: targetKind}, nil
 }
 
-func SignAction(privateKey ed25519.PrivateKey, keyID string, built BuiltAction) (*nativev1.SignatureV1, error) {
-	if len(privateKey) != ed25519.PrivateKeySize || built.Cell == nil || !validKeyID(keyID) ||
-		!bytes.Equal(privateKey.Public().(ed25519.PublicKey), keyIDHash(keyID)) {
+// SignAction asks key custody to sign a built action with the named
+// controller. The signature covers the action cell (custody derives its hash
+// itself) under the registry context; the result is checked for shape and
+// for a key ID that matches the key custody signed with.
+func SignAction(ctx context.Context, signer mldsa44.Signer, controller string, built BuiltAction) (*nativev1.SignatureV1, error) {
+	if ctx == nil || signer == nil || built.Cell == nil || controller == "" {
 		return nil, nativeError(ErrBadSignature, "invalid Native signing input")
 	}
-	return &nativev1.SignatureV1{KeyId: keyID, Ed25519Signature: ed25519.Sign(privateKey, built.Hash)}, nil
+	signature, err := signer.Sign(ctx, controller, mldsa44.UseRegistry, built.Cell.ToBOC())
+	if err != nil {
+		return nil, fmt.Errorf("sign Native action with controller %q: %w", controller, err)
+	}
+	if err := mldsa44.CheckSignature(signature); err != nil {
+		return nil, nativeError(ErrBadSignature, "key custody returned a malformed Native signature")
+	}
+	return &nativev1.SignatureV1{KeyId: mldsa44.KeyIDText(signature.KeyID), Mldsa44Signature: signature.Signature}, nil
 }
 
-func VerifySignatures(policy *nativev1.ControllerPolicyV1, signatures []*nativev1.SignatureV1, requiredPurpose uint32, recovery bool, actionHash []byte) error {
+// verifyOne checks one registry signature against the controller key it is
+// attributed to. An unavailable verifier is reported without a protocol
+// code: it is never a decision about the signature.
+func verifyOne(ctx context.Context, verifier mldsa44.Verifier, actionBOC, publicKey, signature []byte) error {
+	err := verifier.Verify(ctx, mldsa44.UseRegistry, actionBOC, publicKey, signature)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, mldsa44.ErrInvalidSignature), errors.Is(err, mldsa44.ErrMalformed):
+		return wrapNativeError(ErrBadSignature, "invalid Native ML-DSA-44 signature", err)
+	default:
+		return fmt.Errorf("Native signature verification is unavailable: %w", err)
+	}
+}
+
+func checkVerificationInput(ctx context.Context, verifier mldsa44.Verifier, built BuiltAction) error {
+	if ctx == nil || verifier == nil || built.Cell == nil || len(built.Hash) != 32 {
+		return errors.New("Native signature verification is not configured")
+	}
+	return nil
+}
+
+// VerifySignatures mirrors the Registry's threshold authorization against a
+// policy: 1 to MaxSignatures entries, each a well-formed signature, strictly
+// ascending by key ID, by a controller holding the required purpose (and the
+// recovery designation in recovery mode) whose stored key verifies it, with
+// their weight reaching the threshold.
+func VerifySignatures(ctx context.Context, verifier mldsa44.Verifier, policy *nativev1.ControllerPolicyV1,
+	signatures []*nativev1.SignatureV1, requiredPurpose uint32, recovery bool, built BuiltAction) error {
+	if err := checkVerificationInput(ctx, verifier, built); err != nil {
+		return err
+	}
 	controllers, err := validatePolicy(policy)
 	if err != nil {
 		return wrapNativeError(ErrBadPolicy, "invalid Native signature policy", err)
 	}
-	if len(signatures) == 0 || len(signatures) > MaxSignatures || len(actionHash) != 32 {
-		return nativeError(ErrBadSignature, "invalid Native signature set")
+	if len(signatures) == 0 || len(signatures) > MaxSignatures {
+		return nativeError(ErrThreshold, "a Native signature set holds 1 to 8 signatures")
 	}
 	threshold := uint64(policy.Threshold)
 	if recovery {
 		threshold = uint64(policy.RecoveryThreshold)
 	}
+	actionBOC := built.Cell.ToBOC()
 	var total uint64
 	var previous []byte
 	for _, signature := range signatures {
-		keyHash := keyIDHash(signature.GetKeyId())
-		if signature == nil || !validKeyID(signature.KeyId) || len(signature.Ed25519Signature) != ed25519.SignatureSize || previous != nil && bytes.Compare(keyHash, previous) <= 0 {
-			return nativeError(ErrDuplicateSignature, "Native signatures must be complete and strictly sorted")
+		if signature == nil || !validKeyID(signature.KeyId) || len(signature.Mldsa44Signature) != mldsa44.SignatureSize {
+			return nativeError(ErrBadSignature, "Native signature entry is malformed")
+		}
+		keyID := keyIDBytes(signature.KeyId)
+		if previous != nil && bytes.Compare(keyID, previous) <= 0 {
+			return nativeError(ErrDuplicateSignature, "Native signatures must be strictly ascending by key ID")
 		}
 		controller, ok := controllers[signature.KeyId]
 		if !ok || controller.PurposeMask&requiredPurpose == 0 || recovery && !controller.Recovery {
 			return nativeError(ErrBadSignature, "Native signature is not authorized for the action")
 		}
-		if !ed25519.Verify(ed25519.PublicKey(controller.Ed25519PublicKey), actionHash, signature.Ed25519Signature) {
-			return nativeError(ErrBadSignature, "invalid Native Ed25519 signature")
+		if err := verifyOne(ctx, verifier, actionBOC, controller.Mldsa44PublicKey, signature.Mldsa44Signature); err != nil {
+			return err
 		}
 		total += uint64(controller.Weight)
-		previous = keyHash
+		previous = keyID
 	}
 	if total < threshold {
 		return nativeError(ErrThreshold, "Native signature threshold not met")
@@ -178,31 +226,59 @@ func VerifySignatures(policy *nativev1.ControllerPolicyV1, signatures []*nativev
 	return nil
 }
 
-func VerifyPolicyPossession(policy *nativev1.ControllerPolicyV1, signatures []*nativev1.SignatureV1, actionHash []byte) error {
+// VerifyPolicyPossession mirrors the Registry's admission of a policy being
+// installed: exactly one signature from every controller, in key-ID order,
+// each verified against the key the policy carries. The declared key IDs
+// were already checked against the keys by validatePolicy.
+func VerifyPolicyPossession(ctx context.Context, verifier mldsa44.Verifier, policy *nativev1.ControllerPolicyV1,
+	signatures []*nativev1.SignatureV1, built BuiltAction) error {
+	if err := checkVerificationInput(ctx, verifier, built); err != nil {
+		return err
+	}
 	controllers, err := validatePolicy(policy)
 	if err != nil {
 		return wrapNativeError(ErrBadPolicy, "invalid Native installation policy", err)
 	}
-	if len(signatures) != len(controllers) || len(actionHash) != 32 {
-		return nativeError(ErrBadSignature, "Native policy installation requires every controller signature")
+	if len(signatures) != len(controllers) {
+		return nativeError(ErrBadSignature, "Native policy installation requires one signature from every controller")
 	}
-	ordered := append([]*nativev1.SignatureV1(nil), signatures...)
-	sort.Slice(ordered, func(i, j int) bool {
-		return bytes.Compare(keyIDHash(ordered[i].GetKeyId()), keyIDHash(ordered[j].GetKeyId())) < 0
-	})
-	for i, signature := range ordered {
-		if signature == nil || len(signature.Ed25519Signature) != ed25519.SignatureSize {
-			return nativeError(ErrBadSignature, "invalid Native policy possession signature")
+	ordered := sortedControllers(controllers)
+	actionBOC := built.Cell.ToBOC()
+	for i, controller := range ordered {
+		signature := signatures[i]
+		if signature == nil || signature.KeyId != controller.KeyId || len(signature.Mldsa44Signature) != mldsa44.SignatureSize {
+			return nativeError(ErrBadSignature, "Native policy possession signatures must follow the policy's key order")
 		}
-		controller, ok := controllers[signature.KeyId]
-		if !ok || i > 0 && equalBytes(keyIDHash(ordered[i-1].KeyId), keyIDHash(signature.KeyId)) ||
-			!ed25519.Verify(controller.Ed25519PublicKey, actionHash, signature.Ed25519Signature) {
-			return nativeError(ErrBadSignature, "invalid Native policy possession proof")
+		if err := verifyOne(ctx, verifier, actionBOC, controller.Mldsa44PublicKey, signature.Mldsa44Signature); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+// VerifyRegistrationConsent is the Registry's consent rule for a registration
+// whose possession proofs already passed: every controller signed, so the
+// consenting weight is the policy's Agent-control weight, held to the
+// threshold. It verifies no signature.
+func VerifyRegistrationConsent(policy *nativev1.ControllerPolicyV1) error {
+	controllers, err := validatePolicy(policy)
+	if err != nil {
+		return wrapNativeError(ErrBadPolicy, "invalid Native registration policy", err)
+	}
+	var total uint64
+	for _, controller := range controllers {
+		if controller.PurposeMask&PurposeAgentControl != 0 {
+			total += uint64(controller.Weight)
+		}
+	}
+	if total < uint64(policy.Threshold) {
+		return nativeError(ErrThreshold, "Native registration consent threshold not met")
+	}
+	return nil
+}
+
+// SignatureCell encodes a non-empty signature set:
+// count:uint8 ^entry, entry = key_id:uint256 ^stored_signature [^entry].
 func SignatureCell(signatures []*nativev1.SignatureV1) (*cell.Cell, error) {
 	if len(signatures) == 0 || len(signatures) > MaxSignatures {
 		return nil, nativeError(ErrThreshold, "invalid Native signature count")
@@ -210,14 +286,14 @@ func SignatureCell(signatures []*nativev1.SignatureV1) (*cell.Cell, error) {
 	var next *cell.Cell
 	for i := len(signatures) - 1; i >= 0; i-- {
 		signature := signatures[i]
-		if signature == nil || !validKeyID(signature.KeyId) || len(signature.Ed25519Signature) != ed25519.SignatureSize {
+		if signature == nil || !validKeyID(signature.KeyId) || len(signature.Mldsa44Signature) != mldsa44.SignatureSize {
 			return nil, nativeError(ErrBadSignature, "invalid Native signature")
 		}
-		if i > 0 && bytes.Compare(keyIDHash(signatures[i-1].GetKeyId()), keyIDHash(signature.KeyId)) >= 0 {
+		if i > 0 && (signatures[i-1] == nil || bytes.Compare(keyIDBytes(signatures[i-1].KeyId), keyIDBytes(signature.KeyId)) >= 0) {
 			return nil, nativeError(ErrDuplicateSignature, "Native signatures are not strictly sorted")
 		}
-		keyHash := keyIDHash(signature.KeyId)
-		builder := cell.BeginCell().MustStoreSlice(keyHash, 256).MustStoreSlice(signature.Ed25519Signature, 512)
+		builder := cell.BeginCell().MustStoreSlice(keyIDBytes(signature.KeyId), 256).
+			MustStoreRef(storedBytesCell(signature.Mldsa44Signature))
 		if next != nil {
 			builder.MustStoreRef(next)
 		}
@@ -229,11 +305,11 @@ func SignatureCell(signatures []*nativev1.SignatureV1) (*cell.Cell, error) {
 func EmptySignatureCell() *cell.Cell { return cell.BeginCell().MustStoreUInt(0, 8).EndCell() }
 
 func MessageBody(action BuiltAction, authority, counterparty []*nativev1.SignatureV1, queryID uint64) (*cell.Cell, error) {
-	return messageBody(0x4e560001, action, authority, counterparty, queryID)
+	return messageBody(opSubmit, action, authority, counterparty, queryID)
 }
 
 func AgentAuthorizationBody(action BuiltAction, authority, counterparty []*nativev1.SignatureV1, queryID uint64) (*cell.Cell, error) {
-	return messageBody(0x4e560002, action, authority, counterparty, queryID)
+	return messageBody(opAuthorizeCapability, action, authority, counterparty, queryID)
 }
 
 func messageBody(opcode uint64, action BuiltAction, authority, counterparty []*nativev1.SignatureV1, queryID uint64) (*cell.Cell, error) {
@@ -260,18 +336,13 @@ func PolicyCell(policy *nativev1.ControllerPolicyV1) (*cell.Cell, error) {
 	if err != nil {
 		return nil, wrapNativeError(ErrBadPolicy, "invalid Native controller policy", err)
 	}
-	ordered := make([]string, 0, len(controllers))
-	for keyID := range controllers {
-		ordered = append(ordered, keyID)
-	}
-	sort.Slice(ordered, func(i, j int) bool { return bytes.Compare(keyIDHash(ordered[i]), keyIDHash(ordered[j])) < 0 })
+	ordered := sortedControllers(controllers)
 	var next *cell.Cell
 	for i := len(ordered) - 1; i >= 0; i-- {
-		controller := controllers[ordered[i]]
-		keyHash := keyIDHash(controller.KeyId)
-		builder := cell.BeginCell().MustStoreSlice(keyHash, 256).
-			MustStoreSlice(controller.Ed25519PublicKey, 256).MustStoreUInt(uint64(controller.Weight), 32).
-			MustStoreUInt(uint64(controller.PurposeMask), 16).MustStoreBoolBit(controller.Recovery)
+		controller := ordered[i]
+		builder := cell.BeginCell().MustStoreSlice(keyIDBytes(controller.KeyId), 256).
+			MustStoreUInt(uint64(controller.Weight), 32).MustStoreUInt(uint64(controller.PurposeMask), 16).
+			MustStoreBoolBit(controller.Recovery).MustStoreRef(storedBytesCell(controller.Mldsa44PublicKey))
 		if next != nil {
 			builder.MustStoreRef(next)
 		}
@@ -422,7 +493,6 @@ func validatePolicy(policy *nativev1.ControllerPolicyV1) (map[string]*nativev1.C
 		return nil, errors.New("invalid Native controller policy")
 	}
 	controllers := make(map[string]*nativev1.ControllerV1, len(policy.Controllers))
-	publicKeys := make(map[string]struct{}, len(policy.Controllers))
 	var recoveryTotal uint64
 	purposeTotals := map[uint32]uint64{
 		PurposeAgentControl:      0,
@@ -430,24 +500,23 @@ func validatePolicy(policy *nativev1.ControllerPolicyV1) (map[string]*nativev1.C
 		PurposeCapabilityControl: 0,
 	}
 	for _, controller := range policy.Controllers {
-		if controller == nil || !validKeyID(controller.KeyId) || len(controller.Ed25519PublicKey) != ed25519.PublicKeySize || !bytes.Equal(keyIDHash(controller.KeyId), controller.Ed25519PublicKey) || bytes.Equal(controller.Ed25519PublicKey, make([]byte, 32)) || controller.Weight == 0 || controller.Weight > MaxControllerWeight || controller.PurposeMask == 0 || controller.PurposeMask&^uint32(knownPurposeMask) != 0 {
+		if controller == nil || !validKeyID(controller.KeyId) || len(controller.Mldsa44PublicKey) != mldsa44.PublicKeySize ||
+			controller.Weight == 0 || controller.Weight > MaxControllerWeight || controller.PurposeMask == 0 ||
+			controller.PurposeMask&^uint32(knownPurposeMask) != 0 {
 			return nil, errors.New("Native controllers must be valid")
 		}
-		if WeakEd25519PublicKey(controller.Ed25519PublicKey) {
-			return nil, nativeError(ErrWeakKey, "Native controller key is a small-order or non-canonical Ed25519 point")
+		derived, err := mldsa44.KeyID(controller.Mldsa44PublicKey)
+		if err != nil || mldsa44.KeyIDText(derived) != controller.KeyId {
+			return nil, errors.New("Native controller key ID does not match its ML-DSA-44 public key")
 		}
+		// A duplicate key yields a duplicate key ID, so one check covers both.
 		if _, duplicate := controllers[controller.KeyId]; duplicate {
 			return nil, errors.New("duplicate Native controller key ID")
-		}
-		publicKey := string(controller.Ed25519PublicKey)
-		if _, duplicate := publicKeys[publicKey]; duplicate {
-			return nil, errors.New("duplicate Native controller public key")
 		}
 		if controller.Recovery != (controller.PurposeMask&PurposeRecovery != 0) {
 			return nil, errors.New("Native controller must declare recovery purpose consistently")
 		}
 		controllers[controller.KeyId] = controller
-		publicKeys[publicKey] = struct{}{}
 		for purpose := range purposeTotals {
 			if controller.PurposeMask&purpose != 0 {
 				purposeTotals[purpose] += uint64(controller.Weight)
@@ -494,9 +563,38 @@ func validateRegistrationIdentity(action *nativev1.NativeActionV1) error {
 	return nil
 }
 
-func keyIDHash(value string) []byte {
-	raw, _ := hex.DecodeString(strings.TrimPrefix(value, "ed25519:"))
-	return raw
+// keyIDBytes returns the 32 key-ID bytes of a text key ID that validKeyID
+// accepted, or nil.
+func keyIDBytes(value string) []byte {
+	id, err := mldsa44.ParseKeyIDText(value)
+	if err != nil {
+		return nil
+	}
+	return id[:]
+}
+
+// SortSignatures returns the signatures in ascending key-ID byte order, the
+// only order the Registry accepts. It does not remove duplicates or validate
+// entries; SignatureCell refuses both.
+func SortSignatures(signatures []*nativev1.SignatureV1) []*nativev1.SignatureV1 {
+	ordered := append([]*nativev1.SignatureV1(nil), signatures...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return bytes.Compare(keyIDBytes(ordered[i].GetKeyId()), keyIDBytes(ordered[j].GetKeyId())) < 0
+	})
+	return ordered
+}
+
+// sortedControllers orders validated controllers by key ID, the only order
+// the Registry stores and checks them in.
+func sortedControllers(controllers map[string]*nativev1.ControllerV1) []*nativev1.ControllerV1 {
+	ordered := make([]*nativev1.ControllerV1, 0, len(controllers))
+	for _, controller := range controllers {
+		ordered = append(ordered, controller)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return bytes.Compare(keyIDBytes(ordered[i].KeyId), keyIDBytes(ordered[j].KeyId)) < 0
+	})
+	return ordered
 }
 
 func capabilityVersion(version *nativev1.CapabilityVersionV1) ([]byte, []byte, error) {
@@ -560,10 +658,8 @@ func stringCell(value string) *cell.Cell {
 	return cell.BeginCell().MustStoreBinarySnake([]byte(value)).EndCell()
 }
 
+// validKeyID accepts exactly mldsa44:<64 lowercase hex>, nonzero.
 func validKeyID(value string) bool {
-	if !strings.HasPrefix(value, "ed25519:") || len(value) != len("ed25519:")+64 {
-		return false
-	}
-	raw, err := hex.DecodeString(strings.TrimPrefix(value, "ed25519:"))
-	return err == nil && value == "ed25519:"+hex.EncodeToString(raw) && len(raw) == ed25519.PublicKeySize && !bytes.Equal(raw, make([]byte, ed25519.PublicKeySize))
+	_, err := mldsa44.ParseKeyIDText(value)
+	return err == nil
 }

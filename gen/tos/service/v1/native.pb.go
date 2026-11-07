@@ -39,7 +39,6 @@ const (
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION             NativeErrorCodeV1 = 2211
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_TIMELOCK                      NativeErrorCodeV1 = 2212
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE           NativeErrorCodeV1 = 2213
-	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_WEAK_KEY                      NativeErrorCodeV1 = 2214
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE               NativeErrorCodeV1 = 2215
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST            NativeErrorCodeV1 = 2300
 	NativeErrorCodeV1_NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND              NativeErrorCodeV1 = 2301
@@ -70,7 +69,6 @@ var (
 		2211: "NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION",
 		2212: "NATIVE_ERROR_CODE_V1_TIMELOCK",
 		2213: "NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE",
-		2214: "NATIVE_ERROR_CODE_V1_WEAK_KEY",
 		2215: "NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE",
 		2300: "NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST",
 		2301: "NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND",
@@ -98,7 +96,6 @@ var (
 		"NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION":             2211,
 		"NATIVE_ERROR_CODE_V1_TIMELOCK":                      2212,
 		"NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE":           2213,
-		"NATIVE_ERROR_CODE_V1_WEAK_KEY":                      2214,
 		"NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE":               2215,
 		"NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST":            2300,
 		"NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND":              2301,
@@ -629,14 +626,18 @@ func (x *TOSAccountAddressV1) GetAccountId() []byte {
 	return nil
 }
 
-// key_id is exactly ed25519:<lowercase 32-byte-public-key-hex>.
 type ControllerV1 struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	KeyId            string                 `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
-	Ed25519PublicKey []byte                 `protobuf:"bytes,2,opt,name=ed25519_public_key,json=ed25519PublicKey,proto3" json:"ed25519_public_key,omitempty"`
-	Weight           uint32                 `protobuf:"varint,3,opt,name=weight,proto3" json:"weight,omitempty"`
-	PurposeMask      uint32                 `protobuf:"varint,4,opt,name=purpose_mask,json=purposeMask,proto3" json:"purpose_mask,omitempty"`
-	Recovery         bool                   `protobuf:"varint,5,opt,name=recovery,proto3" json:"recovery,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Exactly mldsa44:<64 lowercase hex key_id>, where
+	// key_id = SHA-256("TOS-PQ-CONSENSUS-KEY-v1" || 0x01 0x00 || public_key).
+	// It must equal the id derived from mldsa44_public_key; Native v1 does not
+	// depend on an off-chain alias table to reconstruct controller identity.
+	KeyId string `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	// ML-DSA-44 (FIPS 204) public key, exactly 1,312 bytes.
+	Mldsa44PublicKey []byte `protobuf:"bytes,2,opt,name=mldsa44_public_key,json=mldsa44PublicKey,proto3" json:"mldsa44_public_key,omitempty"`
+	Weight           uint32 `protobuf:"varint,3,opt,name=weight,proto3" json:"weight,omitempty"`
+	PurposeMask      uint32 `protobuf:"varint,4,opt,name=purpose_mask,json=purposeMask,proto3" json:"purpose_mask,omitempty"`
+	Recovery         bool   `protobuf:"varint,5,opt,name=recovery,proto3" json:"recovery,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -678,9 +679,9 @@ func (x *ControllerV1) GetKeyId() string {
 	return ""
 }
 
-func (x *ControllerV1) GetEd25519PublicKey() []byte {
+func (x *ControllerV1) GetMldsa44PublicKey() []byte {
 	if x != nil {
-		return x.Ed25519PublicKey
+		return x.Mldsa44PublicKey
 	}
 	return nil
 }
@@ -706,6 +707,8 @@ func (x *ControllerV1) GetRecovery() bool {
 	return false
 }
 
+// controllers holds 1..8 entries in strictly ascending key_id order; a wider
+// policy is refused with POLICY_TOO_WIDE.
 type ControllerPolicyV1 struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
 	Threshold               uint32                 `protobuf:"varint,1,opt,name=threshold,proto3" json:"threshold,omitempty"`
@@ -775,9 +778,15 @@ func (x *ControllerPolicyV1) GetControllers() []*ControllerV1 {
 }
 
 type SignatureV1 struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	KeyId            string                 `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
-	Ed25519Signature []byte                 `protobuf:"bytes,2,opt,name=ed25519_signature,json=ed25519Signature,proto3" json:"ed25519_signature,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Exactly mldsa44:<64 lowercase hex key_id> of a controller in the policy
+	// the signature is checked against.
+	KeyId string `protobuf:"bytes,1,opt,name=key_id,json=keyId,proto3" json:"key_id,omitempty"`
+	// Pure ML-DSA-44 (FIPS 204, no pre-hash) signature, exactly 2,420 bytes,
+	// over the 32 raw bytes of the action cell hash with context string
+	// "TOS-NATIVE-REGISTRY". Signing may be hedged, so the operation is
+	// identified by its action hash, never by these bytes.
+	Mldsa44Signature []byte `protobuf:"bytes,2,opt,name=mldsa44_signature,json=mldsa44Signature,proto3" json:"mldsa44_signature,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -819,9 +828,9 @@ func (x *SignatureV1) GetKeyId() string {
 	return ""
 }
 
-func (x *SignatureV1) GetEd25519Signature() []byte {
+func (x *SignatureV1) GetMldsa44Signature() []byte {
 	if x != nil {
-		return x.Ed25519Signature
+		return x.Mldsa44Signature
 	}
 	return nil
 }
@@ -1648,6 +1657,8 @@ func (*NativeActionV1_TransferCapability) isNativeActionV1_Payload() {}
 
 func (*NativeActionV1_RevokeCapability) isNativeActionV1_Payload() {}
 
+// Each signature list holds at most 8 entries in strictly ascending key_id
+// order.
 type SignedNativeActionV1 struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	Action                 *NativeActionV1        `protobuf:"bytes,1,opt,name=action,proto3" json:"action,omitempty"`
@@ -3761,21 +3772,21 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"\x13TOSAccountAddressV1\x12\x1c\n" +
 	"\tworkchain\x18\x01 \x01(\x05R\tworkchain\x12\x1d\n" +
 	"\n" +
-	"account_id\x18\x02 \x01(\fR\taccountId\"\xaa\x01\n" +
+	"account_id\x18\x02 \x01(\fR\taccountId\"\xbe\x01\n" +
 	"\fControllerV1\x12\x15\n" +
 	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x12,\n" +
-	"\x12ed25519_public_key\x18\x02 \x01(\fR\x10ed25519PublicKey\x12\x16\n" +
+	"\x12mldsa44_public_key\x18\x02 \x01(\fR\x10mldsa44PublicKey\x12\x16\n" +
 	"\x06weight\x18\x03 \x01(\rR\x06weight\x12!\n" +
 	"\fpurpose_mask\x18\x04 \x01(\rR\vpurposeMask\x12\x1a\n" +
-	"\brecovery\x18\x05 \x01(\bR\brecovery\"\xdd\x01\n" +
+	"\brecovery\x18\x05 \x01(\bR\brecoveryR\x12ed25519_public_key\"\xdd\x01\n" +
 	"\x12ControllerPolicyV1\x12\x1c\n" +
 	"\tthreshold\x18\x01 \x01(\rR\tthreshold\x12-\n" +
 	"\x12recovery_threshold\x18\x02 \x01(\rR\x11recoveryThreshold\x12:\n" +
 	"\x19recovery_timelock_seconds\x18\x03 \x01(\x04R\x17recoveryTimelockSeconds\x12>\n" +
-	"\vcontrollers\x18\x04 \x03(\v2\x1c.tos.service.v1.ControllerV1R\vcontrollers\"Q\n" +
+	"\vcontrollers\x18\x04 \x03(\v2\x1c.tos.service.v1.ControllerV1R\vcontrollers\"d\n" +
 	"\vSignatureV1\x12\x15\n" +
 	"\x06key_id\x18\x01 \x01(\tR\x05keyId\x12+\n" +
-	"\x11ed25519_signature\x18\x02 \x01(\fR\x10ed25519Signature\"r\n" +
+	"\x11mldsa44_signature\x18\x02 \x01(\fR\x10mldsa44SignatureR\x11ed25519_signature\"r\n" +
 	"\x13CapabilityVersionV1\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12'\n" +
 	"\x0fmanifest_digest\x18\x02 \x01(\tR\x0emanifestDigest\x12\x18\n" +
@@ -4008,7 +4019,7 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"\x15transport_binding_boc\x18\x04 \x01(\fR\x13transportBindingBoc\x12,\n" +
 	"\x12dispute_policy_boc\x18\x05 \x01(\fR\x10disputePolicyBoc\"`\n" +
 	"\x1cRequestQuoteProposalResponse\x12@\n" +
-	"\apackage\x18\x01 \x01(\v2&.tos.service.v1.QuoteProposalPackageV1R\apackage*\xed\b\n" +
+	"\apackage\x18\x01 \x01(\v2&.tos.service.v1.QuoteProposalPackageV1R\apackage*\xf0\b\n" +
 	"\x11NativeErrorCodeV1\x12$\n" +
 	" NATIVE_ERROR_CODE_V1_UNSPECIFIED\x10\x00\x12%\n" +
 	" NATIVE_ERROR_CODE_V1_BAD_MESSAGE\x10\x98\x11\x12'\n" +
@@ -4024,8 +4035,7 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"#NATIVE_ERROR_CODE_V1_BAD_TRANSITION\x10\xa2\x11\x12+\n" +
 	"&NATIVE_ERROR_CODE_V1_IMMUTABLE_VERSION\x10\xa3\x11\x12\"\n" +
 	"\x1dNATIVE_ERROR_CODE_V1_TIMELOCK\x10\xa4\x11\x12-\n" +
-	"(NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE\x10\xa5\x11\x12\"\n" +
-	"\x1dNATIVE_ERROR_CODE_V1_WEAK_KEY\x10\xa6\x11\x12)\n" +
+	"(NATIVE_ERROR_CODE_V1_DUPLICATE_SIGNATURE\x10\xa5\x11\x12)\n" +
 	"$NATIVE_ERROR_CODE_V1_POLICY_TOO_WIDE\x10\xa7\x11\x12,\n" +
 	"'NATIVE_ERROR_CODE_V1_PUBLIC_BAD_REQUEST\x10\xfc\x11\x12*\n" +
 	"%NATIVE_ERROR_CODE_V1_PUBLIC_NOT_FOUND\x10\xfd\x11\x12)\n" +
@@ -4035,7 +4045,7 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"-NATIVE_ERROR_CODE_V1_PUBLIC_AMBIGUOUS_OUTCOME\x10\x81\x12\x12)\n" +
 	"$NATIVE_ERROR_CODE_V1_PUBLIC_DEADLINE\x10\x82\x12\x120\n" +
 	"+NATIVE_ERROR_CODE_V1_PUBLIC_UNAUTHENTICATED\x10\x83\x12\x122\n" +
-	"-NATIVE_ERROR_CODE_V1_PUBLIC_PERMISSION_DENIED\x10\x84\x12*\xbe\x01\n" +
+	"-NATIVE_ERROR_CODE_V1_PUBLIC_PERMISSION_DENIED\x10\x84\x12\"\x06\b\xa6\x11\x10\xa6\x11*\x1dNATIVE_ERROR_CODE_V1_WEAK_KEY*\xbe\x01\n" +
 	"\x12RetryDispositionV1\x12$\n" +
 	" RETRY_DISPOSITION_V1_UNSPECIFIED\x10\x00\x12\x1e\n" +
 	"\x1aRETRY_DISPOSITION_V1_NEVER\x10\x01\x123\n" +

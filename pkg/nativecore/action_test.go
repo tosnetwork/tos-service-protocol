@@ -1,28 +1,21 @@
 package nativecore
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"fmt"
+	"context"
 	"strings"
 	"testing"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
 )
 
-func testPolicy(t *testing.T) (*nativev1.ControllerPolicyV1, ed25519.PrivateKey) {
+func testPolicy(t *testing.T) (*nativev1.ControllerPolicyV1, string) {
 	t.Helper()
-	pub, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	return &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1, RecoveryTimelockSeconds: 60,
-		Controllers: []*nativev1.ControllerV1{{KeyId: "ed25519:" + fmt.Sprintf("%x", pub), Ed25519PublicKey: pub, Weight: 1,
-			PurposeMask: PurposeAgentControl | PurposeDelegation | PurposeRecovery | PurposeCapabilityControl, Recovery: true}}}, privateKey
+		Controllers: []*nativev1.ControllerV1{fakeController("test-controller", knownPurposeMask, true)}}, "test-controller"
 }
 
 func TestBuildSignAndVerifyDirectNativeAction(t *testing.T) {
-	policy, privateKey := testPolicy(t)
+	policy, controller := testPolicy(t)
 	network := &nativev1.NetworkDomain{NetworkId: "tos-testnet", GenesisRootHash: "sha256:" + strings.Repeat("11", 32), GenesisFileHash: "sha256:" + strings.Repeat("22", 32)}
 	objectNonce := []byte(strings.Repeat("o", 32))
 	agentID, err := DeriveAgentID(network, objectNonce, policy)
@@ -38,11 +31,17 @@ func TestBuildSignAndVerifyDirectNativeAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := SignAction(privateKey, policy.Controllers[0].KeyId, built)
+	signature, err := SignAction(context.Background(), fakeKeys, controller, built)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifySignatures(policy, []*nativev1.SignatureV1{signature}, PurposeAgentControl, false, built.Hash); err != nil {
+	if signature.KeyId != policy.Controllers[0].KeyId {
+		t.Fatalf("signature key ID = %s", signature.KeyId)
+	}
+	if err := VerifySignatures(context.Background(), fakeKeys, policy, []*nativev1.SignatureV1{signature}, PurposeAgentControl, false, built); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPolicyPossession(context.Background(), fakeKeys, policy, []*nativev1.SignatureV1{signature}, built); err != nil {
 		t.Fatal(err)
 	}
 	body, err := MessageBody(built, []*nativev1.SignatureV1{signature}, nil, 7)
@@ -52,11 +51,8 @@ func TestBuildSignAndVerifyDirectNativeAction(t *testing.T) {
 }
 
 func TestNativePolicyEncodingIsIndependentOfInputOrder(t *testing.T) {
-	pubA, _, _ := ed25519.GenerateKey(rand.Reader)
-	pubB, _, _ := ed25519.GenerateKey(rand.Reader)
 	policy := &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1, Controllers: []*nativev1.ControllerV1{
-		{KeyId: "ed25519:" + fmt.Sprintf("%x", pubA), Ed25519PublicKey: pubA, Weight: 1, PurposeMask: knownPurposeMask, Recovery: true},
-		{KeyId: "ed25519:" + fmt.Sprintf("%x", pubB), Ed25519PublicKey: pubB, Weight: 1, PurposeMask: knownPurposeMask, Recovery: true},
+		fakeController("order-a", knownPurposeMask, true), fakeController("order-b", knownPurposeMask, true),
 	}}
 	first, err := PolicyCell(policy)
 	if err != nil {
@@ -73,18 +69,10 @@ func TestNativePolicyEncodingIsIndependentOfInputOrder(t *testing.T) {
 }
 
 func TestNativePolicyPreservesPurposeIsolationAndReachability(t *testing.T) {
-	controller := func(mask uint32, recovery bool) *nativev1.ControllerV1 {
-		public, _, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return &nativev1.ControllerV1{KeyId: "ed25519:" + fmt.Sprintf("%x", public), Ed25519PublicKey: public,
-			Weight: 1, PurposeMask: mask, Recovery: recovery}
-	}
 	policy := &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1, Controllers: []*nativev1.ControllerV1{
-		controller(PurposeAgentControl|PurposeRecovery, true),
-		controller(PurposeDelegation, false),
-		controller(PurposeCapabilityControl, false),
+		fakeController("isolated-agent", PurposeAgentControl|PurposeRecovery, true),
+		fakeController("isolated-delegation", PurposeDelegation, false),
+		fakeController("isolated-capability", PurposeCapabilityControl, false),
 	}}
 	if _, err := PolicyCell(policy); err != nil {
 		t.Fatalf("reachable purpose-isolated policy was rejected: %v", err)

@@ -48,4 +48,7 @@ func assertResult(t *testing.T, name string, actual Result, expected Expected) {
 	if actual.ActionBOCBase64 != expected.ActionBOCBase64 {
 		t.Errorf("%s action BOC = %q", name, actual.ActionBOCBase64)
 	}
+	if actual.SubmissionBodyHash != expected.SubmissionBody {
+		t.Errorf("%s submission body hash = %q", name, actual.SubmissionBodyHash)
+	}
 }

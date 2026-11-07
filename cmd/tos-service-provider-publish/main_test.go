@@ -13,8 +13,9 @@ import (
 func TestReadSignedActionIsStrictAndRequiresAuthoritySignature(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "signed.json")
+	signature := &nativev1.SignatureV1{KeyId: "mldsa44:" + strings.Repeat("11", 32), Mldsa44Signature: make([]byte, 2420)}
 	value := &nativev1.SignedNativeActionV1{Action: &nativev1.NativeActionV1{Protocol: "test"},
-		AuthoritySignatures: []*nativev1.SignatureV1{{KeyId: "key", Ed25519Signature: make([]byte, 64)}}}
+		AuthoritySignatures: []*nativev1.SignatureV1{signature}}
 	raw, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(value)
 	if err != nil {
 		t.Fatal(err)
@@ -31,6 +32,23 @@ func TestReadSignedActionIsStrictAndRequiresAuthoritySignature(t *testing.T) {
 	}
 	if _, err := readSignedAction(path); err == nil {
 		t.Fatal("unknown signed action field was accepted")
+	}
+	// The Registry admits at most 8 signatures; a ninth is refused here.
+	for count, accepted := range map[int]bool{8: true, 9: false} {
+		value.AuthoritySignatures = nil
+		for range count {
+			value.AuthoritySignatures = append(value.AuthoritySignatures, signature)
+		}
+		raw, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readSignedAction(path); (err == nil) != accepted {
+			t.Fatalf("%d signatures: accepted = %v", count, err == nil)
+		}
 	}
 }
 

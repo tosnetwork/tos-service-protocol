@@ -3,8 +3,6 @@ package providersdk
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"strings"
@@ -12,6 +10,7 @@ import (
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"google.golang.org/protobuf/proto"
 )
@@ -60,20 +59,18 @@ func TestProviderPreparesSignsAndFinalizesCapabilityPublication(t *testing.T) {
 	manifestJSON = extractManifest(t, manifestJSON)
 	network := &nativev1.NetworkDomain{NetworkId: "provider-sdk-test", GenesisRootHash: "sha256:" + strings.Repeat("11", 32), GenesisFileHash: "sha256:" + strings.Repeat("22", 32)}
 	codeHash := "tvm-cell-sha256:" + strings.Repeat("33", 32)
-	public, private, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyID := "ed25519:" + hex.EncodeToString(public)
+	// Real ML-DSA-44: the controller key is held by tosctl custody and the
+	// SDK verifies through the pinned helper.
+	custody := mldsa44test.NewCustody(t, "provider")
 	policy := &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1, RecoveryTimelockSeconds: 60,
-		Controllers: []*nativev1.ControllerV1{{KeyId: keyID, Ed25519PublicKey: public, Weight: 1,
+		Controllers: []*nativev1.ControllerV1{{KeyId: custody.KeyID(t, "provider"), Mldsa44PublicKey: custody.PublicKeys["provider"], Weight: 1,
 			PurposeMask: nativecore.PurposeAgentControl | nativecore.PurposeDelegation | nativecore.PurposeRecovery | nativecore.PurposeCapabilityControl, Recovery: true}}}
 	ownerID, err := nativecore.DeriveAgentID(network, bytes32(0x44), policy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake := &fakeNativeClient{ownerID: ownerID, owner: agentState(network, codeHash, ownerID, policy)}
-	provider, err := New(Config{Client: fake, Network: network, RegistryCodeHash: codeHash, CallerID: ownerID,
+	provider, err := New(Config{Client: fake, Verifier: mldsa44test.RequireTosctl(t), Network: network, RegistryCodeHash: codeHash, CallerID: ownerID,
 		PollInterval: time.Millisecond * 10, FinalityTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +83,7 @@ func TestProviderPreparesSignsAndFinalizesCapabilityPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature, err := nativecore.SignAction(private, keyID, built)
+	signature, err := nativecore.SignAction(context.Background(), custody.Signer, "provider", built)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,15 +139,13 @@ func publicationFixture(t *testing.T) (*Provider, *PreparedPublication, *nativev
 		t.Fatal(err)
 	}
 	network := &nativev1.NetworkDomain{NetworkId: "fixture", GenesisRootHash: "sha256:" + strings.Repeat("11", 32), GenesisFileHash: "sha256:" + strings.Repeat("22", 32)}
-	public, private, _ := ed25519.GenerateKey(nil)
-	keyID := "ed25519:" + hex.EncodeToString(public)
 	policy := &nativev1.ControllerPolicyV1{Threshold: 1, RecoveryThreshold: 1, RecoveryTimelockSeconds: 1,
-		Controllers: []*nativev1.ControllerV1{{KeyId: keyID, Ed25519PublicKey: public, Weight: 1,
+		Controllers: []*nativev1.ControllerV1{{KeyId: fakeKeys.KeyID("fixture"), Mldsa44PublicKey: fakeKeys.PublicKey("fixture"), Weight: 1,
 			PurposeMask: 15, Recovery: true}}}
 	ownerID, _ := nativecore.DeriveAgentID(network, bytes32(1), policy)
 	codeHash := "tvm-cell-sha256:" + strings.Repeat("33", 32)
 	fake := &fakeNativeClient{ownerID: ownerID, owner: agentState(network, codeHash, ownerID, policy)}
-	provider, err := New(Config{Client: fake, Network: network, RegistryCodeHash: codeHash, CallerID: ownerID, PollInterval: 10 * time.Millisecond, FinalityTimeout: time.Second})
+	provider, err := New(Config{Client: fake, Verifier: fakeKeys, Network: network, RegistryCodeHash: codeHash, CallerID: ownerID, PollInterval: 10 * time.Millisecond, FinalityTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,9 +153,41 @@ func publicationFixture(t *testing.T) (*Provider, *PreparedPublication, *nativev
 	if err != nil {
 		t.Fatal(err)
 	}
-	built, _ := nativecore.BuildAction(prepared.Action)
-	signature, _ := nativecore.SignAction(private, keyID, built)
+	built, err := nativecore.BuildAction(prepared.Action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := nativecore.SignAction(context.Background(), fakeKeys, "fixture", built)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return provider, prepared, signature, fake
+}
+
+// fakeKeys stands in for the ML-DSA-44 helper in the pure-logic fixtures; it
+// is not ML-DSA-44.
+var fakeKeys = &mldsa44test.Fake{}
+
+func TestProviderRefusesSignaturesOutsideTheOwnerPolicyBeforeRelay(t *testing.T) {
+	provider, prepared, _, fake := publicationFixture(t)
+	built, err := nativecore.BuildAction(prepared.Action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stranger, err := nativecore.SignAction(context.Background(), fakeKeys, "stranger", built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.PublishCapability(context.Background(), prepared, []*nativev1.SignatureV1{stranger}, "stranger"); err == nil {
+		t.Fatal("a signature by a key outside the owner policy was relayed")
+	}
+	if fake.submitted != nil {
+		t.Fatal("an unauthorized publication reached the gateway")
+	}
+	if _, err := New(Config{Client: fake, Network: prepared.Action.Network, RegistryCodeHash: prepared.Action.TargetContractCodeHash,
+		CallerID: "caller"}); err == nil {
+		t.Fatal("a provider without a signature verifier was configured")
+	}
 }
 
 func extractManifest(t *testing.T, raw []byte) []byte {

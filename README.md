@@ -82,21 +82,29 @@ go run ./cmd/native-vector-reference
 
 ## Review and sign an action
 
-`tos-service-wallet` signs the canonical TVM action hash using an owner-private
-Ed25519 seed file. It prints the complete action semantics and, by default,
-requires the operator to type the exact hash before signing:
+Native Registry controllers are ML-DSA-44 keys held in `tosctl` custody
+(vault). This module links no ML-DSA implementation: `pkg/mldsa44` runs a
+pinned `tosctl` binary (absolute path plus its SHA-256; the verified file
+descriptor is what executes) for signing and verification, and never reads or
+passes private key material.
+
+`tos-service-wallet` prints the complete action semantics, requires the
+operator to type the exact action hash, and then asks `tosctl` to sign the
+action with each named controller:
 
 ```bash
-go run ./cmd/tos-service-wallet \
+VAULT_URL='<tosctl vault URL>' go run ./cmd/tos-service-wallet \
   --action /absolute/path/action.json \
-  --authority-key /absolute/private/controller.json \
+  --tosctl /absolute/path/tosctl --tosctl-sha256 <64 lowercase hex> \
+  --tosctl-config /absolute/private/tosctl-config.json \
+  --authority-controller <controller name> \
   --output /absolute/private/signed-action.json
 ```
 
-The key file is mode `0600` and contains
-`{"schema":"tos.service.wallet-key.v1","private_seed_hex":"<64 lowercase hex>"}`.
-Use `--counterparty-key` for Capability transfer acceptance or new-policy proof
-of possession. The tool produces a signed action only; finality is confirmed
+Controllers are created with `tosctl agent native-registry new-controller`.
+Use `--counterparty-controller` for Capability transfer acceptance or
+new-policy proof of possession. Signatures are emitted in ascending key-ID
+order. The tool produces a signed action only; finality is confirmed
 separately through `ResolveNativeState`.
 
 ## Run the private Native service
@@ -118,7 +126,10 @@ The Native configuration is strict JSON and contains:
 - the exact network ID and genesis root/file digests;
 - three to eight independently operated JSON-RPC endpoints and a strict
   majority quorum;
-- Registry workchain, reviewed contract code BOC and exact code hash;
+- Registry workchain (always `0`), reviewed contract code BOC and exact code
+  hash;
+- `signature_helper`: the absolute path and SHA-256 of the `tosctl` binary that
+  verifies ML-DSA-44 controller signatures before any relay spend;
 - bounded relay funding in nanoTOS;
 - a mandatory relay budget window plus per-target and relay-wallet action and
   nanoTOS ceilings;

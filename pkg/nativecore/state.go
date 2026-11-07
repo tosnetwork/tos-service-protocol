@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
 
@@ -215,8 +216,8 @@ func decodeState(state *cell.Cell, object string, expectedKind uint8) (*nativev1
 }
 
 func DecodePolicyCell(value *cell.Cell) (*nativev1.ControllerPolicyV1, error) {
-	if value == nil {
-		return nil, errors.New("missing Native policy")
+	if value == nil || value.IsSpecial() {
+		return nil, errors.New("missing Native policy or not an ordinary cell")
 	}
 	s, err := value.BeginParse()
 	if err != nil {
@@ -259,16 +260,15 @@ func DecodePolicyCell(value *cell.Cell) (*nativev1.ControllerPolicyV1, error) {
 	controllers := make([]*nativev1.ControllerV1, 0, count)
 	var previous []byte
 	for i := uint64(0); i < count; i++ {
+		if cursor == nil || cursor.IsSpecial() {
+			return nil, errors.New("Native policy controller is not an ordinary cell")
+		}
 		cs, err := cursor.BeginParse()
 		if err != nil {
 			return nil, err
 		}
 		key, err := cs.LoadSlice(256)
-		if err != nil {
-			return nil, err
-		}
-		publicKey, err := cs.LoadSlice(256)
-		if err != nil || !equalBytes(key, publicKey) || previous != nil && compareBytes(key, previous) <= 0 {
+		if err != nil || previous != nil && compareBytes(key, previous) <= 0 {
 			return nil, errors.New("invalid Native policy key ordering")
 		}
 		weight, err := cs.LoadUInt(32)
@@ -283,7 +283,21 @@ func DecodePolicyCell(value *cell.Cell) (*nativev1.ControllerPolicyV1, error) {
 		if err != nil {
 			return nil, err
 		}
-		controllers = append(controllers, &nativev1.ControllerV1{KeyId: "ed25519:" + hex.EncodeToString(key), Ed25519PublicKey: publicKey, Weight: uint32(weight), PurposeMask: uint32(purposes), Recovery: recovery})
+		storedKey, err := cs.LoadRefCell()
+		if err != nil {
+			return nil, errors.New("Native policy controller has no stored key")
+		}
+		publicKey, err := readStoredBytes(storedKey, mldsa44.PublicKeySize)
+		if err != nil {
+			return nil, err
+		}
+		// The stored key is the identity: a declared key ID that differs from
+		// the one derived from the key is refused, never trusted.
+		derived, err := mldsa44.KeyID(publicKey)
+		if err != nil || !equalBytes(derived[:], key) {
+			return nil, nativeError(ErrBadPolicy, "Native policy key ID does not match its stored key")
+		}
+		controllers = append(controllers, &nativev1.ControllerV1{KeyId: mldsa44.KeyIDText(derived), Mldsa44PublicKey: publicKey, Weight: uint32(weight), PurposeMask: uint32(purposes), Recovery: recovery})
 		previous = key
 		if i+1 < count {
 			cursor, err = cs.LoadRefCell()
