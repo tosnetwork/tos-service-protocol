@@ -42,6 +42,8 @@ type accountInformation struct {
 	ExtraCurrencies   json.RawMessage `json:"extra_currencies"`
 	State             string          `json:"state"`
 	FrozenHash        string          `json:"frozen_hash"`
+	// StorageStat is the account's storage usage, served beside the state.
+	StorageStat json.RawMessage `json:"storage_stat,omitempty"`
 }
 
 type rawTransaction struct {

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tosnetwork/tos-service-protocol/internal/jsonstrict"
 	"github.com/tosnetwork/tos-service-protocol/pkg/chain"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tosutils-go/address"
@@ -447,5 +448,17 @@ func TestVariableAddressDestinationMatchesItsPayout(t *testing.T) {
 	if got[0].Destination == "" || !strings.HasPrefix(got[0].Destination, "raw:") || len(got[0].Payouts) != 1 ||
 		got[0].Payouts[0].Destination != got[0].Destination {
 		t.Fatalf("destination %q, payouts %+v", got[0].Destination, got[0].Payouts)
+	}
+}
+
+// The node's getAddressInformation result carries storage_stat beside the
+// account state; the strict result decoder must accept exactly that shape.
+func TestAccountInformationAcceptsTheServedShape(t *testing.T) {
+	raw := `{"@type":"raw.fullAccountState","balance":"5","code":"","data":"","last_transaction_id":{"@type":"internal.transactionId","lt":"1","hash":"AA=="},` +
+		`"block_id":{"@type":"tos.blockIdExt","workchain":-1,"shard":"-9223372036854775808","seqno":7,"root_hash":"AA==","file_hash":"AA=="},` +
+		`"sync_utime":1,"extra_currencies":[],"state":"active","frozen_hash":"","storage_stat":{"cells":"3","bits":"100"}}`
+	var info accountInformation
+	if err := jsonstrict.Decode([]byte(raw), &info); err != nil {
+		t.Fatalf("served account shape refused: %v", err)
 	}
 }
