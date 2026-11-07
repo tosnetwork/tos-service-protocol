@@ -323,6 +323,15 @@ func TestExistingRequestVerifiesFromTheSnapshotAlone(t *testing.T) {
 		{"metadata", 8, callFixture(t, f, 1_000_000, wrongMetadata, nil), termsHashOf(wrongMetadata), nil},
 		{"proof scheme", 8, callFixture(t, f, 1_000_000, wrongScheme, nil), termsHashOf(wrongScheme), nil},
 		{"deadline", 8, func() toschain.ActorTransaction { c := call; c.Now++; return c }(), "", nil},
+		{"cleanup bounty", 8, func() toschain.ActorTransaction {
+			x := terms
+			x.CleanupBounty = big.NewInt(100_000_001)
+			c := callFixture(t, f, 1_000_000, x, nil)
+			body := *c.Call
+			body.ExpectedTermsHash = termsHashOf(terms)
+			c.Call = &body
+			return c
+		}(), "", nil},
 		{"price", 8, callFixture(t, f, 1_000_000, func() nativecore.ServiceActorTermsV1 {
 			x := terms
 			x.PricePerCall = big.NewInt(300_000_001)

@@ -233,9 +233,17 @@ func TestReplayReconcilesHistoryWithState(t *testing.T) {
 			d.Pending[0] = e
 			return d
 		}()},
-		"refund unexplained": {[]toschain.ActorTransaction{call0}, replayData(t, f, 1, []*Request{request0}, []*Request{&expired2})},
-		"unknown request":    {[]toschain.ActorTransaction{respond1}, replayData(t, f, 0, nil, nil)},
-		"double terminal":    {[]toschain.ActorTransaction{respond1, respond1, call1, call0}, replayData(t, f, 2, []*Request{request0}, nil)},
+		"refund unexplained": {[]toschain.ActorTransaction{respond1, call1, call0}, replayData(t, f, 2, []*Request{request0},
+			[]*Request{func() *Request { r := mustRequest(t, call1); r.State = StateExpired; return r }()})},
+		"reused request id": {[]toschain.ActorTransaction{call0, call0}, replayData(t, f, 2,
+			[]*Request{request0, func() *Request {
+				r := mustRequest(t, call1)
+				r.Snapshot = request0.Snapshot
+				r.Snapshot.RequestID = 1
+				return r
+			}()}, nil)},
+		"unknown request": {[]toschain.ActorTransaction{respond1}, replayData(t, f, 0, nil, nil)},
+		"double terminal": {[]toschain.ActorTransaction{respond1, respond1, call1, call0}, replayData(t, f, 2, []*Request{request0}, nil)},
 		"liabilities": {[]toschain.ActorTransaction{call0}, func() *nativecore.ServiceActorDataV1 {
 			d := replayData(t, f, 1, []*Request{request0}, nil)
 			d.Accounting.PendingLiability = big.NewInt(1)
