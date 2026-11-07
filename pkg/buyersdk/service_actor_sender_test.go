@@ -212,7 +212,8 @@ func TestSubmissionURLAcceptsOnlyTheCanonicalForm(t *testing.T) {
 		"https://rpc.example:0", "https://rpc.example:65536", "https://rpc.example:", " https://rpc.example",
 		"https://rpc.example ", "https://rpc .example", "http://rpc.example", "http://10.0.0.1:1", "ftp://rpc.example",
 		"https://", "https://rpc..example", "https://-rpc.example", "https://rpc.123", "http://127.0.0.256:1",
-		"http://127.00.0.1:1", "https://rpc.example/a b", "https://rpc.example/é",
+		"http://127.00.0.1:1", "https://rpc.example/a b", "https://rpc.example/é", "https://rpc.0x7f",
+		"https://rpc.example:8443\x00", "https://rpc.example\t",
 	} {
 		if got, err := submissionURL(endpoint); err == nil {
 			t.Errorf("%q was accepted as %q", endpoint, got)
