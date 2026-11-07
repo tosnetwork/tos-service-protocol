@@ -1,11 +1,13 @@
 // Package quoteexchange validates portable, complete-preimage Quote Proposal
-// packages. A valid package is still non-canonical; only finalized TOS escrow
-// state can establish an Accepted Quote.
+// packages. A valid package is still non-canonical; only the finalized
+// Service Actor call transaction establishes an Accepted Quote.
 package quoteexchange
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -19,7 +21,7 @@ const MaxPackageBytes = 2 << 20
 type Validated struct {
 	Proposal         *nativev1.QuoteProposalV1
 	Manifest         nativecore.SoftwareWorkManifestV1
-	EscrowTerms      nativecore.EscrowTermsV1
+	Rail             nativecore.ServiceActorQuoteRailV1
 	TransportBinding nativecore.TransportBindingV1
 }
 
@@ -38,7 +40,8 @@ func Validate(network *nativev1.NetworkDomain, request *nativev1.RequestQuotePro
 
 // ValidatePortable proves the immutable Quote preimages without applying the
 // pre-acceptance freshness window. It is intended for post-acceptance audit and
-// recovery, where finalized escrow state—not a gateway clock—is authoritative.
+// recovery, where the finalized call transaction, not a gateway clock, is
+// authoritative.
 func ValidatePortable(network *nativev1.NetworkDomain, request *nativev1.RequestQuoteProposalRequest,
 	value *nativev1.QuoteProposalPackageV1) (*Validated, error) {
 	return validatePortable(network, request, value)
@@ -54,7 +57,7 @@ func validatePortable(network *nativev1.NetworkDomain, request *nativev1.Request
 		value.Proposal.ExpiresAtUnixSeconds == 0 {
 		return nil, errors.New("invalid Quote Proposal package identity")
 	}
-	total := len(value.CanonicalManifestCbor) + len(value.EscrowTermsBoc) + len(value.TransportBindingBoc) + len(value.DisputePolicyBoc)
+	total := len(value.CanonicalManifestCbor) + len(value.TransportBindingBoc)
 	if total <= 0 || total > MaxPackageBytes {
 		return nil, errors.New("Quote Proposal package is outside size bounds")
 	}
@@ -63,16 +66,20 @@ func validatePortable(network *nativev1.NetworkDomain, request *nativev1.Request
 		return nil, errors.New("Quote Proposal carries a non-canonical manifest")
 	}
 	canonical, manifestDigest, err := nativecore.CanonicalSoftwareWorkManifest(manifest)
-	if err != nil || !bytes.Equal(canonical, value.CanonicalManifestCbor) || manifestDigest != value.Proposal.ManifestDigest {
+	if err != nil || !bytes.Equal(canonical, value.CanonicalManifestCbor) || manifestDigest != value.Proposal.ManifestDigest ||
+		manifest.Version != value.Proposal.CapabilityVersion {
 		return nil, errors.New("Quote Proposal manifest preimage mismatch")
 	}
-	termsCell, err := canonicalCell(value.EscrowTermsBoc)
-	if err != nil || "sha256:"+hexHash(termsCell) != value.Proposal.EscrowTermsDigest {
-		return nil, errors.New("Quote Proposal escrow terms preimage mismatch")
+	rail, err := nativecore.ParseServiceActorQuoteRail(value.Proposal)
+	if err != nil {
+		return nil, fmt.Errorf("Quote Proposal rail: %w", err)
 	}
-	terms, err := nativecore.DecodeEscrowTermsCellV1(termsCell)
-	if err != nil || terms.BuyerAddress != request.BuyerAddress || terms.FundingDeadline > value.Proposal.ExpiresAtUnixSeconds {
-		return nil, errors.New("Quote Proposal escrow terms are invalid for buyer")
+	// Manifest key 21 is the owner Agent's statement of the settling actor;
+	// the proposal must name exactly that actor, code and attestor.
+	settlement := manifest.Settlement
+	if settlement.ActorWorkchain != 0 || rail.Actor != "0:"+hex.EncodeToString(settlement.ActorAccountID) ||
+		!bytes.Equal(rail.ActorCodeHash[:], settlement.ActorCodeHash) || value.Proposal.AttestorKeyId != settlement.AttestorKey {
+		return nil, errors.New("Quote Proposal rail differs from manifest key 21")
 	}
 	transportCell, err := canonicalCell(value.TransportBindingBoc)
 	if err != nil || "sha256:"+hexHash(transportCell) != value.Proposal.TransportBindingDigest {
@@ -82,19 +89,10 @@ func validatePortable(network *nativev1.NetworkDomain, request *nativev1.Request
 	if err != nil {
 		return nil, errors.New("Quote Proposal transport binding is invalid")
 	}
-	disputeCell, err := canonicalCell(value.DisputePolicyBoc)
-	if err != nil || "sha256:"+hexHash(disputeCell) != value.Proposal.DisputePolicyDigest ||
-		nativecore.ValidateObjectiveDisputePolicyCellV1(disputeCell) != nil {
-		return nil, errors.New("Quote Proposal dispute policy preimage mismatch")
-	}
-	// The signer authorization is selected by the buyer later. A fixed non-zero
-	// shape-valid digest lets the canonical builder validate every proposal field
-	// without pretending that authorization has already been chosen.
-	if _, _, err := nativecore.BuildAcceptedQuoteCommitment(network, value.Proposal,
-		"sha256:"+strings.Repeat("01", 32)); err != nil {
+	if _, _, err := nativecore.BuildAcceptedQuoteCommitment(network, value.Proposal); err != nil {
 		return nil, errors.New("Quote Proposal fields are not canonically encodable")
 	}
-	return &Validated{Proposal: value.Proposal, Manifest: manifest, EscrowTerms: terms, TransportBinding: transport}, nil
+	return &Validated{Proposal: value.Proposal, Manifest: manifest, Rail: rail, TransportBinding: transport}, nil
 }
 
 func canonicalCell(raw []byte) (*cell.Cell, error) {

@@ -1,23 +1,17 @@
 package nativecore
 
 import (
-	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
-	"math"
 	"math/big"
+	"regexp"
 
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
 
 const (
 	softwareWorkReceiptMagic  = 0x4e575231 // NWR1
-	settlementIntentMagic     = 0x4e534931 // NSI1
-	settlementIntentVersion   = 2
 	softwareWorkReceiptSchema = 1
-
-	EscrowReleaseOpcode uint64 = 0x4e450001
-	EscrowRefundOpcode  uint64 = 0x4e450002
 )
 
 type SoftwareWorkReceiptV1 struct {
@@ -223,39 +217,6 @@ func DecodeSoftwareWorkReceiptCellV1(root *cell.Cell) (SoftwareWorkReceiptV1, er
 	}, nil
 }
 
-// BuildEscrowSettlementIntentV2 builds the statement the execution signer
-// signs to release an escrow, exactly as the v2 escrow contract rebuilds it
-// before checking the signature:
-//
-//	magic:uint32 version:uint16=2 global_id:int32 query_id:uint64
-//	charged:uint128 escrow:MsgAddressInt ^(quote_hash:uint256 receipt_hash:uint256)
-//
-// globalID is the network's ConfigParam 19, which the contract reads with
-// GLOBALID; a signature made for one network does not settle on another.
-func BuildEscrowSettlementIntentV2(globalID int32, escrowAccount string, quote, receipt *cell.Cell, charged *big.Int, queryID uint64) (*cell.Cell, error) {
-	escrow, err := escrowAddress(escrowAccount)
-	if err != nil || quote == nil || receipt == nil || charged == nil || charged.Sign() <= 0 || charged.BitLen() > 120 || queryID == 0 {
-		return nil, errors.New("invalid escrow settlement intent")
-	}
-	hashes := cell.BeginCell().MustStoreSlice(quote.Hash(), 256).MustStoreSlice(receipt.Hash(), 256).EndCell()
-	return cell.BeginCell().MustStoreUInt(settlementIntentMagic, 32).MustStoreUInt(settlementIntentVersion, 16).
-		MustStoreInt(int64(globalID), 32).MustStoreUInt(queryID, 64).MustStoreBigUInt(charged, 128).
-		MustStoreAddr(escrow).MustStoreRef(hashes).EndCell(), nil
-}
+var atomicAmountPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
 
-// BuildEscrowReleaseBodyV2 builds the v2 escrow release message body.
-func BuildEscrowReleaseBodyV2(queryID uint64, receipt *cell.Cell, signature []byte) (*cell.Cell, error) {
-	if queryID == 0 || receipt == nil || len(signature) != ed25519.SignatureSize {
-		return nil, errors.New("invalid escrow release message")
-	}
-	return cell.BeginCell().MustStoreUInt(EscrowReleaseOpcode, 32).MustStoreUInt(queryID, 64).
-		MustStoreSlice(signature, 512).MustStoreRef(receipt).EndCell(), nil
-}
-
-// BuildEscrowRefundBodyV2 builds the v2 escrow refund message body.
-func BuildEscrowRefundBodyV2(queryID uint64) (*cell.Cell, error) {
-	if queryID == 0 || queryID == math.MaxUint64 {
-		return nil, errors.New("invalid escrow refund query ID")
-	}
-	return cell.BeginCell().MustStoreUInt(EscrowRefundOpcode, 32).MustStoreUInt(queryID, 64).EndCell(), nil
-}
+func digestString(value []byte) string { return "tvm-cell-sha256:" + hex.EncodeToString(value) }

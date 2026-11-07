@@ -3,13 +3,15 @@ package quoteprovider
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
-	"os"
+	"errors"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/internal/servicefixture"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/quoteexchange"
 )
@@ -22,28 +24,26 @@ func (r resolver) ResolveNativeState(context.Context, *nativev1.ResolveNativeSta
 	return r.response, nil
 }
 
-func setup(t *testing.T) (*Provider, *nativev1.RequestQuoteProposalRequest, *nativev1.NetworkDomain, time.Time) {
+type actors struct {
+	policy nativecore.ServiceActorPolicyV1
+	err    error
+	actor  string
+}
+
+func (a *actors) ResolveActorPolicy(_ context.Context, actor string) (nativecore.ServiceActorPolicyV1, error) {
+	a.actor = actor
+	return a.policy, a.err
+}
+
+func setup(t *testing.T) (*Provider, *actors, *nativev1.RequestQuoteProposalRequest, *nativev1.NetworkDomain, time.Time) {
 	t.Helper()
-	raw, err := os.ReadFile("../nativecore/testdata/software_work_manifest_v1_vector.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var vector struct {
-		Manifest json.RawMessage `json:"manifest"`
-	}
-	if err := json.Unmarshal(raw, &vector); err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := nativecore.DecodeSoftwareWorkManifestJSON(vector.Manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	settlement := servicefixture.DefaultSettlement()
+	manifest := servicefixture.Manifest("1.0.0", settlement)
 	manifestCBOR, manifestDigest, err := nativecore.CanonicalSoftwareWorkManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	network := &nativev1.NetworkDomain{NetworkId: "test", GenesisRootHash: "sha256:" + strings.Repeat("11", 32),
-		GenesisFileHash: "sha256:" + strings.Repeat("22", 32)}
+	network := servicefixture.Network()
 	capabilityID, agentID := "cap_"+strings.Repeat("33", 32), "agent_"+strings.Repeat("44", 32)
 	codeHash := "tvm-cell-sha256:" + strings.Repeat("55", 32)
 	state := &nativev1.NativeStateV1{Network: network, TvmStateHash: "tvm-cell-sha256:" + strings.Repeat("66", 32),
@@ -51,15 +51,21 @@ func setup(t *testing.T) (*Provider, *nativev1.RequestQuoteProposalRequest, *nat
 			TransactionHash: "sha256:" + strings.Repeat("77", 32)},
 		State: &nativev1.NativeStateV1_Capability{Capability: &nativev1.CapabilityStateV1{CapabilityId: capabilityID,
 			OwnerAgentId: agentID, Versions: []*nativev1.CapabilityVersionV1{{Version: manifest.Version, ManifestDigest: manifestDigest}}}}}
-	account, _ := hex.DecodeString(strings.Repeat("88", 32))
+	keyID, _ := mldsa44.ParseKeyIDText(settlement.AttestorKey)
+	metadata, err := nativecore.ServiceActorMetadataHash(nativecore.ServiceActorMetadataInputV1{Network: network,
+		CapabilityID: capabilityID, ProviderAgentID: agentID, CapabilityVersion: manifest.Version, ManifestDigest: manifestDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &actors{policy: nativecore.ServiceActorPolicyV1{PolicyVersion: 2, PricePerCall: big.NewInt(300_000_000),
+		StorageFee: big.NewInt(200_000_000), CleanupBounty: big.NewInt(100_000_000), ResponseSLA: 3600, RefundClaimWindow: 3600,
+		OpenAccess: true, MetadataHash: metadata, ProofSchemeHash: nativecore.ServiceActorSoftwareWorkProofScheme,
+		HasAttestor: true, AttestorKeyID: keyID}}
 	now := time.Unix(2_000_000_000, 0)
 	provider, err := New(Config{Resolver: resolver{&nativev1.ResolveNativeStateResponse{Found: true, State: state}}, Network: network,
-		RegistryCodeHash: codeHash, ProviderAgentID: agentID, ProviderAddress: "0:" + strings.Repeat("99", 32),
+		RegistryCodeHash: codeHash, ProviderAgentID: agentID, Actors: source,
 		ManifestCBOR: manifestCBOR, Transport: nativecore.TransportBindingV1{SecurityMode: nativecore.TransportHTTPS,
 			MaxRequestBytes: 1 << 20, BaseURL: "https://provider.example"},
-		MaximumPrice: &nativev1.MoneyV1{Asset: &nativev1.TOSAssetIdentityV1{Master: &nativev1.TOSContractIdentityV1{
-			Workchain: 0, AccountId: account, CodeHash: "tvm-cell-sha256:" + strings.Repeat("aa", 32)},
-			WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("bb", 32), Decimals: 6}, AtomicAmount: "25000000"},
 		CallerID: "provider", Now: func() time.Time { return now }, Random: func(value []byte) error {
 			for i := range value {
 				value[i] = byte(i + 1)
@@ -71,31 +77,48 @@ func setup(t *testing.T) (*Provider, *nativev1.RequestQuoteProposalRequest, *nat
 	}
 	request := &nativev1.RequestQuoteProposalRequest{Context: &nativev1.RequestContext{RequestId: "buyer-request"},
 		CapabilityId: capabilityID, CapabilityVersion: manifest.Version, BuyerAddress: "0:" + strings.Repeat("cc", 32)}
-	return provider, request, network, now
+	return provider, source, request, network, now
 }
 
-func TestProviderConstructsValidatedPackageFromFinalizedCapability(t *testing.T) {
-	provider, request, network, now := setup(t)
+func TestProviderQuotesTheFinalizedActorPolicy(t *testing.T) {
+	provider, source, request, network, now := setup(t)
 	value, err := provider.RequestQuoteProposal(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	validated, err := quoteexchange.Validate(network, request, value, now)
-	if err != nil || validated.EscrowTerms.BuyerAddress != request.BuyerAddress ||
-		value.Proposal.ProposalId != "provider-0102030405060708090a0b0c0d0e0f10" {
+	if err != nil || value.Proposal.ProposalId != "provider-0102030405060708090a0b0c0d0e0f10" {
 		t.Fatalf("validated=%+v proposal=%+v err=%v", validated, value.Proposal, err)
+	}
+	terms, _ := nativecore.ServiceActorTermsHash(nativecore.TermsOfPolicy(source.policy))
+	if value.Proposal.TermsHash != hex.EncodeToString(terms[:]) || value.Proposal.PolicyVersion != 2 ||
+		value.Proposal.PriceNanotos != "300000000" || value.Proposal.StorageFeeNanotos != "200000000" ||
+		source.actor != "0:"+strings.Repeat("77", 32) {
+		t.Fatalf("proposal does not carry the actor policy: %+v", value.Proposal)
 	}
 }
 
-func TestProviderRejectsWrongVersionAndOwner(t *testing.T) {
-	provider, request, _, _ := setup(t)
-	request.CapabilityVersion = "other"
-	if _, err := provider.RequestQuoteProposal(context.Background(), request); err == nil {
-		t.Fatal("wrong version accepted")
-	}
-	provider, request, _, _ = setup(t)
-	provider.config.ProviderAgentID = "agent_" + strings.Repeat("dd", 32)
-	if _, err := provider.RequestQuoteProposal(context.Background(), request); err == nil {
-		t.Fatal("wrong owner accepted")
+func TestProviderRefusesMisboundActorsAndWrongCapabilities(t *testing.T) {
+	for name, edit := range map[string]func(*Provider, *actors, *nativev1.RequestQuoteProposalRequest){
+		"wrong version": func(_ *Provider, _ *actors, r *nativev1.RequestQuoteProposalRequest) { r.CapabilityVersion = "other" },
+		"wrong owner": func(p *Provider, _ *actors, _ *nativev1.RequestQuoteProposalRequest) {
+			p.config.ProviderAgentID = "agent_" + strings.Repeat("dd", 32)
+		},
+		"no attestor": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) { a.policy.HasAttestor = false },
+		"rotated key": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) { a.policy.AttestorKeyID[0] ^= 1 },
+		"metadata":    func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) { a.policy.MetadataHash[0] ^= 1 },
+		"proof scheme": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) {
+			a.policy.ProofSchemeHash[0] ^= 1
+		},
+		"zero price": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) {
+			a.policy.PricePerCall = big.NewInt(0)
+		},
+		"actor missing": func(_ *Provider, a *actors, _ *nativev1.RequestQuoteProposalRequest) { a.err = errors.New("absent") },
+	} {
+		provider, source, request, _, _ := setup(t)
+		edit(provider, source, request)
+		if _, err := provider.RequestQuoteProposal(context.Background(), request); err == nil {
+			t.Errorf("%s accepted", name)
+		}
 	}
 }

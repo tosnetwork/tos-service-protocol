@@ -2709,58 +2709,10 @@ func (x *TOSAssetIdentityV1) GetDecimals() uint32 {
 	return 0
 }
 
-type MoneyV1 struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Asset         *TOSAssetIdentityV1    `protobuf:"bytes,1,opt,name=asset,proto3" json:"asset,omitempty"`
-	AtomicAmount  string                 `protobuf:"bytes,2,opt,name=atomic_amount,json=atomicAmount,proto3" json:"atomic_amount,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *MoneyV1) Reset() {
-	*x = MoneyV1{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[34]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *MoneyV1) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*MoneyV1) ProtoMessage() {}
-
-func (x *MoneyV1) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[34]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MoneyV1.ProtoReflect.Descriptor instead.
-func (*MoneyV1) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{34}
-}
-
-func (x *MoneyV1) GetAsset() *TOSAssetIdentityV1 {
-	if x != nil {
-		return x.Asset
-	}
-	return nil
-}
-
-func (x *MoneyV1) GetAtomicAmount() string {
-	if x != nil {
-		return x.AtomicAmount
-	}
-	return ""
-}
-
+// A Quote Proposal is gateway-local and non-canonical until accepted on TOS.
+// It settles on the Service Actor rail: the price is native TOS and every
+// rail field must equal finalized actor state and manifest key 21 before a
+// buyer builds a call.
 type QuoteProposalV1 struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	ProposalId             string                 `protobuf:"bytes,1,opt,name=proposal_id,json=proposalId,proto3" json:"proposal_id,omitempty"`
@@ -2769,17 +2721,28 @@ type QuoteProposalV1 struct {
 	ProviderAgentId        string                 `protobuf:"bytes,4,opt,name=provider_agent_id,json=providerAgentId,proto3" json:"provider_agent_id,omitempty"`
 	ManifestDigest         string                 `protobuf:"bytes,5,opt,name=manifest_digest,json=manifestDigest,proto3" json:"manifest_digest,omitempty"`
 	TransportBindingDigest string                 `protobuf:"bytes,6,opt,name=transport_binding_digest,json=transportBindingDigest,proto3" json:"transport_binding_digest,omitempty"`
-	MaximumPrice           *MoneyV1               `protobuf:"bytes,7,opt,name=maximum_price,json=maximumPrice,proto3" json:"maximum_price,omitempty"`
-	EscrowTermsDigest      string                 `protobuf:"bytes,8,opt,name=escrow_terms_digest,json=escrowTermsDigest,proto3" json:"escrow_terms_digest,omitempty"`
-	DisputePolicyDigest    string                 `protobuf:"bytes,9,opt,name=dispute_policy_digest,json=disputePolicyDigest,proto3" json:"dispute_policy_digest,omitempty"`
-	ExpiresAtUnixSeconds   uint64                 `protobuf:"varint,10,opt,name=expires_at_unix_seconds,json=expiresAtUnixSeconds,proto3" json:"expires_at_unix_seconds,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Buyer-side acceptance deadline only; the actor does not enforce it.
+	ExpiresAtUnixSeconds uint64 `protobuf:"varint,10,opt,name=expires_at_unix_seconds,json=expiresAtUnixSeconds,proto3" json:"expires_at_unix_seconds,omitempty"`
+	// Service Actor account; workchain 0 only.
+	Actor *TOSAccountAddressV1 `protobuf:"bytes,11,opt,name=actor,proto3" json:"actor,omitempty"`
+	// tvm-cell-sha256:<64 lowercase hex>; must equal a published release.
+	ActorCodeHash string `protobuf:"bytes,12,opt,name=actor_code_hash,json=actorCodeHash,proto3" json:"actor_code_hash,omitempty"`
+	PolicyVersion uint32 `protobuf:"varint,13,opt,name=policy_version,json=policyVersion,proto3" json:"policy_version,omitempty"`
+	// 64 lowercase hex; the actor's terms_hash for the quoted policy.
+	TermsHash string `protobuf:"bytes,14,opt,name=terms_hash,json=termsHash,proto3" json:"terms_hash,omitempty"`
+	// Exact price_per_call in nanoTOS: positive, [1-9][0-9]*, below 2^120.
+	PriceNanotos string `protobuf:"bytes,15,opt,name=price_nanotos,json=priceNanotos,proto3" json:"price_nanotos,omitempty"`
+	// Non-refundable storage fee in nanoTOS, same encoding and bound.
+	StorageFeeNanotos string `protobuf:"bytes,16,opt,name=storage_fee_nanotos,json=storageFeeNanotos,proto3" json:"storage_fee_nanotos,omitempty"`
+	// mldsa44:<64 lowercase hex key id>; equals manifest key 21 field 5.
+	AttestorKeyId string `protobuf:"bytes,17,opt,name=attestor_key_id,json=attestorKeyId,proto3" json:"attestor_key_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QuoteProposalV1) Reset() {
 	*x = QuoteProposalV1{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[35]
+	mi := &file_tos_service_v1_native_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2791,7 +2754,7 @@ func (x *QuoteProposalV1) String() string {
 func (*QuoteProposalV1) ProtoMessage() {}
 
 func (x *QuoteProposalV1) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[35]
+	mi := &file_tos_service_v1_native_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2804,7 +2767,7 @@ func (x *QuoteProposalV1) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuoteProposalV1.ProtoReflect.Descriptor instead.
 func (*QuoteProposalV1) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{35}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *QuoteProposalV1) GetProposalId() string {
@@ -2849,27 +2812,6 @@ func (x *QuoteProposalV1) GetTransportBindingDigest() string {
 	return ""
 }
 
-func (x *QuoteProposalV1) GetMaximumPrice() *MoneyV1 {
-	if x != nil {
-		return x.MaximumPrice
-	}
-	return nil
-}
-
-func (x *QuoteProposalV1) GetEscrowTermsDigest() string {
-	if x != nil {
-		return x.EscrowTermsDigest
-	}
-	return ""
-}
-
-func (x *QuoteProposalV1) GetDisputePolicyDigest() string {
-	if x != nil {
-		return x.DisputePolicyDigest
-	}
-	return ""
-}
-
 func (x *QuoteProposalV1) GetExpiresAtUnixSeconds() uint64 {
 	if x != nil {
 		return x.ExpiresAtUnixSeconds
@@ -2877,21 +2819,74 @@ func (x *QuoteProposalV1) GetExpiresAtUnixSeconds() uint64 {
 	return 0
 }
 
+func (x *QuoteProposalV1) GetActor() *TOSAccountAddressV1 {
+	if x != nil {
+		return x.Actor
+	}
+	return nil
+}
+
+func (x *QuoteProposalV1) GetActorCodeHash() string {
+	if x != nil {
+		return x.ActorCodeHash
+	}
+	return ""
+}
+
+func (x *QuoteProposalV1) GetPolicyVersion() uint32 {
+	if x != nil {
+		return x.PolicyVersion
+	}
+	return 0
+}
+
+func (x *QuoteProposalV1) GetTermsHash() string {
+	if x != nil {
+		return x.TermsHash
+	}
+	return ""
+}
+
+func (x *QuoteProposalV1) GetPriceNanotos() string {
+	if x != nil {
+		return x.PriceNanotos
+	}
+	return ""
+}
+
+func (x *QuoteProposalV1) GetStorageFeeNanotos() string {
+	if x != nil {
+		return x.StorageFeeNanotos
+	}
+	return ""
+}
+
+func (x *QuoteProposalV1) GetAttestorKeyId() string {
+	if x != nil {
+		return x.AttestorKeyId
+	}
+	return ""
+}
+
 type AcceptedQuoteV1 struct {
-	state                        protoimpl.MessageState `protogen:"open.v1"`
-	Protocol                     string                 `protobuf:"bytes,1,opt,name=protocol,proto3" json:"protocol,omitempty"`
-	QuoteCommitment              string                 `protobuf:"bytes,2,opt,name=quote_commitment,json=quoteCommitment,proto3" json:"quote_commitment,omitempty"`
-	Proposal                     *QuoteProposalV1       `protobuf:"bytes,3,opt,name=proposal,proto3" json:"proposal,omitempty"`
-	ExecutionSignerAuthorization string                 `protobuf:"bytes,4,opt,name=execution_signer_authorization,json=executionSignerAuthorization,proto3" json:"execution_signer_authorization,omitempty"`
-	Reference                    *ChainReference        `protobuf:"bytes,5,opt,name=reference,proto3" json:"reference,omitempty"`
-	Network                      *NetworkDomain         `protobuf:"bytes,6,opt,name=network,proto3" json:"network,omitempty"`
-	unknownFields                protoimpl.UnknownFields
-	sizeCache                    protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Protocol        string                 `protobuf:"bytes,1,opt,name=protocol,proto3" json:"protocol,omitempty"` // exactly tos_service_v1
+	QuoteCommitment string                 `protobuf:"bytes,2,opt,name=quote_commitment,json=quoteCommitment,proto3" json:"quote_commitment,omitempty"`
+	Proposal        *QuoteProposalV1       `protobuf:"bytes,3,opt,name=proposal,proto3" json:"proposal,omitempty"`
+	// The finalized Service Actor call transaction that accepted the Quote.
+	Reference *ChainReference `protobuf:"bytes,5,opt,name=reference,proto3" json:"reference,omitempty"`
+	Network   *NetworkDomain  `protobuf:"bytes,6,opt,name=network,proto3" json:"network,omitempty"`
+	// Request ID from the call's request snapshot message.
+	RequestId uint64 `protobuf:"varint,7,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	// 64 lowercase hex; cell_hash of the NSR1 service request.
+	RequestHash   string `protobuf:"bytes,8,opt,name=request_hash,json=requestHash,proto3" json:"request_hash,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AcceptedQuoteV1) Reset() {
 	*x = AcceptedQuoteV1{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[36]
+	mi := &file_tos_service_v1_native_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2903,7 +2898,7 @@ func (x *AcceptedQuoteV1) String() string {
 func (*AcceptedQuoteV1) ProtoMessage() {}
 
 func (x *AcceptedQuoteV1) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[36]
+	mi := &file_tos_service_v1_native_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2916,7 +2911,7 @@ func (x *AcceptedQuoteV1) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AcceptedQuoteV1.ProtoReflect.Descriptor instead.
 func (*AcceptedQuoteV1) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{36}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *AcceptedQuoteV1) GetProtocol() string {
@@ -2940,13 +2935,6 @@ func (x *AcceptedQuoteV1) GetProposal() *QuoteProposalV1 {
 	return nil
 }
 
-func (x *AcceptedQuoteV1) GetExecutionSignerAuthorization() string {
-	if x != nil {
-		return x.ExecutionSignerAuthorization
-	}
-	return ""
-}
-
 func (x *AcceptedQuoteV1) GetReference() *ChainReference {
 	if x != nil {
 		return x.Reference
@@ -2959,6 +2947,20 @@ func (x *AcceptedQuoteV1) GetNetwork() *NetworkDomain {
 		return x.Network
 	}
 	return nil
+}
+
+func (x *AcceptedQuoteV1) GetRequestId() uint64 {
+	if x != nil {
+		return x.RequestId
+	}
+	return 0
+}
+
+func (x *AcceptedQuoteV1) GetRequestHash() string {
+	if x != nil {
+		return x.RequestHash
+	}
+	return ""
 }
 
 // Discovery is derived and may be incomplete. Returned states are fresh
@@ -2974,7 +2976,7 @@ type ListCapabilitiesRequest struct {
 
 func (x *ListCapabilitiesRequest) Reset() {
 	*x = ListCapabilitiesRequest{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[37]
+	mi := &file_tos_service_v1_native_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2986,7 +2988,7 @@ func (x *ListCapabilitiesRequest) String() string {
 func (*ListCapabilitiesRequest) ProtoMessage() {}
 
 func (x *ListCapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[37]
+	mi := &file_tos_service_v1_native_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2999,7 +3001,7 @@ func (x *ListCapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*ListCapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{37}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ListCapabilitiesRequest) GetContext() *RequestContext {
@@ -3033,7 +3035,7 @@ type ListCapabilitiesResponse struct {
 
 func (x *ListCapabilitiesResponse) Reset() {
 	*x = ListCapabilitiesResponse{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[38]
+	mi := &file_tos_service_v1_native_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3045,7 +3047,7 @@ func (x *ListCapabilitiesResponse) String() string {
 func (*ListCapabilitiesResponse) ProtoMessage() {}
 
 func (x *ListCapabilitiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[38]
+	mi := &file_tos_service_v1_native_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3058,7 +3060,7 @@ func (x *ListCapabilitiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCapabilitiesResponse.ProtoReflect.Descriptor instead.
 func (*ListCapabilitiesResponse) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{38}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ListCapabilitiesResponse) GetCapabilities() []*NativeStateV1 {
@@ -3087,7 +3089,7 @@ type GatewayLocalCapabilityMetadataV1 struct {
 
 func (x *GatewayLocalCapabilityMetadataV1) Reset() {
 	*x = GatewayLocalCapabilityMetadataV1{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[39]
+	mi := &file_tos_service_v1_native_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3099,7 +3101,7 @@ func (x *GatewayLocalCapabilityMetadataV1) String() string {
 func (*GatewayLocalCapabilityMetadataV1) ProtoMessage() {}
 
 func (x *GatewayLocalCapabilityMetadataV1) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[39]
+	mi := &file_tos_service_v1_native_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3112,7 +3114,7 @@ func (x *GatewayLocalCapabilityMetadataV1) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GatewayLocalCapabilityMetadataV1.ProtoReflect.Descriptor instead.
 func (*GatewayLocalCapabilityMetadataV1) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{39}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *GatewayLocalCapabilityMetadataV1) GetName() string {
@@ -3158,7 +3160,7 @@ type CapabilitySearchResultV1 struct {
 
 func (x *CapabilitySearchResultV1) Reset() {
 	*x = CapabilitySearchResultV1{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[40]
+	mi := &file_tos_service_v1_native_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3170,7 +3172,7 @@ func (x *CapabilitySearchResultV1) String() string {
 func (*CapabilitySearchResultV1) ProtoMessage() {}
 
 func (x *CapabilitySearchResultV1) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[40]
+	mi := &file_tos_service_v1_native_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3183,7 +3185,7 @@ func (x *CapabilitySearchResultV1) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CapabilitySearchResultV1.ProtoReflect.Descriptor instead.
 func (*CapabilitySearchResultV1) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{40}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *CapabilitySearchResultV1) GetCapability() *NativeStateV1 {
@@ -3226,7 +3228,7 @@ type SearchCapabilitiesRequest struct {
 
 func (x *SearchCapabilitiesRequest) Reset() {
 	*x = SearchCapabilitiesRequest{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[41]
+	mi := &file_tos_service_v1_native_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3238,7 +3240,7 @@ func (x *SearchCapabilitiesRequest) String() string {
 func (*SearchCapabilitiesRequest) ProtoMessage() {}
 
 func (x *SearchCapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[41]
+	mi := &file_tos_service_v1_native_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3251,7 +3253,7 @@ func (x *SearchCapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchCapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*SearchCapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{41}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *SearchCapabilitiesRequest) GetContext() *RequestContext {
@@ -3292,7 +3294,7 @@ type SearchCapabilitiesResponse struct {
 
 func (x *SearchCapabilitiesResponse) Reset() {
 	*x = SearchCapabilitiesResponse{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[42]
+	mi := &file_tos_service_v1_native_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3304,7 +3306,7 @@ func (x *SearchCapabilitiesResponse) String() string {
 func (*SearchCapabilitiesResponse) ProtoMessage() {}
 
 func (x *SearchCapabilitiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[42]
+	mi := &file_tos_service_v1_native_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3317,7 +3319,7 @@ func (x *SearchCapabilitiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchCapabilitiesResponse.ProtoReflect.Descriptor instead.
 func (*SearchCapabilitiesResponse) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{42}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *SearchCapabilitiesResponse) GetResults() []*CapabilitySearchResultV1 {
@@ -3345,7 +3347,7 @@ type PublishSoftwareWorkManifestRequest struct {
 
 func (x *PublishSoftwareWorkManifestRequest) Reset() {
 	*x = PublishSoftwareWorkManifestRequest{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[43]
+	mi := &file_tos_service_v1_native_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3357,7 +3359,7 @@ func (x *PublishSoftwareWorkManifestRequest) String() string {
 func (*PublishSoftwareWorkManifestRequest) ProtoMessage() {}
 
 func (x *PublishSoftwareWorkManifestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[43]
+	mi := &file_tos_service_v1_native_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3370,7 +3372,7 @@ func (x *PublishSoftwareWorkManifestRequest) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use PublishSoftwareWorkManifestRequest.ProtoReflect.Descriptor instead.
 func (*PublishSoftwareWorkManifestRequest) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{43}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *PublishSoftwareWorkManifestRequest) GetContext() *RequestContext {
@@ -3404,7 +3406,7 @@ type PublishSoftwareWorkManifestResponse struct {
 
 func (x *PublishSoftwareWorkManifestResponse) Reset() {
 	*x = PublishSoftwareWorkManifestResponse{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[44]
+	mi := &file_tos_service_v1_native_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3416,7 +3418,7 @@ func (x *PublishSoftwareWorkManifestResponse) String() string {
 func (*PublishSoftwareWorkManifestResponse) ProtoMessage() {}
 
 func (x *PublishSoftwareWorkManifestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[44]
+	mi := &file_tos_service_v1_native_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3429,7 +3431,7 @@ func (x *PublishSoftwareWorkManifestResponse) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use PublishSoftwareWorkManifestResponse.ProtoReflect.Descriptor instead.
 func (*PublishSoftwareWorkManifestResponse) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{44}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *PublishSoftwareWorkManifestResponse) GetManifestDigest() string {
@@ -3456,7 +3458,7 @@ type GetSoftwareWorkManifestRequest struct {
 
 func (x *GetSoftwareWorkManifestRequest) Reset() {
 	*x = GetSoftwareWorkManifestRequest{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[45]
+	mi := &file_tos_service_v1_native_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3468,7 +3470,7 @@ func (x *GetSoftwareWorkManifestRequest) String() string {
 func (*GetSoftwareWorkManifestRequest) ProtoMessage() {}
 
 func (x *GetSoftwareWorkManifestRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[45]
+	mi := &file_tos_service_v1_native_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3481,7 +3483,7 @@ func (x *GetSoftwareWorkManifestRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSoftwareWorkManifestRequest.ProtoReflect.Descriptor instead.
 func (*GetSoftwareWorkManifestRequest) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{45}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *GetSoftwareWorkManifestRequest) GetContext() *RequestContext {
@@ -3508,7 +3510,7 @@ type GetSoftwareWorkManifestResponse struct {
 
 func (x *GetSoftwareWorkManifestResponse) Reset() {
 	*x = GetSoftwareWorkManifestResponse{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[46]
+	mi := &file_tos_service_v1_native_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3520,7 +3522,7 @@ func (x *GetSoftwareWorkManifestResponse) String() string {
 func (*GetSoftwareWorkManifestResponse) ProtoMessage() {}
 
 func (x *GetSoftwareWorkManifestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[46]
+	mi := &file_tos_service_v1_native_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3533,7 +3535,7 @@ func (x *GetSoftwareWorkManifestResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSoftwareWorkManifestResponse.ProtoReflect.Descriptor instead.
 func (*GetSoftwareWorkManifestResponse) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{46}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *GetSoftwareWorkManifestResponse) GetManifestDigest() string {
@@ -3562,7 +3564,7 @@ type RequestQuoteProposalRequest struct {
 
 func (x *RequestQuoteProposalRequest) Reset() {
 	*x = RequestQuoteProposalRequest{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[47]
+	mi := &file_tos_service_v1_native_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3574,7 +3576,7 @@ func (x *RequestQuoteProposalRequest) String() string {
 func (*RequestQuoteProposalRequest) ProtoMessage() {}
 
 func (x *RequestQuoteProposalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[47]
+	mi := &file_tos_service_v1_native_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3587,7 +3589,7 @@ func (x *RequestQuoteProposalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestQuoteProposalRequest.ProtoReflect.Descriptor instead.
 func (*RequestQuoteProposalRequest) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{47}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *RequestQuoteProposalRequest) GetContext() *RequestContext {
@@ -3618,20 +3620,21 @@ func (x *RequestQuoteProposalRequest) GetBuyerAddress() string {
 	return ""
 }
 
+// Every digest-bearing proposal field has its complete portable preimage.
+// The package remains non-canonical until the Service Actor call finalizes.
+// The terms_hash preimage is the finalized actor policy, not package data.
 type QuoteProposalPackageV1 struct {
 	state                 protoimpl.MessageState `protogen:"open.v1"`
 	Proposal              *QuoteProposalV1       `protobuf:"bytes,1,opt,name=proposal,proto3" json:"proposal,omitempty"`
 	CanonicalManifestCbor []byte                 `protobuf:"bytes,2,opt,name=canonical_manifest_cbor,json=canonicalManifestCbor,proto3" json:"canonical_manifest_cbor,omitempty"`
-	EscrowTermsBoc        []byte                 `protobuf:"bytes,3,opt,name=escrow_terms_boc,json=escrowTermsBoc,proto3" json:"escrow_terms_boc,omitempty"`
 	TransportBindingBoc   []byte                 `protobuf:"bytes,4,opt,name=transport_binding_boc,json=transportBindingBoc,proto3" json:"transport_binding_boc,omitempty"`
-	DisputePolicyBoc      []byte                 `protobuf:"bytes,5,opt,name=dispute_policy_boc,json=disputePolicyBoc,proto3" json:"dispute_policy_boc,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
 }
 
 func (x *QuoteProposalPackageV1) Reset() {
 	*x = QuoteProposalPackageV1{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[48]
+	mi := &file_tos_service_v1_native_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3643,7 +3646,7 @@ func (x *QuoteProposalPackageV1) String() string {
 func (*QuoteProposalPackageV1) ProtoMessage() {}
 
 func (x *QuoteProposalPackageV1) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[48]
+	mi := &file_tos_service_v1_native_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3656,7 +3659,7 @@ func (x *QuoteProposalPackageV1) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QuoteProposalPackageV1.ProtoReflect.Descriptor instead.
 func (*QuoteProposalPackageV1) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{48}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *QuoteProposalPackageV1) GetProposal() *QuoteProposalV1 {
@@ -3673,23 +3676,9 @@ func (x *QuoteProposalPackageV1) GetCanonicalManifestCbor() []byte {
 	return nil
 }
 
-func (x *QuoteProposalPackageV1) GetEscrowTermsBoc() []byte {
-	if x != nil {
-		return x.EscrowTermsBoc
-	}
-	return nil
-}
-
 func (x *QuoteProposalPackageV1) GetTransportBindingBoc() []byte {
 	if x != nil {
 		return x.TransportBindingBoc
-	}
-	return nil
-}
-
-func (x *QuoteProposalPackageV1) GetDisputePolicyBoc() []byte {
-	if x != nil {
-		return x.DisputePolicyBoc
 	}
 	return nil
 }
@@ -3703,7 +3692,7 @@ type RequestQuoteProposalResponse struct {
 
 func (x *RequestQuoteProposalResponse) Reset() {
 	*x = RequestQuoteProposalResponse{}
-	mi := &file_tos_service_v1_native_proto_msgTypes[49]
+	mi := &file_tos_service_v1_native_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3715,7 +3704,7 @@ func (x *RequestQuoteProposalResponse) String() string {
 func (*RequestQuoteProposalResponse) ProtoMessage() {}
 
 func (x *RequestQuoteProposalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_tos_service_v1_native_proto_msgTypes[49]
+	mi := &file_tos_service_v1_native_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3728,7 +3717,7 @@ func (x *RequestQuoteProposalResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestQuoteProposalResponse.ProtoReflect.Descriptor instead.
 func (*RequestQuoteProposalResponse) Descriptor() ([]byte, []int) {
-	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{49}
+	return file_tos_service_v1_native_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *RequestQuoteProposalResponse) GetPackage() *QuoteProposalPackageV1 {
@@ -3940,10 +3929,7 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"\x12TOSAssetIdentityV1\x12=\n" +
 	"\x06master\x18\x01 \x01(\v2%.tos.service.v1.TOSContractIdentityV1R\x06master\x12(\n" +
 	"\x10wallet_code_hash\x18\x02 \x01(\tR\x0ewalletCodeHash\x12\x1a\n" +
-	"\bdecimals\x18\x03 \x01(\rR\bdecimals\"h\n" +
-	"\aMoneyV1\x128\n" +
-	"\x05asset\x18\x01 \x01(\v2\".tos.service.v1.TOSAssetIdentityV1R\x05asset\x12#\n" +
-	"\ratomic_amount\x18\x02 \x01(\tR\fatomicAmount\"\xee\x03\n" +
+	"\bdecimals\x18\x03 \x01(\rR\bdecimals\"\xbf\x05\n" +
 	"\x0fQuoteProposalV1\x12\x1f\n" +
 	"\vproposal_id\x18\x01 \x01(\tR\n" +
 	"proposalId\x12#\n" +
@@ -3951,19 +3937,27 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"\x12capability_version\x18\x03 \x01(\tR\x11capabilityVersion\x12*\n" +
 	"\x11provider_agent_id\x18\x04 \x01(\tR\x0fproviderAgentId\x12'\n" +
 	"\x0fmanifest_digest\x18\x05 \x01(\tR\x0emanifestDigest\x128\n" +
-	"\x18transport_binding_digest\x18\x06 \x01(\tR\x16transportBindingDigest\x12<\n" +
-	"\rmaximum_price\x18\a \x01(\v2\x17.tos.service.v1.MoneyV1R\fmaximumPrice\x12.\n" +
-	"\x13escrow_terms_digest\x18\b \x01(\tR\x11escrowTermsDigest\x122\n" +
-	"\x15dispute_policy_digest\x18\t \x01(\tR\x13disputePolicyDigest\x125\n" +
+	"\x18transport_binding_digest\x18\x06 \x01(\tR\x16transportBindingDigest\x125\n" +
 	"\x17expires_at_unix_seconds\x18\n" +
-	" \x01(\x04R\x14expiresAtUnixSeconds\"\xd2\x02\n" +
+	" \x01(\x04R\x14expiresAtUnixSeconds\x129\n" +
+	"\x05actor\x18\v \x01(\v2#.tos.service.v1.TOSAccountAddressV1R\x05actor\x12&\n" +
+	"\x0factor_code_hash\x18\f \x01(\tR\ractorCodeHash\x12%\n" +
+	"\x0epolicy_version\x18\r \x01(\rR\rpolicyVersion\x12\x1d\n" +
+	"\n" +
+	"terms_hash\x18\x0e \x01(\tR\ttermsHash\x12#\n" +
+	"\rprice_nanotos\x18\x0f \x01(\tR\fpriceNanotos\x12.\n" +
+	"\x13storage_fee_nanotos\x18\x10 \x01(\tR\x11storageFeeNanotos\x12&\n" +
+	"\x0fattestor_key_id\x18\x11 \x01(\tR\rattestorKeyIdJ\x04\b\a\x10\bJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"R\rmaximum_priceR\x13escrow_terms_digestR\x15dispute_policy_digest\"\xf4\x02\n" +
 	"\x0fAcceptedQuoteV1\x12\x1a\n" +
 	"\bprotocol\x18\x01 \x01(\tR\bprotocol\x12)\n" +
 	"\x10quote_commitment\x18\x02 \x01(\tR\x0fquoteCommitment\x12;\n" +
-	"\bproposal\x18\x03 \x01(\v2\x1f.tos.service.v1.QuoteProposalV1R\bproposal\x12D\n" +
-	"\x1eexecution_signer_authorization\x18\x04 \x01(\tR\x1cexecutionSignerAuthorization\x12<\n" +
+	"\bproposal\x18\x03 \x01(\v2\x1f.tos.service.v1.QuoteProposalV1R\bproposal\x12<\n" +
 	"\treference\x18\x05 \x01(\v2\x1e.tos.service.v1.ChainReferenceR\treference\x127\n" +
-	"\anetwork\x18\x06 \x01(\v2\x1d.tos.service.v1.NetworkDomainR\anetwork\"\xa0\x01\n" +
+	"\anetwork\x18\x06 \x01(\v2\x1d.tos.service.v1.NetworkDomainR\anetwork\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\a \x01(\x04R\trequestId\x12!\n" +
+	"\frequest_hash\x18\b \x01(\tR\vrequestHashJ\x04\b\x04\x10\x05R\x1eexecution_signer_authorization\"\xa0\x01\n" +
 	"\x17ListCapabilitiesRequest\x128\n" +
 	"\acontext\x18\x01 \x01(\v2\x1e.tos.service.v1.RequestContextR\acontext\x12\x1b\n" +
 	"\tpage_size\x18\x02 \x01(\rR\bpageSize\x12.\n" +
@@ -4011,13 +4005,11 @@ const file_tos_service_v1_native_proto_rawDesc = "" +
 	"\acontext\x18\x01 \x01(\v2\x1e.tos.service.v1.RequestContextR\acontext\x12#\n" +
 	"\rcapability_id\x18\x02 \x01(\tR\fcapabilityId\x12-\n" +
 	"\x12capability_version\x18\x03 \x01(\tR\x11capabilityVersion\x12#\n" +
-	"\rbuyer_address\x18\x04 \x01(\tR\fbuyerAddress\"\x99\x02\n" +
+	"\rbuyer_address\x18\x04 \x01(\tR\fbuyerAddress\"\xf3\x01\n" +
 	"\x16QuoteProposalPackageV1\x12;\n" +
 	"\bproposal\x18\x01 \x01(\v2\x1f.tos.service.v1.QuoteProposalV1R\bproposal\x126\n" +
-	"\x17canonical_manifest_cbor\x18\x02 \x01(\fR\x15canonicalManifestCbor\x12(\n" +
-	"\x10escrow_terms_boc\x18\x03 \x01(\fR\x0eescrowTermsBoc\x122\n" +
-	"\x15transport_binding_boc\x18\x04 \x01(\fR\x13transportBindingBoc\x12,\n" +
-	"\x12dispute_policy_boc\x18\x05 \x01(\fR\x10disputePolicyBoc\"`\n" +
+	"\x17canonical_manifest_cbor\x18\x02 \x01(\fR\x15canonicalManifestCbor\x122\n" +
+	"\x15transport_binding_boc\x18\x04 \x01(\fR\x13transportBindingBocJ\x04\b\x03\x10\x04J\x04\b\x05\x10\x06R\x10escrow_terms_bocR\x12dispute_policy_boc\"`\n" +
 	"\x1cRequestQuoteProposalResponse\x12@\n" +
 	"\apackage\x18\x01 \x01(\v2&.tos.service.v1.QuoteProposalPackageV1R\apackage*\xf0\b\n" +
 	"\x11NativeErrorCodeV1\x12$\n" +
@@ -4084,7 +4076,7 @@ func file_tos_service_v1_native_proto_rawDescGZIP() []byte {
 }
 
 var file_tos_service_v1_native_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_tos_service_v1_native_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
+var file_tos_service_v1_native_proto_msgTypes = make([]protoimpl.MessageInfo, 49)
 var file_tos_service_v1_native_proto_goTypes = []any{
 	(NativeErrorCodeV1)(0),                      // 0: tos.service.v1.NativeErrorCodeV1
 	(RetryDispositionV1)(0),                     // 1: tos.service.v1.RetryDispositionV1
@@ -4124,22 +4116,21 @@ var file_tos_service_v1_native_proto_goTypes = []any{
 	(*ResolveDNSAliasResponse)(nil),             // 35: tos.service.v1.ResolveDNSAliasResponse
 	(*TOSContractIdentityV1)(nil),               // 36: tos.service.v1.TOSContractIdentityV1
 	(*TOSAssetIdentityV1)(nil),                  // 37: tos.service.v1.TOSAssetIdentityV1
-	(*MoneyV1)(nil),                             // 38: tos.service.v1.MoneyV1
-	(*QuoteProposalV1)(nil),                     // 39: tos.service.v1.QuoteProposalV1
-	(*AcceptedQuoteV1)(nil),                     // 40: tos.service.v1.AcceptedQuoteV1
-	(*ListCapabilitiesRequest)(nil),             // 41: tos.service.v1.ListCapabilitiesRequest
-	(*ListCapabilitiesResponse)(nil),            // 42: tos.service.v1.ListCapabilitiesResponse
-	(*GatewayLocalCapabilityMetadataV1)(nil),    // 43: tos.service.v1.GatewayLocalCapabilityMetadataV1
-	(*CapabilitySearchResultV1)(nil),            // 44: tos.service.v1.CapabilitySearchResultV1
-	(*SearchCapabilitiesRequest)(nil),           // 45: tos.service.v1.SearchCapabilitiesRequest
-	(*SearchCapabilitiesResponse)(nil),          // 46: tos.service.v1.SearchCapabilitiesResponse
-	(*PublishSoftwareWorkManifestRequest)(nil),  // 47: tos.service.v1.PublishSoftwareWorkManifestRequest
-	(*PublishSoftwareWorkManifestResponse)(nil), // 48: tos.service.v1.PublishSoftwareWorkManifestResponse
-	(*GetSoftwareWorkManifestRequest)(nil),      // 49: tos.service.v1.GetSoftwareWorkManifestRequest
-	(*GetSoftwareWorkManifestResponse)(nil),     // 50: tos.service.v1.GetSoftwareWorkManifestResponse
-	(*RequestQuoteProposalRequest)(nil),         // 51: tos.service.v1.RequestQuoteProposalRequest
-	(*QuoteProposalPackageV1)(nil),              // 52: tos.service.v1.QuoteProposalPackageV1
-	(*RequestQuoteProposalResponse)(nil),        // 53: tos.service.v1.RequestQuoteProposalResponse
+	(*QuoteProposalV1)(nil),                     // 38: tos.service.v1.QuoteProposalV1
+	(*AcceptedQuoteV1)(nil),                     // 39: tos.service.v1.AcceptedQuoteV1
+	(*ListCapabilitiesRequest)(nil),             // 40: tos.service.v1.ListCapabilitiesRequest
+	(*ListCapabilitiesResponse)(nil),            // 41: tos.service.v1.ListCapabilitiesResponse
+	(*GatewayLocalCapabilityMetadataV1)(nil),    // 42: tos.service.v1.GatewayLocalCapabilityMetadataV1
+	(*CapabilitySearchResultV1)(nil),            // 43: tos.service.v1.CapabilitySearchResultV1
+	(*SearchCapabilitiesRequest)(nil),           // 44: tos.service.v1.SearchCapabilitiesRequest
+	(*SearchCapabilitiesResponse)(nil),          // 45: tos.service.v1.SearchCapabilitiesResponse
+	(*PublishSoftwareWorkManifestRequest)(nil),  // 46: tos.service.v1.PublishSoftwareWorkManifestRequest
+	(*PublishSoftwareWorkManifestResponse)(nil), // 47: tos.service.v1.PublishSoftwareWorkManifestResponse
+	(*GetSoftwareWorkManifestRequest)(nil),      // 48: tos.service.v1.GetSoftwareWorkManifestRequest
+	(*GetSoftwareWorkManifestResponse)(nil),     // 49: tos.service.v1.GetSoftwareWorkManifestResponse
+	(*RequestQuoteProposalRequest)(nil),         // 50: tos.service.v1.RequestQuoteProposalRequest
+	(*QuoteProposalPackageV1)(nil),              // 51: tos.service.v1.QuoteProposalPackageV1
+	(*RequestQuoteProposalResponse)(nil),        // 52: tos.service.v1.RequestQuoteProposalResponse
 }
 var file_tos_service_v1_native_proto_depIdxs = []int32{
 	0,  // 0: tos.service.v1.NativeErrorV1.code:type_name -> tos.service.v1.NativeErrorCodeV1
@@ -4186,44 +4177,43 @@ var file_tos_service_v1_native_proto_depIdxs = []int32{
 	3,  // 41: tos.service.v1.ResolveDNSAliasResponse.provenance:type_name -> tos.service.v1.DNSProvenanceV1
 	8,  // 42: tos.service.v1.ResolveDNSAliasResponse.resolver_path:type_name -> tos.service.v1.TOSAccountAddressV1
 	36, // 43: tos.service.v1.TOSAssetIdentityV1.master:type_name -> tos.service.v1.TOSContractIdentityV1
-	37, // 44: tos.service.v1.MoneyV1.asset:type_name -> tos.service.v1.TOSAssetIdentityV1
-	38, // 45: tos.service.v1.QuoteProposalV1.maximum_price:type_name -> tos.service.v1.MoneyV1
-	39, // 46: tos.service.v1.AcceptedQuoteV1.proposal:type_name -> tos.service.v1.QuoteProposalV1
-	7,  // 47: tos.service.v1.AcceptedQuoteV1.reference:type_name -> tos.service.v1.ChainReference
-	6,  // 48: tos.service.v1.AcceptedQuoteV1.network:type_name -> tos.service.v1.NetworkDomain
-	4,  // 49: tos.service.v1.ListCapabilitiesRequest.context:type_name -> tos.service.v1.RequestContext
-	27, // 50: tos.service.v1.ListCapabilitiesResponse.capabilities:type_name -> tos.service.v1.NativeStateV1
-	27, // 51: tos.service.v1.CapabilitySearchResultV1.capability:type_name -> tos.service.v1.NativeStateV1
-	43, // 52: tos.service.v1.CapabilitySearchResultV1.gateway_local:type_name -> tos.service.v1.GatewayLocalCapabilityMetadataV1
-	4,  // 53: tos.service.v1.SearchCapabilitiesRequest.context:type_name -> tos.service.v1.RequestContext
-	44, // 54: tos.service.v1.SearchCapabilitiesResponse.results:type_name -> tos.service.v1.CapabilitySearchResultV1
-	4,  // 55: tos.service.v1.PublishSoftwareWorkManifestRequest.context:type_name -> tos.service.v1.RequestContext
-	27, // 56: tos.service.v1.PublishSoftwareWorkManifestResponse.capability:type_name -> tos.service.v1.NativeStateV1
-	4,  // 57: tos.service.v1.GetSoftwareWorkManifestRequest.context:type_name -> tos.service.v1.RequestContext
-	4,  // 58: tos.service.v1.RequestQuoteProposalRequest.context:type_name -> tos.service.v1.RequestContext
-	39, // 59: tos.service.v1.QuoteProposalPackageV1.proposal:type_name -> tos.service.v1.QuoteProposalV1
-	52, // 60: tos.service.v1.RequestQuoteProposalResponse.package:type_name -> tos.service.v1.QuoteProposalPackageV1
-	28, // 61: tos.service.v1.NativeService.SubmitNativeAction:input_type -> tos.service.v1.SubmitNativeActionRequest
-	30, // 62: tos.service.v1.NativeService.ResolveNativeState:input_type -> tos.service.v1.ResolveNativeStateRequest
-	34, // 63: tos.service.v1.DNSAliasService.ResolveDNSAlias:input_type -> tos.service.v1.ResolveDNSAliasRequest
-	41, // 64: tos.service.v1.CapabilityDiscoveryService.ListCapabilities:input_type -> tos.service.v1.ListCapabilitiesRequest
-	45, // 65: tos.service.v1.CapabilityDiscoveryService.SearchCapabilities:input_type -> tos.service.v1.SearchCapabilitiesRequest
-	47, // 66: tos.service.v1.CapabilityDiscoveryService.PublishSoftwareWorkManifest:input_type -> tos.service.v1.PublishSoftwareWorkManifestRequest
-	49, // 67: tos.service.v1.CapabilityDiscoveryService.GetSoftwareWorkManifest:input_type -> tos.service.v1.GetSoftwareWorkManifestRequest
-	51, // 68: tos.service.v1.CapabilityDiscoveryService.RequestQuoteProposal:input_type -> tos.service.v1.RequestQuoteProposalRequest
-	29, // 69: tos.service.v1.NativeService.SubmitNativeAction:output_type -> tos.service.v1.SubmitNativeActionResponse
-	31, // 70: tos.service.v1.NativeService.ResolveNativeState:output_type -> tos.service.v1.ResolveNativeStateResponse
-	35, // 71: tos.service.v1.DNSAliasService.ResolveDNSAlias:output_type -> tos.service.v1.ResolveDNSAliasResponse
-	42, // 72: tos.service.v1.CapabilityDiscoveryService.ListCapabilities:output_type -> tos.service.v1.ListCapabilitiesResponse
-	46, // 73: tos.service.v1.CapabilityDiscoveryService.SearchCapabilities:output_type -> tos.service.v1.SearchCapabilitiesResponse
-	48, // 74: tos.service.v1.CapabilityDiscoveryService.PublishSoftwareWorkManifest:output_type -> tos.service.v1.PublishSoftwareWorkManifestResponse
-	50, // 75: tos.service.v1.CapabilityDiscoveryService.GetSoftwareWorkManifest:output_type -> tos.service.v1.GetSoftwareWorkManifestResponse
-	53, // 76: tos.service.v1.CapabilityDiscoveryService.RequestQuoteProposal:output_type -> tos.service.v1.RequestQuoteProposalResponse
-	69, // [69:77] is the sub-list for method output_type
-	61, // [61:69] is the sub-list for method input_type
-	61, // [61:61] is the sub-list for extension type_name
-	61, // [61:61] is the sub-list for extension extendee
-	0,  // [0:61] is the sub-list for field type_name
+	8,  // 44: tos.service.v1.QuoteProposalV1.actor:type_name -> tos.service.v1.TOSAccountAddressV1
+	38, // 45: tos.service.v1.AcceptedQuoteV1.proposal:type_name -> tos.service.v1.QuoteProposalV1
+	7,  // 46: tos.service.v1.AcceptedQuoteV1.reference:type_name -> tos.service.v1.ChainReference
+	6,  // 47: tos.service.v1.AcceptedQuoteV1.network:type_name -> tos.service.v1.NetworkDomain
+	4,  // 48: tos.service.v1.ListCapabilitiesRequest.context:type_name -> tos.service.v1.RequestContext
+	27, // 49: tos.service.v1.ListCapabilitiesResponse.capabilities:type_name -> tos.service.v1.NativeStateV1
+	27, // 50: tos.service.v1.CapabilitySearchResultV1.capability:type_name -> tos.service.v1.NativeStateV1
+	42, // 51: tos.service.v1.CapabilitySearchResultV1.gateway_local:type_name -> tos.service.v1.GatewayLocalCapabilityMetadataV1
+	4,  // 52: tos.service.v1.SearchCapabilitiesRequest.context:type_name -> tos.service.v1.RequestContext
+	43, // 53: tos.service.v1.SearchCapabilitiesResponse.results:type_name -> tos.service.v1.CapabilitySearchResultV1
+	4,  // 54: tos.service.v1.PublishSoftwareWorkManifestRequest.context:type_name -> tos.service.v1.RequestContext
+	27, // 55: tos.service.v1.PublishSoftwareWorkManifestResponse.capability:type_name -> tos.service.v1.NativeStateV1
+	4,  // 56: tos.service.v1.GetSoftwareWorkManifestRequest.context:type_name -> tos.service.v1.RequestContext
+	4,  // 57: tos.service.v1.RequestQuoteProposalRequest.context:type_name -> tos.service.v1.RequestContext
+	38, // 58: tos.service.v1.QuoteProposalPackageV1.proposal:type_name -> tos.service.v1.QuoteProposalV1
+	51, // 59: tos.service.v1.RequestQuoteProposalResponse.package:type_name -> tos.service.v1.QuoteProposalPackageV1
+	28, // 60: tos.service.v1.NativeService.SubmitNativeAction:input_type -> tos.service.v1.SubmitNativeActionRequest
+	30, // 61: tos.service.v1.NativeService.ResolveNativeState:input_type -> tos.service.v1.ResolveNativeStateRequest
+	34, // 62: tos.service.v1.DNSAliasService.ResolveDNSAlias:input_type -> tos.service.v1.ResolveDNSAliasRequest
+	40, // 63: tos.service.v1.CapabilityDiscoveryService.ListCapabilities:input_type -> tos.service.v1.ListCapabilitiesRequest
+	44, // 64: tos.service.v1.CapabilityDiscoveryService.SearchCapabilities:input_type -> tos.service.v1.SearchCapabilitiesRequest
+	46, // 65: tos.service.v1.CapabilityDiscoveryService.PublishSoftwareWorkManifest:input_type -> tos.service.v1.PublishSoftwareWorkManifestRequest
+	48, // 66: tos.service.v1.CapabilityDiscoveryService.GetSoftwareWorkManifest:input_type -> tos.service.v1.GetSoftwareWorkManifestRequest
+	50, // 67: tos.service.v1.CapabilityDiscoveryService.RequestQuoteProposal:input_type -> tos.service.v1.RequestQuoteProposalRequest
+	29, // 68: tos.service.v1.NativeService.SubmitNativeAction:output_type -> tos.service.v1.SubmitNativeActionResponse
+	31, // 69: tos.service.v1.NativeService.ResolveNativeState:output_type -> tos.service.v1.ResolveNativeStateResponse
+	35, // 70: tos.service.v1.DNSAliasService.ResolveDNSAlias:output_type -> tos.service.v1.ResolveDNSAliasResponse
+	41, // 71: tos.service.v1.CapabilityDiscoveryService.ListCapabilities:output_type -> tos.service.v1.ListCapabilitiesResponse
+	45, // 72: tos.service.v1.CapabilityDiscoveryService.SearchCapabilities:output_type -> tos.service.v1.SearchCapabilitiesResponse
+	47, // 73: tos.service.v1.CapabilityDiscoveryService.PublishSoftwareWorkManifest:output_type -> tos.service.v1.PublishSoftwareWorkManifestResponse
+	49, // 74: tos.service.v1.CapabilityDiscoveryService.GetSoftwareWorkManifest:output_type -> tos.service.v1.GetSoftwareWorkManifestResponse
+	52, // 75: tos.service.v1.CapabilityDiscoveryService.RequestQuoteProposal:output_type -> tos.service.v1.RequestQuoteProposalResponse
+	68, // [68:76] is the sub-list for method output_type
+	60, // [60:68] is the sub-list for method input_type
+	60, // [60:60] is the sub-list for extension type_name
+	60, // [60:60] is the sub-list for extension extendee
+	0,  // [0:60] is the sub-list for field type_name
 }
 
 func init() { file_tos_service_v1_native_proto_init() }
@@ -4253,7 +4243,7 @@ func file_tos_service_v1_native_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tos_service_v1_native_proto_rawDesc), len(file_tos_service_v1_native_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   50,
+			NumMessages:   49,
 			NumExtensions: 0,
 			NumServices:   3,
 		},
