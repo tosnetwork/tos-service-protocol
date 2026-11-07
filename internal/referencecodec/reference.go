@@ -33,7 +33,28 @@ type VectorSet struct {
 	Signature              SignatureScheme        `json:"signature"`
 	AgentRegistration      AgentRegistration      `json:"agent_registration"`
 	CapabilityRegistration CapabilityRegistration `json:"capability_registration"`
+	Revocations            []RevocationVector     `json:"revocations"`
 	NegativeMutations      []NegativeMutation     `json:"negative_mutations"`
+}
+
+// RevocationVector is one revocation the contract executed, as recorded with
+// the exact inbound body the revoked account received.
+type RevocationVector struct {
+	Name                       string `json:"name"`
+	ObjectID                   string `json:"object_id"`
+	ContractAddress            string `json:"contract_address"`
+	Generation                 uint64 `json:"generation"`
+	Sequence                   uint64 `json:"sequence"`
+	Predecessor                string `json:"predecessor"`
+	Nonce                      string `json:"nonce"`
+	ActionHash                 string `json:"action_hash"`
+	ActionBOCBase64            string `json:"action_boc_base64"`
+	SignatureSHA256            string `json:"signature_sha256"`
+	SubmissionBodyHash         string `json:"submission_body_hash"`
+	ObjectInboundOpcode        string `json:"object_inbound_opcode"`
+	ObjectInboundBodyBOCBase64 string `json:"object_inbound_body_boc_base64"`
+	StateHashAfter             string `json:"state_hash_after"`
+	TombstoneAfter             bool   `json:"tombstone_after"`
 }
 
 type Network struct {
