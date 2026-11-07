@@ -8,14 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/big"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
-	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tosutils-go/tlb"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
@@ -539,15 +537,3 @@ func (r *ServiceActorReader) CheckEndpointGenesis(ctx context.Context, endpoint 
 
 // Endpoints returns the reader's configured endpoint URLs.
 func (r *ServiceActorReader) Endpoints() []string { return append([]string(nil), r.chain.endpoints...) }
-
-// KeyIDOf derives the key id of a stored attestor key.
-func KeyIDOf(key []byte) ([32]byte, error) { return mldsa44.KeyID(key) }
-
-// BigNano parses a decimal nanoTOS amount.
-func BigNano(value string) (*big.Int, error) {
-	amount, ok := new(big.Int).SetString(value, 10)
-	if !ok || amount.Sign() < 0 {
-		return nil, errors.New("invalid nanoTOS amount")
-	}
-	return amount, nil
-}
