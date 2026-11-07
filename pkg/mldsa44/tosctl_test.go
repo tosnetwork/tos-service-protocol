@@ -238,12 +238,31 @@ func TestHelperIsPinnedAndItsAnswersAreChecked(t *testing.T) {
 		t.Fatalf("short signature: %v", err)
 	}
 
-	// Rewriting the file in place after it was pinned must refuse to run it.
-	if err := os.WriteFile(path, []byte("#!/bin/sh\necho '"+answer+"' # changed\n"), 0o700); err != nil {
+	// Rewriting the file in place (same inode) after it was pinned must not
+	// change what runs: the rewritten script would refuse every signature,
+	// the pinned snapshot still answers valid.
+	before, err := os.Stat(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := helper.Verify(ctx, mldsa44.UseAgentPacket, message, key, signature); !errors.Is(err, mldsa44.ErrUnavailable) {
-		t.Fatalf("modified helper ran: %v", err)
+	rewrite, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rewrite.WriteString("#!/bin/sh\necho 'rewritten' >&2; exit 1\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rewrite.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := os.Stat(path); err != nil || !os.SameFile(before, after) {
+		t.Fatal("the rewrite replaced the inode instead of rewriting it")
+	}
+	if err := helper.Verify(ctx, mldsa44.UseAgentPacket, message, key, signature); err != nil {
+		t.Fatalf("the rewritten bytes ran instead of the pinned snapshot: %v", err)
+	}
+	if _, err := mldsa44.NewTosctl(mldsa44.TosctlConfig{Binary: path, SHA256: strings.Repeat("ab", 32)}); err == nil {
+		t.Fatal("the rewritten file matched an unrelated pin")
 	}
 
 	for name, body := range map[string]string{

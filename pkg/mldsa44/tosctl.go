@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
@@ -61,14 +60,14 @@ type TosctlConfig struct {
 }
 
 // Tosctl runs a pinned tosctl binary for ML-DSA-44 signing and verification.
-// The binary is identified by its SHA-256, and every invocation executes the
-// already-opened, verified file descriptor, so replacing the file at its path
-// cannot substitute another program. No shell is involved and the child gets
-// an empty environment (only VAULT_URL when signing).
+// The binary is identified by its SHA-256. NewTosctl copies it into a sealed,
+// immutable in-memory snapshot and hashes the snapshot; every invocation
+// executes that snapshot, so neither replacing nor rewriting the file at its
+// path can substitute other bytes. No shell is involved and the child gets an
+// empty environment (only VAULT_URL when signing).
 type Tosctl struct {
-	config TosctlConfig
-	mu     sync.Mutex
-	pinned executableIdentity
+	config   TosctlConfig
+	snapshot *executableSnapshot
 }
 
 // NewTosctl checks the configuration and the binary's pin.
@@ -94,11 +93,11 @@ func NewTosctl(config TosctlConfig) (*Tosctl, error) {
 	if config.Timeout < 0 || config.Timeout > MaxHelperTimeout {
 		return nil, errors.New("tosctl helper timeout is outside bounds")
 	}
-	identity, err := pinExecutable(config.Binary, config.SHA256)
+	snapshot, err := pinExecutable(config.Binary, config.SHA256)
 	if err != nil {
 		return nil, fmt.Errorf("tosctl helper binary: %w", err)
 	}
-	return &Tosctl{config: config, pinned: identity}, nil
+	return &Tosctl{config: config, snapshot: snapshot}, nil
 }
 
 // CanSign reports whether the helper was configured with signing custody.
@@ -286,11 +285,11 @@ func unlinkedFile(content []byte) (*os.File, error) {
 // run executes the pinned helper. exited reports that the helper ran and
 // exited with a non-zero status, as opposed to never running or timing out.
 func (t *Tosctl) run(ctx context.Context, environment []string, payload *os.File, args []string) ([]byte, bool, error) {
-	executable, err := t.openExecutable()
+	// The snapshot is shared and stays open; the child receives a duplicate.
+	executable, err := t.snapshot.executable()
 	if err != nil {
 		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	defer executable.Close()
 	extra := []*os.File{executable}
 	if payload != nil {
 		extra = []*os.File{payload, executable}
@@ -321,17 +320,6 @@ func (t *Tosctl) run(ctx context.Context, environment []string, payload *os.File
 		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, runErr)
 	}
 	return stdout.Bytes(), false, nil
-}
-
-func (t *Tosctl) openExecutable() (*os.File, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	file, identity, err := openPinnedExecutable(t.config.Binary, t.config.SHA256, t.pinned)
-	if err != nil {
-		return nil, err
-	}
-	t.pinned = identity
-	return file, nil
 }
 
 func decodeStrict(raw []byte, value any) error {

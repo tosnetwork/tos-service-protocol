@@ -7,14 +7,14 @@ import (
 	"os"
 )
 
-type executableIdentity struct{}
+type executableSnapshot struct{}
 
 var errUnsupportedHost = errors.New("the tosctl ML-DSA-44 helper runs only on Linux")
 
-func pinExecutable(string, string) (executableIdentity, error) {
-	return executableIdentity{}, errUnsupportedHost
+func pinExecutable(string, string) (*executableSnapshot, error) {
+	return nil, errUnsupportedHost
 }
 
-func openPinnedExecutable(string, string, executableIdentity) (*os.File, executableIdentity, error) {
-	return nil, executableIdentity{}, errUnsupportedHost
+func (*executableSnapshot) executable() (*os.File, error) {
+	return nil, errUnsupportedHost
 }

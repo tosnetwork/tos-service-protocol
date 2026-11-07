@@ -6,33 +6,32 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"sync"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-// executableIdentity is what was hashed: the file the pin was checked
-// against. A later open whose status matches it exactly (device, inode, size,
-// modification and change times) is the same unmodified file and is not
-// re-hashed; any difference forces a full re-hash against the pin.
-type executableIdentity struct {
-	device, inode   uint64
-	size            int64
-	modSec, modNsec int64
-	chgSec, chgNsec int64
-	owner, mode     uint32
-	verified        bool
+// maxExecutableBytes bounds the helper binary copied into a snapshot.
+const maxExecutableBytes = 2 << 30
+
+const requiredSeals = unix.F_SEAL_SEAL | unix.F_SEAL_SHRINK | unix.F_SEAL_GROW | unix.F_SEAL_WRITE
+
+// executableSnapshot is a sealed in-memory copy of the pinned binary. Its
+// bytes are the ones that were hashed, and the seals make them immutable, so
+// what executes is exactly what matched the pin, whatever later happens to
+// the file at the configured path.
+type executableSnapshot struct {
+	file *os.File
 }
 
-func identityOf(info os.FileInfo) (executableIdentity, error) {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return executableIdentity{}, errors.New("executable status is unavailable")
-	}
-	return executableIdentity{device: uint64(stat.Dev), inode: stat.Ino, size: info.Size(),
-		modSec: stat.Mtim.Sec, modNsec: stat.Mtim.Nsec, chgSec: stat.Ctim.Sec, chgNsec: stat.Ctim.Nsec,
-		owner: stat.Uid, mode: stat.Mode, verified: true}, nil
-}
+var (
+	snapshotMu    sync.Mutex
+	snapshotCache = map[string]*executableSnapshot{}
+)
 
 // checkExecutableFile refuses anything but a regular executable file that no
 // one but its owner can write, owned by root or by the current user.
@@ -50,64 +49,83 @@ func checkExecutableFile(info os.FileInfo) error {
 	return nil
 }
 
-func pinExecutable(path, pin string) (executableIdentity, error) {
-	file, identity, err := openPinnedExecutable(path, pin, executableIdentity{})
-	if err != nil {
-		return executableIdentity{}, err
+// pinExecutable returns the sealed snapshot of the binary at path whose
+// bytes hash to pin. Snapshots are shared within the process per path and
+// pin, so a large binary is copied once.
+func pinExecutable(path, pin string) (*executableSnapshot, error) {
+	snapshotMu.Lock()
+	defer snapshotMu.Unlock()
+	key := path + "\x00" + pin
+	if snapshot, ok := snapshotCache[key]; ok {
+		return snapshot, nil
 	}
-	_ = file.Close()
-	return identity, nil
+	snapshot, err := snapshotExecutable(path, pin)
+	if err != nil {
+		return nil, err
+	}
+	snapshotCache[key] = snapshot
+	return snapshot, nil
 }
 
-// openPinnedExecutable opens path, checks it is the pinned binary and
-// returns the open descriptor positioned at its start, ready to be executed
-// through /proc/self/fd. The descriptor, not the path, is what runs.
-func openPinnedExecutable(path, pin string, known executableIdentity) (*os.File, executableIdentity, error) {
+func snapshotExecutable(path, pin string) (*executableSnapshot, error) {
 	pathInfo, err := os.Lstat(path)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, executableIdentity{}, errors.New("executable path is unavailable or a symbolic link")
+		return nil, errors.New("executable path is unavailable or a symbolic link")
 	}
-	file, err := os.Open(path)
+	source, err := os.Open(path)
 	if err != nil {
-		return nil, executableIdentity{}, err
+		return nil, err
 	}
-	info, err := file.Stat()
+	defer source.Close()
+	info, err := source.Stat()
 	if err != nil || !os.SameFile(pathInfo, info) {
-		_ = file.Close()
-		return nil, executableIdentity{}, errors.New("executable changed while it was opened")
+		return nil, errors.New("executable changed while it was opened")
 	}
 	if err := checkExecutableFile(info); err != nil {
-		_ = file.Close()
-		return nil, executableIdentity{}, err
+		return nil, err
 	}
-	identity, err := identityOf(info)
+	if info.Size() <= 0 || info.Size() > maxExecutableBytes {
+		return nil, errors.New("executable size is outside bounds")
+	}
+	fd, err := unix.MemfdCreate("tos-mldsa44-helper", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING|unix.MFD_EXEC)
+	if errors.Is(err, unix.EINVAL) {
+		// Kernels before 6.3 do not know MFD_EXEC; their memfds are executable.
+		fd, err = unix.MemfdCreate("tos-mldsa44-helper", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	}
 	if err != nil {
-		_ = file.Close()
-		return nil, executableIdentity{}, err
+		return nil, fmt.Errorf("create executable snapshot: %w", err)
 	}
-	if !known.verified || identity != known {
-		hash := sha256.New()
-		if _, err := io.Copy(hash, file); err != nil {
-			_ = file.Close()
-			return nil, executableIdentity{}, err
-		}
-		if hex.EncodeToString(hash.Sum(nil)) != pin {
-			_ = file.Close()
-			return nil, executableIdentity{}, errors.New("executable does not match its SHA-256 pin")
-		}
-		after, err := file.Stat()
-		if err != nil {
-			_ = file.Close()
-			return nil, executableIdentity{}, err
-		}
-		if afterIdentity, err := identityOf(after); err != nil || afterIdentity != identity {
-			_ = file.Close()
-			return nil, executableIdentity{}, errors.New("executable changed while it was hashed")
-		}
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			_ = file.Close()
-			return nil, executableIdentity{}, err
-		}
+	writable := os.NewFile(uintptr(fd), "tos-mldsa44-helper")
+	defer writable.Close()
+	copied, err := io.Copy(writable, io.LimitReader(source, maxExecutableBytes+1))
+	if err != nil || copied != info.Size() {
+		return nil, errors.New("copy the executable into its snapshot")
 	}
-	return file, identity, nil
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, requiredSeals); err != nil {
+		return nil, fmt.Errorf("seal the executable snapshot: %w", err)
+	}
+	if seals, err := unix.FcntlInt(uintptr(fd), unix.F_GET_SEALS, 0); err != nil || seals&requiredSeals != requiredSeals {
+		return nil, errors.New("the executable snapshot is not sealed")
+	}
+	// A read-only descriptor is what executes: execve refuses a file that has
+	// a writable descriptor open, and the writable one is closed on return.
+	readOnly, err := os.OpenFile(fmt.Sprintf("/proc/self/fd/%d", fd), os.O_RDONLY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("reopen the executable snapshot: %w", err)
+	}
+	hash := sha256.New()
+	hashed, err := io.Copy(hash, readOnly)
+	if err != nil || hashed != copied || hex.EncodeToString(hash.Sum(nil)) != pin {
+		_ = readOnly.Close()
+		return nil, errors.New("executable does not match its SHA-256 pin")
+	}
+	return &executableSnapshot{file: readOnly}, nil
+}
+
+// executable returns the sealed snapshot to execute.
+func (s *executableSnapshot) executable() (*os.File, error) {
+	if s == nil || s.file == nil {
+		return nil, errors.New("executable snapshot is unavailable")
+	}
+	return s.file, nil
 }
