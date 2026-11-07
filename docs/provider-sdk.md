@@ -92,7 +92,10 @@ manifest digest and action hash on stderr. `apply` recomputes that publication,
 requires the returned `SignedNativeActionV1` to match byte-for-byte at the
 protobuf semantic layer, submits it with a durable retry key, waits for exact
 finalized Capability state, and then publishes the same immutable manifest
-under a separate retry key.
+under a separate retry key. Both modes take `--tosctl` and `--tosctl-sha256`,
+the pinned helper that verifies the ML-DSA-44 controller signatures against the
+finalized owner policy before anything is relayed; it holds no keys for this
+command.
 
 The Gateway bearer token is read from an owner-private regular file. HTTPS is
 the default; plaintext requires the client's explicit loopback/development
