@@ -597,6 +597,21 @@ func TestNativeAgentAuthorityResolverPinsTheRegistryDerivation(t *testing.T) {
 	if _, err := resolver.ResolveNativeAgentKey(AuthorityResolutionScopeV1{AuthoritySubject: other}, fixture.keyID, at, encoded); err == nil {
 		t.Fatal("a proof for another subject's account resolved")
 	}
+	// A proof and reads naming another account, consistent with each other
+	// and holding the subject's state, are refused: the account is the
+	// Registry's derivation for the subject, never the proof's.
+	elsewhereAccount := fixture
+	elsewhereAccount.proof.AgentAccount = "0:" + strings.Repeat("f7", 32)
+	elsewhereAccount.observation.EffectiveAccount = elsewhereAccount.proof.AgentAccount
+	elsewhereEncoded, err := EncodeNativeAgentHistoricalAuthorityProofV1(elsewhereAccount.proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := NativeAgentAuthorityResolverV1{Reader: &staticHistoryReader{observation: elsewhereAccount.observation},
+		Locator: locator, Signatures: nativeTestFake}
+	if _, err := moved.ResolveNativeAgentKey(scope, fixture.keyID, at, elsewhereEncoded); err == nil {
+		t.Fatal("a proof naming another account than the subject's Registry account resolved")
+	}
 	if _, err := resolver.ResolveNativeAgentKey(scope, fixture.keyID, at, []byte("not a proof")); err == nil {
 		t.Fatal("an undecodable proof resolved")
 	}
