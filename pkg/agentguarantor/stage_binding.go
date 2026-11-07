@@ -325,6 +325,6 @@ func VerifyPortableStageActionAdmissionEvidenceV1(evidence PortableStageActionAd
 	if err != nil {
 		return err
 	}
-	return verifyStageActionAdmissionAuthorizationV1(evidence.ActionAdmissionAuthorization, "stage-action-admission-evidence", stageBodyDigest,
-		"tos.service.agent-guarantor-stage-action-admission-signature.v1", authorityResolver, now)
+	return verifyStageActionAdmissionAuthorizationV1(evidence.ActionAdmissionAuthorization, evidence.AuthorizedAction,
+		stageBodyDigest, authorityResolver, now)
 }

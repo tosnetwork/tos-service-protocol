@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -217,37 +216,48 @@ func VerifyObjectAuthorization(authorization ProfileQualifiedObjectAuthorization
 	return nil
 }
 
+// StageActionAdmissionObjectKind is the only authorized object kind of a
+// portable stage admission authorization.
+const StageActionAdmissionObjectKind = "stage-action-admission"
+
+// StageActionAdmissionSignatureDomain separates stage admission signatures
+// from every other Action Authority signature.
+const StageActionAdmissionSignatureDomain = "tos.service.agent-guarantor-stage-action-admission-signature.v1"
+
+// ActionAuthorityEvidenceContentType tags Action Authority evidence under the
+// Semantic Action Identity scheme. It is distinct from the native Agent
+// evidence type, so neither can be presented as the other.
+const ActionAuthorityEvidenceContentType = "application/vnd.tos.service.agent-guarantor-action-authority-ed25519-evidence.v1+cbor"
+
 // verifyStageActionAdmissionAuthorizationV1 verifies a stage admission under
-// the scalar Action Authority's Semantic Action Identity scheme (Ed25519). It
-// is never native Agent evidence.
-func verifyStageActionAdmissionAuthorizationV1(authorization StageActionAdmissionAuthorizationV1, expectedObjectKind,
-	expectedBodyDigest, signatureDomain string, resolver AuthorityKeyResolver, now time.Time) error {
+// the scalar Action Authority's Semantic Action Identity scheme. It is never
+// native Agent evidence: its kind, signature domain and content type are
+// fixed, its subject and key are those of the admitted AuthorizedAction, and
+// its key and signature use exactly the AuthorizedAction text forms.
+func verifyStageActionAdmissionAuthorizationV1(authorization StageActionAdmissionAuthorizationV1,
+	action agentcommerce.AuthorizedAction, expectedBodyDigest string, resolver AuthorityKeyResolver, now time.Time) error {
 	statement := authorization.AuthorizationStatement()
-	if authorization.EvidenceContentType != NativeAuthorizationContentType ||
-		statement.AuthorizedObjectKind != expectedObjectKind || statement.AuthorizedBodyDigest != expectedBodyDigest || resolver == nil ||
-		len(authorization.Evidence.HistoricalAuthorityProof) == 0 || len(authorization.Evidence.HistoricalAuthorityProof) > 64<<10 {
-		return errors.New("Guarantor object authorization does not match the expected body")
+	if authorization.EvidenceContentType != ActionAuthorityEvidenceContentType ||
+		statement.AuthorizedObjectKind != StageActionAdmissionObjectKind || statement.AuthorizedBodyDigest != expectedBodyDigest ||
+		resolver == nil || len(authorization.Evidence.HistoricalAuthorityProof) == 0 ||
+		len(authorization.Evidence.HistoricalAuthorityProof) > 64<<10 {
+		return errors.New("Guarantor stage admission authorization does not match the expected body")
+	}
+	if statement.AuthoritySubject != action.AuthorityID || authorization.Evidence.PublicKey != action.AuthorityPublicKey {
+		return errors.New("Guarantor stage admission is not signed by the admitted action's authority key")
 	}
 	if statement.ValidationTimeUnix > uint64(now.UTC().Add(5*time.Minute).Unix()) {
 		return errors.New("Guarantor authorization validation time is in the future")
 	}
-	publicText := authorization.Evidence.PublicKey
-	if len(publicText) != len("ed25519:")+ed25519.PublicKeySize*2 || publicText[:len("ed25519:")] != "ed25519:" {
-		return errors.New("Guarantor authorization public key is invalid")
+	public, err := agentcommerce.ParseAuthorizedActionPublicKey(authorization.Evidence.PublicKey)
+	if err != nil {
+		return errors.New("Guarantor stage admission public key is invalid")
 	}
-	public, err := hex.DecodeString(publicText[len("ed25519:"):])
-	if err != nil || len(public) != ed25519.PublicKeySize {
-		return errors.New("Guarantor authorization public key is invalid")
+	signature, err := agentcommerce.ParseAuthorizedActionProof(authorization.Evidence.Signature)
+	if err != nil {
+		return errors.New("Guarantor stage admission signature is invalid")
 	}
-	signatureText := authorization.Evidence.Signature
-	if len(signatureText) <= len("ed25519:") || signatureText[:len("ed25519:")] != "ed25519:" {
-		return errors.New("Guarantor authorization signature is invalid")
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(signatureText[len("ed25519:"):])
-	if err != nil || len(signature) != ed25519.SignatureSize {
-		return errors.New("Guarantor authorization signature is invalid")
-	}
-	message, err := authorizationMessage(signatureDomain, statement)
+	message, err := authorizationMessage(StageActionAdmissionSignatureDomain, statement)
 	if err != nil || !ed25519.Verify(public, message, signature) {
 		return errors.New("Guarantor authorization signature does not verify")
 	}
@@ -255,8 +265,8 @@ func verifyStageActionAdmissionAuthorizationV1(authorization StageActionAdmissio
 		AuthoritySubject: statement.AuthoritySubject, ProfileURI: statement.ProfileURI,
 		ProfileVersion: statement.ProfileVersion, ProfileDigest: statement.ProfileDigest,
 		AuthorizedKind: statement.AuthorizedObjectKind, AuthorizedDigest: statement.AuthorizedBodyDigest,
-		SignatureDomain: signatureDomain,
-	}, publicText,
+		SignatureDomain: StageActionAdmissionSignatureDomain,
+	}, authorization.Evidence.PublicKey,
 		time.Unix(int64(statement.ValidationTimeUnix), 0).UTC(), authorization.Evidence.HistoricalAuthorityProof)
 }
 

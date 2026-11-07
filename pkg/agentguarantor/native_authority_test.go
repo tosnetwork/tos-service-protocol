@@ -2,7 +2,6 @@ package agentguarantor
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -659,27 +658,10 @@ func TestStageAdmissionIsNeverNativeEvidence(t *testing.T) {
 	if err := codec.Unmarshal(encoded, &stage); err == nil {
 		t.Fatal("native ML-DSA-44 evidence decoded as a stage admission authorization")
 	}
-	public, private, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	statement := vectorStatement
-	statement.AuthorizedObjectKind = "stage-action-admission-evidence"
-	const domain = "tos.service.agent-guarantor-stage-action-admission-signature.v1"
-	message, err := NativeAuthorizationMessage(domain, statement)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admission := StageActionAdmissionAuthorizationV1{AuthoritySubject: statement.AuthoritySubject,
-		ProfileURI: statement.ProfileURI, ProfileVersion: statement.ProfileVersion, ProfileDigest: statement.ProfileDigest,
-		AuthorizedObjectKind: statement.AuthorizedObjectKind, AuthorizedBodyDigest: statement.AuthorizedBodyDigest,
-		ValidationTimeUnix: statement.ValidationTimeUnix, EvidenceContentType: NativeAuthorizationContentType,
-		Evidence: ActionAuthorityEd25519EvidenceV1{PublicKey: "ed25519:" + hex.EncodeToString(public),
-			Signature:                "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, message)),
-			HistoricalAuthorityProof: []byte("proof")}}
-	now := time.Unix(int64(statement.ValidationTimeUnix), 0)
-	if err := verifyStageActionAdmissionAuthorizationV1(admission, statement.AuthorizedObjectKind,
-		statement.AuthorizedBodyDigest, domain, allowAuthorityResolver{}, now); err != nil {
+	fixture := newStageAdmissionFixture(t)
+	admission := fixture.sign(t, fixture.statement, StageActionAdmissionSignatureDomain)
+	now := fixture.now()
+	if err := fixture.verify(admission); err != nil {
 		t.Fatalf("Ed25519 stage admission refused: %v", err)
 	}
 	if err := VerifyObjectAuthorization(ProfileQualifiedObjectAuthorizationV1{AuthoritySubject: admission.AuthoritySubject,
@@ -688,7 +670,8 @@ func TestStageAdmissionIsNeverNativeEvidence(t *testing.T) {
 		ValidationTimeUnix: admission.ValidationTimeUnix, EvidenceContentType: NativeAuthorizationContentType,
 		Evidence: NativeMLDSA44AgentAuthorizationEvidenceV1{KeyID: admission.Evidence.PublicKey,
 			Signature: admission.Evidence.Signature, HistoricalAuthorityProof: []byte("proof")}},
-		statement.AuthorizedObjectKind, statement.AuthorizedBodyDigest, domain, allowAuthorityResolver{}, now); err == nil {
+		admission.AuthorizedObjectKind, admission.AuthorizedBodyDigest, StageActionAdmissionSignatureDomain,
+		allowAuthorityResolver{}, now); err == nil {
 		t.Fatal("an Ed25519 Action Authority signature verified as native evidence")
 	}
 	// The stage wire layout is unchanged: the same field names as before.

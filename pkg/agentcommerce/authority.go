@@ -255,6 +255,20 @@ func SignAuthorizedAction(action AuthorizedAction, privateKey ed25519.PrivateKey
 	return action, nil
 }
 
+// ParseAuthorizedActionPublicKey reads the only text form of an Action
+// Authority key, `ed25519:` and 64 lowercase hex characters, exactly as
+// AuthorizedAction.AuthorityPublicKey is read.
+func ParseAuthorizedActionPublicKey(value string) (ed25519.PublicKey, error) {
+	return parseEd25519PublicKey(value)
+}
+
+// ParseAuthorizedActionProof reads the only text form of an Action Authority
+// signature, `ed25519:` and the canonical unpadded URL-safe Base64 of 64
+// bytes, exactly as AuthorizedAction.AuthorizationProof is read.
+func ParseAuthorizedActionProof(value string) ([]byte, error) {
+	return parseEd25519Signature(value)
+}
+
 func VerifyAuthorizedAction(action AuthorizedAction, semanticFields map[string]SemanticValue, canonicalRequest []byte,
 	fence WriterFence, resolver FenceAuthorityResolver, now time.Time) error {
 	return VerifyAuthorizedActionAtAuthorityTime(action, semanticFields, canonicalRequest, fence, resolver, now, now)
