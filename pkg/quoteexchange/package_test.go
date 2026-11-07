@@ -1,102 +1,87 @@
 package quoteexchange
 
 import (
+	"bytes"
 	"encoding/hex"
-	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/internal/servicefixture"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 )
 
 func validPackage(t *testing.T) (*nativev1.NetworkDomain, *nativev1.RequestQuoteProposalRequest, *nativev1.QuoteProposalPackageV1, time.Time) {
 	t.Helper()
-	raw, err := os.ReadFile("../nativecore/testdata/software_work_manifest_v1_vector.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var vector struct {
-		Manifest json.RawMessage `json:"manifest"`
-	}
-	if err := json.Unmarshal(raw, &vector); err != nil {
-		t.Fatal(err)
-	}
-	manifest, err := nativecore.DecodeSoftwareWorkManifestJSON(vector.Manifest)
-	if err != nil {
-		t.Fatal(err)
-	}
+	settlement := servicefixture.DefaultSettlement()
+	manifest := servicefixture.Manifest("1.0.0", settlement)
 	manifestCBOR, manifestDigest, err := nativecore.CanonicalSoftwareWorkManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Unix(2_000_000_000, 0)
-	buyer, provider := "0:"+strings.Repeat("11", 32), "0:"+strings.Repeat("22", 32)
-	terms, err := nativecore.BuildEscrowTermsCellV1(nativecore.EscrowTermsV1{BuyerAddress: buyer,
-		ProviderAddress: provider, FundingDeadline: uint64(now.Add(20 * time.Minute).Unix()),
-		RefundAvailableAt: uint64(now.Add(time.Hour).Unix())})
-	if err != nil {
-		t.Fatal(err)
-	}
 	transport, transportDigest, err := nativecore.BuildTransportBindingCellV1(nativecore.TransportBindingV1{
 		SecurityMode: nativecore.TransportHTTPS, MaxRequestBytes: 1 << 20, BaseURL: "https://provider.example"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispute, disputeDigest := nativecore.BuildObjectiveDisputePolicyCellV1()
-	account, _ := hex.DecodeString(strings.Repeat("33", 32))
 	proposal := &nativev1.QuoteProposalV1{ProposalId: "provider-proposal-1",
 		CapabilityId: "cap_" + strings.Repeat("44", 32), CapabilityVersion: manifest.Version,
 		ProviderAgentId: "agent_" + strings.Repeat("55", 32), ManifestDigest: manifestDigest,
-		TransportBindingDigest: transportDigest, MaximumPrice: &nativev1.MoneyV1{Asset: &nativev1.TOSAssetIdentityV1{
-			Master: &nativev1.TOSContractIdentityV1{Workchain: 0, AccountId: account,
-				CodeHash: "tvm-cell-sha256:" + strings.Repeat("66", 32)},
-			WalletCodeHash: "tvm-cell-sha256:" + strings.Repeat("77", 32), Decimals: 6}, AtomicAmount: "25000000"},
-		EscrowTermsDigest: "sha256:" + hex.EncodeToString(terms.Hash()), DisputePolicyDigest: disputeDigest,
-		ExpiresAtUnixSeconds: uint64(now.Add(30 * time.Minute).Unix())}
-	network := &nativev1.NetworkDomain{NetworkId: "test", GenesisRootHash: "sha256:" + strings.Repeat("88", 32),
-		GenesisFileHash: "sha256:" + strings.Repeat("99", 32)}
+		TransportBindingDigest: transportDigest, ExpiresAtUnixSeconds: uint64(now.Add(30 * time.Minute).Unix()),
+		Actor:         &nativev1.TOSAccountAddressV1{Workchain: 0, AccountId: settlement.ActorAccount},
+		ActorCodeHash: "tvm-cell-sha256:" + hex.EncodeToString(settlement.ActorCodeHash), PolicyVersion: 2,
+		TermsHash: strings.Repeat("ab", 32), PriceNanotos: "300000000", StorageFeeNanotos: "200000000",
+		AttestorKeyId: settlement.AttestorKey}
 	request := &nativev1.RequestQuoteProposalRequest{CapabilityId: proposal.CapabilityId,
-		CapabilityVersion: proposal.CapabilityVersion, BuyerAddress: buyer}
+		CapabilityVersion: proposal.CapabilityVersion, BuyerAddress: "0:" + strings.Repeat("11", 32)}
 	value := &nativev1.QuoteProposalPackageV1{Proposal: proposal, CanonicalManifestCbor: manifestCBOR,
-		EscrowTermsBoc: terms.ToBOC(), TransportBindingBoc: transport.ToBOC(), DisputePolicyBoc: dispute.ToBOC()}
-	return network, request, value, now
+		TransportBindingBoc: transport.ToBOC()}
+	return servicefixture.Network(), request, value, now
 }
 
 func TestValidateCompleteQuoteProposalPackage(t *testing.T) {
 	network, request, value, now := validPackage(t)
 	validated, err := Validate(network, request, value, now)
-	if err != nil || validated.EscrowTerms.BuyerAddress != request.BuyerAddress ||
-		validated.TransportBinding.BaseURL != "https://provider.example" {
+	if err != nil || validated.TransportBinding.BaseURL != "https://provider.example" ||
+		validated.Rail.Actor != "0:"+strings.Repeat("77", 32) || validated.Rail.Price.Int64() != 300000000 {
 		t.Fatalf("validated=%+v err=%v", validated, err)
 	}
 }
 
 func TestValidateRejectsEveryConflictingPreimage(t *testing.T) {
-	mutations := []func(*nativev1.QuoteProposalPackageV1){
-		func(v *nativev1.QuoteProposalPackageV1) { v.CanonicalManifestCbor[0] ^= 1 },
-		func(v *nativev1.QuoteProposalPackageV1) { v.EscrowTermsBoc[0] ^= 1 },
-		func(v *nativev1.QuoteProposalPackageV1) { v.TransportBindingBoc[0] ^= 1 },
-		func(v *nativev1.QuoteProposalPackageV1) { v.DisputePolicyBoc[0] ^= 1 },
+	mutations := map[string]func(*nativev1.QuoteProposalPackageV1){
+		"manifest byte":    func(v *nativev1.QuoteProposalPackageV1) { v.CanonicalManifestCbor[0] ^= 1 },
+		"transport byte":   func(v *nativev1.QuoteProposalPackageV1) { v.TransportBindingBoc[0] ^= 1 },
+		"actor not key 21": func(v *nativev1.QuoteProposalPackageV1) { v.Proposal.Actor.AccountId = bytes.Repeat([]byte{0x78}, 32) },
+		"code not key 21": func(v *nativev1.QuoteProposalPackageV1) {
+			v.Proposal.ActorCodeHash = "tvm-cell-sha256:" + strings.Repeat("89", 32)
+		},
+		"attestor not key 21": func(v *nativev1.QuoteProposalPackageV1) {
+			v.Proposal.AttestorKeyId = "mldsa44:" + strings.Repeat("98", 32)
+		},
+		"masterchain actor": func(v *nativev1.QuoteProposalPackageV1) { v.Proposal.Actor.Workchain = -1 },
+		"zero price":        func(v *nativev1.QuoteProposalPackageV1) { v.Proposal.PriceNanotos = "0" },
+		"manifest digest": func(v *nativev1.QuoteProposalPackageV1) {
+			v.Proposal.ManifestDigest = "sha256:" + strings.Repeat("01", 32)
+		},
+		"version": func(v *nativev1.QuoteProposalPackageV1) { v.Proposal.CapabilityVersion = "1.0.1" },
 	}
-	for index, mutate := range mutations {
+	for name, mutate := range mutations {
 		network, request, value, now := validPackage(t)
 		mutate(value)
+		if name == "version" {
+			request.CapabilityVersion = "1.0.1"
+		}
 		if _, err := Validate(network, request, value, now); err == nil {
-			t.Fatalf("mutation %d accepted", index)
+			t.Errorf("%s accepted", name)
 		}
 	}
 }
 
-func TestValidateRejectsWrongBuyerOrExpiredProposal(t *testing.T) {
+func TestValidateRejectsExpiredProposal(t *testing.T) {
 	network, request, value, now := validPackage(t)
-	request.BuyerAddress = "0:" + strings.Repeat("aa", 32)
-	if _, err := Validate(network, request, value, now); err == nil {
-		t.Fatal("wrong buyer accepted")
-	}
-	network, request, value, now = validPackage(t)
 	if _, err := Validate(network, request, value, now.Add(time.Hour)); err == nil {
 		t.Fatal("expired proposal accepted")
 	}

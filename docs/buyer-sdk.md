@@ -1,159 +1,97 @@
-# Native buyer SDK
+# Service Actor buyer SDK
 
-`pkg/buyersdk` is the buyer-side safety boundary for one Paid Demand purchase
-settled through the stablecoin escrow v2 contract. It reviews a non-canonical
-Quote Proposal together with the Agent Agreement and signed Provider Offer,
-verifies the manifest and finalized Capability, derives the exact Accepted
-Quote and escrow, and then deploys, accepts and funds only that escrow, each as
-a separate custody-authorized step confirmed from finalized chain state.
+`pkg/buyersdk` buys one call from a Service Actor: discover the offer, verify
+it against quorum-finalized state, call with the quoted terms, and read the
+result back from the finalized call transaction. Settlement is native TOS on
+the Service Actor rail; there is no escrow, stablecoin or Paid Demand path.
 
-The SDK builds, deploys and settles against exactly one escrow code: the
-released `tos-service-stablecoin-escrow-v2` contract, whose cell hash is
-`nativecore.EscrowV2CodeHash` and whose frozen code `nativecore.EscrowV2Code()`
-returns. Any other escrow code is refused when the buyer is configured, when a
-StateInit is built, when a deployment is prepared or broadcast, and when an
-escrow is resolved from the chain.
+The SDK holds no private key and trusts no gateway for authority. A manifest
+is used only after its bytes reproduce the digest the finalized Capability
+version commits to, and every verification reads one finalized checkpoint
+(`toschain.ServiceActorSession`), so no result is composed from reads at
+different checkpoints.
 
-The SDK does not trust a gateway response as commercial authority and does not
-hold a private key. Applications supply narrow adapters: finalized Native
-resolution, finalized TOS stablecoin observation, finalized escrow resolution,
-an escrow deployer, a wallet action sender and a custody effect authorizer.
+## Pins
 
-## Construct the readers
+- the network domain (genesis root and file hashes, network ID);
+- the Native Registry code BOC and hash;
+- the Service Actor release code hash (`tvm-cell-sha256:<hex>`). No release
+  is published yet, so there is no default: the buyer refuses to start
+  without one;
+- three to eight RPC endpoints and a strict-majority quorum;
+- the buyer wallet address and the tosctl custody binary by SHA-256.
 
-chain, err := toschain.New(toschain.Config{
-    Network: networkDomain.NetworkId,
-    Endpoints: []string{nodeA, nodeB, nodeC},
-    Quorum: 2,
-})
-if err != nil { /* fail closed */ }
-locator, err := nativecore.NewLocator(
-    networkDomain,
-    0,
-    reviewedRegistryCodeBOCBase64,
-    registryCodeHash,
-)
-if err != nil { /* fail closed */ }
-nativeResolver, err := toschain.NewSimplifiedNativeResolver(
-    chain,
-    locator,
-    "/var/lib/tos-service-buyer/native.checkpoint",
-)
-if err != nil { /* fail closed */ }
-nativeClient, err := toschain.NewDirectNativeClient(nativeResolver)
-if err != nil { /* fail closed */ }
-assetResolver, err := toschain.NewStablecoinResolver(
-    chain,
-    networkDomain,
-    "/var/lib/tos-service-buyer/stablecoin.checkpoint",
-)
-if err != nil { /* fail closed */ }
+## Flow
 
-escrowResolver, err := toschain.NewEscrowResolver(
-    chain,
-    networkDomain,
-    nativecore.EscrowV2CodeHash,
-    "/var/lib/tos-service-buyer/escrow.checkpoint",
-)
-if err != nil { /* fail closed */ }
-escrowCode, err := nativecore.EscrowV2Code()
-if err != nil { /* fail closed */ }
+1. `Discover(capability, version)` returns an `Offer` that passed the
+   binding steps (Capability, version, owner Agent, manifest digest; one actor
+   address in manifest key 21; one code hash, equal to the pinned release;
+   one attestor in key 21, committed by key 18) and the admission steps that
+   need no Quote (active, attestor equal to key 21, NSM1 metadata and the
+   software-work proof scheme, policy bounds, the buyer admitted).
+2. `Prepare(request, package, execution_id, input_digest)` validates the
+   Quote Proposal package (`pkg/quoteexchange`), refuses an expired Quote,
+   runs admission including the Quote's terms hash, policy version, price and
+   storage fee against one fresh checkpoint, builds the rail Accepted Quote
+   and the NSR1 `request_hash`, and records the call in the journal with a
+   budget reservation of `price + storage_fee + 0.2 TOS`. A `request_hash` or
+   `query_id` is never reused.
+3. `Call(request_hash)` re-derives every commitment from the record, refuses
+   an expired Quote, re-runs admission at a fresh checkpoint, runs the custody
+   preflight, durably enters `sending`, and runs
 
-buyer, err := buyersdk.NewPaidDemandBuyer(buyersdk.PaidDemandBuyerConfig{
-    NativeClient: nativeClient,
-    AssetResolver: assetResolver,
-    Network: networkDomain,
-    RegistryCodeHash: registryCodeHash,
-    BuyerAddress: buyerAddress,
-    AssetWalletCode: reviewedStablecoinWalletCode,
-    BudgetLimits: buyersdk.BudgetLimits{
-        Window: 24 * time.Hour,
-        MaxPurchases: 20,
-        MaxPerPurchaseAtomic: "50000000",
-        MaxTotalAtomic: "250000000",
-    },
-    EscrowResolver: escrowResolver,
-    ProviderOfferResolver: providerOfferKeys,
-    EscrowCode: escrowCode,
-    Deployer: deployer,
-    ActionSender: actionSender,
-    EffectAuthorizer: custodyAuthorizer,
-    OwnerID: ownerID,
-    AgentID: buyerAgentID,
-    CallerID: buyerAgentID,
-    NetworkGlobalID: networkGlobalID,
-})
-```
+   ```text
+   tosctl agent service send --operation call --address <actor> --from <wallet>
+     --query-id <q> --request-hash <hex> --expected-terms-hash <quoted hex> --yes
+   ```
 
-`NewEscrowResolver` refuses any code hash other than `nativecore.EscrowV2CodeHash`.
+   tosctl attaches the exact minimum payment and refuses the call unless the
+   actor's live terms hash to the quoted value; the contract refuses it again
+   (exit 1926) if the terms change before the call lands. A call that left
+   `prepared` is never sent again: a send that may have reached the chain is
+   `ambiguous`, and a record found in `sending` after a crash is recovered as
+   `ambiguous`.
+4. `Resolve(request_hash)` finds the exactly one finalized transaction from
+   the buyer wallet whose call body carries the record's `query_id`,
+   `request_hash` and terms hash. An aborted one marks the call `refused` and
+   releases its reservation. A successful one is verified from the
+   transaction and its `SAR1` request snapshot alone (caller, request hash,
+   the attestor admission verified, the terms preimage hashing to the quoted
+   terms hash, NSM1, proof scheme and deadlines); then the actor's complete
+   history is replayed through the request state machine and reconciled with
+   the actor state at the same checkpoint, and `get_request` / `get_refund`
+   must agree with the decoded entries. The report gives the state
+   (`pending`, `expired`, `responded`, `refunded`, `swept`), the buyer status
+   (`pending`, `overdue`, `refundable`, `lapsed`, ...) and the required action.
 
-`DirectNativeClient` is an in-process interface adapter, not another resolver.
-The authoritative result still comes from `SimplifiedNativeResolver` reading
-typed Registry state at a strict-majority finalized TOS checkpoint. Deployments
-may instead supply the authenticated Connect client when process separation is
-required; both paths apply the same SDK verification and neither makes the
-gateway authoritative.
+The SDK does not send `expire` or `claim_refund`; it reports when they are
+due. The storage fee is never refunded.
 
-The stablecoin resolver reads the authenticated master and the buyer's
-deterministically derived wallet at one quorum-finalized checkpoint. It obtains
-the wallet-code preimage from the reviewed master contract, checks both code
-hashes, owner, master, unlocked status, exact balance, network genesis, and a
-durable monotonic checkpoint. It does not resolve assets by ticker or trust a
-gateway-projected balance.
+## Custody preflight
 
-## Prepare, deploy, accept and fund
+Before a call is sent, `TOSCTLServiceActorSender.Preflight` proves without
+broadcasting that:
 
-Prepare the purchase from the Agreement, the signed Provider Offer, the
-received Quote Proposal and the independently retrieved manifest:
+- the tosctl wallet signs as the buyer wallet: a `wallet send --build-only`
+  of the exact call body must report the buyer as payer, the actor as
+  destination and the exact payment;
+- tosctl submits only to verified endpoints: its effective `chain_rpc` list,
+  resolved as tosctl resolves it, must be non-empty, every entry must be one
+  of the reader's endpoints, and each must report the pinned genesis;
+- the amounts fit this tosctl path, which carries prices and payments in 64
+  bits; larger values are refused with `ErrUnsupportedAmount` before
+  anything is recorded as sent.
 
-```go
-prepared, err := buyer.PreparePurchase(ctx, buyersdk.PaidDemandPurchaseInput{
-    Agreement: agreement,
-    ProviderOffer: providerOffer,
-    Proposal: proposal,
-    ManifestCanonical: manifest,
-    EscrowTerms: reviewedTerms,
-    ExecutionSignerEd25519: executionSigner,
-    TransportBinding: reviewedTransport,
-    ExecutionDeadlineUnix: executionDeadline,
-})
-if err != nil { /* reject the proposal */ }
-```
+## Journal
 
-Show the operator at least `ManifestDigest`, `AgreementDigest`,
-`QuoteCommitment`, escrow address, stablecoin master, buyer wallet, and
-`AmountAtomic`. Then run the three transitions; each returns only after the
-finalized escrow reaches the expected state:
+`ServiceActorJournal` is an owner-private directory. Every change holds one
+exclusive file lock across processes and is written by an atomic, synced
+replacement. Reservations are kept by `prepared` (until the Quote expires),
+`sending`, `submitted`, `ambiguous` and `admitted` records and released only
+by `refused`.
 
-```go
-deployed, err := buyer.Deploy(ctx, prepared) // pending_acceptance
-accepted, err := buyer.Accept(ctx, prepared) // awaiting_funding
-funded, err := buyer.Fund(ctx, prepared)     // funded
-```
+## Command
 
-Deployment creates only the deterministic pending-acceptance account. The
-escrow cannot receive stablecoin until the buyer's separately authorized
-acceptance has finalized. Acceptance and funding are custody effects: the
-authorizer approves each exact message body before the wallet action sender
-signs it, and an ambiguous result is resolved from finalized chain state and
-never resubmitted as a new action.
-
-For local `tosctl` custody, `TOSCTLPaidDemandEscrowDeployer` implements the
-deployment boundary without receiving a key. It first asks custody to build and
-sign the exact message without broadcasting it, then a separate step submits
-only those exact signed bytes. It independently parses the StateInit and
-requires the frozen shape (no split depth or special value, exactly one code
-and data reference, no library or trailing data), the released escrow v2 code,
-version 2 pending-acceptance data, the Quote commitment, the deterministic
-address, an empty deploy body, the attached TOS amount, and the
-custody-produced signed-message hash. An uncertain broadcast result is reported
-as ambiguous and is never rebuilt or re-signed automatically.
-
-Escrow v2 is experimental: a payout refused by the recipient's wallet can
-strand funds in the escrow, an accepted risk only for local and test networks
-with test assets. The deployer therefore prepares and broadcasts nothing
-unless it is configured with `AcknowledgeNonProductionTestDeployment`, which is
-off by default. The acknowledgment is checked before preparation and again
-before broadcast, and is recorded in the prepared deployment as
-`"non_production": true`; a prepared deployment without it is not broadcast.
-This is separate from `AcknowledgeUnpinnedManualBroadcast`.
+`cmd/tos-service-buyer` exposes `discover`, `prepare`, `call`, `status` and
+`requests` (the derived request index of `pkg/serviceactorindex`), printing
+JSON.

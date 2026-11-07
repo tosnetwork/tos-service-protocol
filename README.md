@@ -16,7 +16,10 @@ The normative product and protocol design lives in
 - `pkg/toschain` — strict-majority finalized chain reads and typed Native state
   decoding.
 - `pkg/nativeclient`, `pkg/providersdk`, and `pkg/buyersdk` — public Gate E
-  building blocks for canonical publication and bounded stablecoin purchases.
+  building blocks for canonical publication and bounded Service Actor calls.
+- `pkg/serviceactor` and `pkg/serviceactorindex` — Service Actor binding,
+  admission and request verification, the request lifecycle, a rebuildable
+  request index and verified offer discovery.
 - `pkg/capabilitycatalog` — bounded, incomplete discovery IDs plus immutable
   digest-addressed manifests; all listed state is freshly resolved from TOS.
 - `pkg/chainactionpublisher` — hardened `tosctl` transport for exact signed TVM
@@ -57,14 +60,14 @@ private-key or gateway-database authority. See
 
 ## Buyer SDK
 
-`pkg/buyersdk` prepares an exact Accepted Quote and deterministic stablecoin
-escrow v2 only after checking the Agreement, signed Provider Offer, manifest,
-finalized Capability, TOS-network stablecoin, and buyer balance. It deploys,
-accepts and funds the escrow as separate custody-authorized steps, each
-confirmed from finalized chain state; an ambiguous submission is resolved from
-finalized state and never paid again automatically. Only the released escrow v2
-code (`nativecore.EscrowV2CodeHash`) is built, deployed or resolved. See
-[`docs/buyer-sdk.md`](docs/buyer-sdk.md).
+`pkg/buyersdk` discovers a Capability version's Service Actor offer, verifies
+manifest key 21, the actor's code hash against a pinned release, its attestor
+and its current terms at one quorum-finalized checkpoint, and calls it through
+`tosctl agent service send` with the quoted `expected_terms_hash`. The result
+is read back from the finalized call transaction and its request snapshot; an
+ambiguous submission is resolved from finalized state and never sent again.
+Settlement is native TOS; the stablecoin escrow and Paid Demand paths are
+retired. See [`docs/buyer-sdk.md`](docs/buyer-sdk.md).
 
 The separate derived discovery boundary is documented in
 [`docs/capability-catalog.md`](docs/capability-catalog.md). Catalog inclusion is

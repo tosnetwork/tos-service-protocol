@@ -14,6 +14,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// NativeClient resolves finalized typed Native Registry state.
+type NativeClient interface {
+	ResolveNativeState(context.Context, *nativev1.ResolveNativeStateRequest) (*nativev1.ResolveNativeStateResponse, error)
+}
+
 type CapabilityVerifierConfig struct {
 	NativeClient     NativeClient
 	Network          *nativev1.NetworkDomain

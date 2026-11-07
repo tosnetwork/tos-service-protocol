@@ -12,13 +12,9 @@ import (
 
 const (
 	transportBindingMagic  = 0x4e544231 // NTB1
-	disputePolicyMagic     = 0x4e445031 // NDP1
 	quotePreimageSchema    = 1
 	TransportLoopbackHTTP  = 0
 	TransportHTTPS         = 1
-	ObjectiveDisputeMode   = 0
-	ReceiptReleaseRule     = 1
-	TimeoutRefundRule      = 1
 	maxTransportURLBytes   = 120
 	maxTransportRequestLen = 16 << 20
 )
@@ -28,8 +24,6 @@ type TransportBindingV1 struct {
 	MaxRequestBytes uint32
 	BaseURL         string
 }
-
-type ObjectiveDisputePolicyV1 struct{}
 
 func validLoopbackEndpoint(host string) bool {
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
@@ -109,37 +103,4 @@ func DecodeTransportBindingCellV1(root *cell.Cell) (TransportBindingV1, error) {
 		return TransportBindingV1{}, errors.New("invalid transport binding")
 	}
 	return value, nil
-}
-
-func BuildObjectiveDisputePolicyCellV1() (*cell.Cell, string) {
-	root := cell.BeginCell().MustStoreUInt(disputePolicyMagic, 32).
-		MustStoreUInt(quotePreimageSchema, 16).MustStoreUInt(ObjectiveDisputeMode, 8).
-		MustStoreUInt(ReceiptReleaseRule, 8).MustStoreUInt(TimeoutRefundRule, 8).EndCell()
-	return root, "sha256:" + hex.EncodeToString(root.Hash())
-}
-
-func ValidateObjectiveDisputePolicyCellV1(root *cell.Cell) error {
-	if root == nil {
-		return errors.New("missing objective dispute policy")
-	}
-	s, err := root.BeginParse()
-	if err != nil {
-		return errors.New("invalid dispute policy cell")
-	}
-	magic, err := s.LoadUInt(32)
-	if err != nil || magic != disputePolicyMagic {
-		return errors.New("invalid dispute policy magic")
-	}
-	schema, err := s.LoadUInt(16)
-	if err != nil || schema != quotePreimageSchema {
-		return errors.New("unsupported dispute policy schema")
-	}
-	mode, modeErr := s.LoadUInt(8)
-	release, releaseErr := s.LoadUInt(8)
-	refund, refundErr := s.LoadUInt(8)
-	if modeErr != nil || releaseErr != nil || refundErr != nil || mode != ObjectiveDisputeMode ||
-		release != ReceiptReleaseRule || refund != TimeoutRefundRule || s.BitsLeft() != 0 || s.RefsNum() != 0 {
-		return errors.New("unsupported objective dispute policy")
-	}
-	return nil
 }

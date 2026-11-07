@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 const SoftwareWorkManifestProtocolV1 = "tos.service.software-work-manifest.v1"
@@ -28,26 +29,27 @@ var (
 // commits to this manifest's digest, so including the ID here would create a
 // circular identity definition.
 type SoftwareWorkManifestV1 struct {
-	Protocol                     string                        `json:"protocol" cbor:"1,keyasint"`
-	Version                      string                        `json:"version" cbor:"2,keyasint"`
-	Name                         string                        `json:"name" cbor:"3,keyasint"`
-	Description                  string                        `json:"description" cbor:"4,keyasint"`
-	Operation                    string                        `json:"operation" cbor:"5,keyasint"`
-	AcceptedSourceKinds          []string                      `json:"accepted_source_kinds" cbor:"6,keyasint"`
-	InputSchemaDigest            string                        `json:"input_schema_digest" cbor:"7,keyasint"`
-	OutputSchemaDigest           string                        `json:"output_schema_digest" cbor:"8,keyasint"`
-	ToolchainDigest              string                        `json:"toolchain_digest" cbor:"9,keyasint"`
-	Invocation                   SoftwareWorkInvocationV1      `json:"invocation" cbor:"10,keyasint"`
-	NetworkPolicy                string                        `json:"network_policy" cbor:"11,keyasint"`
-	Limits                       SoftwareWorkLimitsV1          `json:"limits" cbor:"12,keyasint"`
-	ArtifactMediaTypes           []string                      `json:"artifact_media_types" cbor:"13,keyasint"`
-	ReportMediaTypes             []string                      `json:"report_media_types" cbor:"14,keyasint"`
-	SuccessCondition             string                        `json:"success_condition" cbor:"15,keyasint"`
-	RefundConditions             []string                      `json:"refund_conditions" cbor:"16,keyasint"`
-	EndpointCommitment           string                        `json:"endpoint_commitment" cbor:"17,keyasint"`
-	ExecutionSignerAuthorization string                        `json:"execution_signer_authorization" cbor:"18,keyasint"`
-	RetentionSeconds             uint64                        `json:"retention_seconds" cbor:"19,keyasint"`
-	SupportedAssets              []SoftwareWorkAssetIdentityV1 `json:"supported_assets" cbor:"20,keyasint"`
+	Protocol                     string                   `json:"protocol" cbor:"1,keyasint"`
+	Version                      string                   `json:"version" cbor:"2,keyasint"`
+	Name                         string                   `json:"name" cbor:"3,keyasint"`
+	Description                  string                   `json:"description" cbor:"4,keyasint"`
+	Operation                    string                   `json:"operation" cbor:"5,keyasint"`
+	AcceptedSourceKinds          []string                 `json:"accepted_source_kinds" cbor:"6,keyasint"`
+	InputSchemaDigest            string                   `json:"input_schema_digest" cbor:"7,keyasint"`
+	OutputSchemaDigest           string                   `json:"output_schema_digest" cbor:"8,keyasint"`
+	ToolchainDigest              string                   `json:"toolchain_digest" cbor:"9,keyasint"`
+	Invocation                   SoftwareWorkInvocationV1 `json:"invocation" cbor:"10,keyasint"`
+	NetworkPolicy                string                   `json:"network_policy" cbor:"11,keyasint"`
+	Limits                       SoftwareWorkLimitsV1     `json:"limits" cbor:"12,keyasint"`
+	ArtifactMediaTypes           []string                 `json:"artifact_media_types" cbor:"13,keyasint"`
+	ReportMediaTypes             []string                 `json:"report_media_types" cbor:"14,keyasint"`
+	SuccessCondition             string                   `json:"success_condition" cbor:"15,keyasint"`
+	RefundConditions             []string                 `json:"refund_conditions" cbor:"16,keyasint"`
+	EndpointCommitment           string                   `json:"endpoint_commitment" cbor:"17,keyasint"`
+	ExecutionSignerAuthorization string                   `json:"execution_signer_authorization" cbor:"18,keyasint"`
+	RetentionSeconds             uint64                   `json:"retention_seconds" cbor:"19,keyasint"`
+	SupportedAssets              []SoftwareWorkAssetV1    `json:"supported_assets" cbor:"20,keyasint"`
+	Settlement                   SoftwareWorkSettlementV1 `json:"settlement" cbor:"21,keyasint"`
 }
 
 type SoftwareWorkInvocationV1 struct {
@@ -64,12 +66,52 @@ type SoftwareWorkLimitsV1 struct {
 	WallClockMillis uint64 `json:"wall_clock_millis" cbor:"5,keyasint"`
 }
 
-type SoftwareWorkAssetIdentityV1 struct {
-	Workchain      int32  `json:"workchain" cbor:"1,keyasint"`
-	MasterAccount  string `json:"master_account_id" cbor:"2,keyasint"`
-	MasterCodeHash string `json:"master_code_hash" cbor:"3,keyasint"`
-	WalletCodeHash string `json:"wallet_code_hash" cbor:"4,keyasint"`
-	Decimals       uint32 `json:"decimals" cbor:"5,keyasint"`
+// SoftwareWorkAssetV1 is one key 20 entry; the only admitted value is the
+// native TOS entry {0: "native-tos"}.
+type SoftwareWorkAssetV1 struct {
+	Kind string `json:"kind" cbor:"0,keyasint"`
+}
+
+// SoftwareWorkSettlementV1 is manifest key 21: the Service Actor that settles
+// this Capability version, published under the owner Agent's policy.
+type SoftwareWorkSettlementV1 struct {
+	Rail           string `json:"rail" cbor:"1,keyasint"`
+	ActorWorkchain int32  `json:"actor_workchain" cbor:"2,keyasint"`
+	ActorAccountID []byte `json:"actor_account_id" cbor:"3,keyasint"`
+	ActorCodeHash  []byte `json:"actor_code_hash" cbor:"4,keyasint"`
+	AttestorKey    string `json:"attestor_key" cbor:"5,keyasint"`
+}
+
+// NativeTOSAsset is the key 20 identity of native TOS.
+const NativeTOSAsset = "native-tos"
+
+// NoAttestedResponseRefund is the only key 16 value of this profile.
+const NoAttestedResponseRefund = "no-attested-response-before-deadline"
+
+// SettlementAttestorAuthorization is the key 18 value a key 21 attestor text
+// commits to: SHA-256 over its exact ASCII bytes.
+func SettlementAttestorAuthorization(attestorKeyText string) string {
+	digest := sha256.Sum256([]byte(attestorKeyText))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func validateSettlement(manifest SoftwareWorkManifestV1) error {
+	settlement := manifest.Settlement
+	if settlement.Rail != ServiceActorRail || settlement.ActorWorkchain != 0 {
+		return errors.New("manifest settlement must name a workchain 0 Service Actor")
+	}
+	for name, value := range map[string][]byte{"actor account": settlement.ActorAccountID, "actor code hash": settlement.ActorCodeHash} {
+		if len(value) != 32 || equalBytes(value, make([]byte, 32)) {
+			return fmt.Errorf("manifest settlement %s must be 32 non-zero bytes", name)
+		}
+	}
+	if _, err := mldsa44.ParseKeyIDText(settlement.AttestorKey); err != nil {
+		return errors.New("manifest settlement attestor key is not mldsa44:<key id>")
+	}
+	if manifest.ExecutionSignerAuthorization != SettlementAttestorAuthorization(settlement.AttestorKey) {
+		return errors.New("manifest key 18 does not commit to the key 21 attestor")
+	}
+	return nil
 }
 
 func DecodeSoftwareWorkManifestJSON(data []byte) (SoftwareWorkManifestV1, error) {
@@ -168,28 +210,16 @@ func ValidateSoftwareWorkManifest(manifest SoftwareWorkManifestV1) error {
 	if manifest.SuccessCondition != "exit-code-zero-and-valid-reports" {
 		return errors.New("unsupported software-work success condition")
 	}
-	if len(manifest.RefundConditions) != 1 || manifest.RefundConditions[0] != "not-started-before-deadline" {
-		return errors.New("software-work v1 supports only the objective not-started-before-deadline refund")
+	if len(manifest.RefundConditions) != 1 || manifest.RefundConditions[0] != NoAttestedResponseRefund {
+		return errors.New("software-work v1 supports only the no-attested-response-before-deadline refund")
 	}
 	if manifest.RetentionSeconds < 3600 || manifest.RetentionSeconds > 30*24*3600 {
 		return errors.New("retention_seconds is out of bounds")
 	}
-	if len(manifest.SupportedAssets) == 0 || len(manifest.SupportedAssets) > 8 {
-		return errors.New("supported_assets must contain one to eight identities")
+	if len(manifest.SupportedAssets) != 1 || manifest.SupportedAssets[0].Kind != NativeTOSAsset {
+		return errors.New("supported_assets must be exactly the native TOS entry")
 	}
-	previous := ""
-	for _, asset := range manifest.SupportedAssets {
-		if asset.Workchain != 0 || !lowerHex32(asset.MasterAccount) || !canonicalDigest(asset.MasterCodeHash, "tvm-cell-sha256:") ||
-			!canonicalDigest(asset.WalletCodeHash, "tvm-cell-sha256:") || asset.Decimals == 0 || asset.Decimals > 18 {
-			return errors.New("invalid TOS-network stablecoin identity")
-		}
-		identity := fmt.Sprintf("%d:%s", asset.Workchain, asset.MasterAccount)
-		if identity <= previous {
-			return errors.New("supported_assets must be unique and sorted")
-		}
-		previous = identity
-	}
-	return nil
+	return validateSettlement(manifest)
 }
 
 func validateInvocation(invocation SoftwareWorkInvocationV1) error {

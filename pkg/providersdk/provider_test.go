@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/internal/servicefixture"
 	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"google.golang.org/protobuf/proto"
@@ -51,7 +51,7 @@ func (f *fakeNativeClient) ResolveNativeState(_ context.Context, request *native
 }
 
 func TestProviderPreparesSignsAndFinalizesCapabilityPublication(t *testing.T) {
-	manifestJSON, err := os.ReadFile("../nativecore/testdata/software_work_manifest_v1_vector.json")
+	manifestJSON, err := servicefixture.ManifestDocumentJSON()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestProviderRejectsChangedManifestBeforeRelay(t *testing.T) {
 
 func publicationFixture(t *testing.T) (*Provider, *PreparedPublication, *nativev1.SignatureV1, *fakeNativeClient) {
 	t.Helper()
-	manifestJSON, err := os.ReadFile("../nativecore/testdata/software_work_manifest_v1_vector.json")
+	manifestJSON, err := servicefixture.ManifestDocumentJSON()
 	if err != nil {
 		t.Fatal(err)
 	}

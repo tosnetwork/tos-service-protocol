@@ -1,5 +1,7 @@
 // Package quoteprovider constructs non-canonical, complete-preimage Quote
-// Proposal packages from provider policy and freshly finalized Capability state.
+// Proposal packages from the Capability state and the policy of the Service
+// Actor that manifest key 21 names, both read at one finalized checkpoint. The proposal is a
+// convenience; a buyer verifies every rail field itself before calling.
 package quoteprovider
 
 import (
@@ -12,27 +14,40 @@ import (
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tos-service-protocol/pkg/quoteexchange"
+	"github.com/tosnetwork/tos-service-protocol/pkg/serviceactor"
+	"github.com/tosnetwork/tos-service-protocol/pkg/toschain"
 	"google.golang.org/protobuf/proto"
 )
 
-type NativeResolver interface {
-	ResolveNativeState(context.Context, *nativev1.ResolveNativeStateRequest) (*nativev1.ResolveNativeStateResponse, error)
+// SessionSource opens one finalized checkpoint through which the
+// Capability and the actor are both read, so a proposal never combines
+// states that did not coexist.
+type SessionSource interface {
+	BeginSession(ctx context.Context) (serviceactor.Session, error)
+}
+
+type chainSessions struct{ reader *toschain.ServiceActorReader }
+
+func (c chainSessions) BeginSession(ctx context.Context) (serviceactor.Session, error) {
+	return c.reader.Begin(ctx)
+}
+
+// FromChain adapts a finalized Service Actor reader.
+func FromChain(reader *toschain.ServiceActorReader) SessionSource {
+	return chainSessions{reader: reader}
 }
 
 type Config struct {
-	Resolver          NativeResolver
+	Sessions          SessionSource
 	Network           *nativev1.NetworkDomain
 	RegistryCodeHash  string
 	ProviderAgentID   string
-	ProviderAddress   string
 	ManifestCBOR      []byte
 	Transport         nativecore.TransportBindingV1
-	MaximumPrice      *nativev1.MoneyV1
 	ProposalTTL       time.Duration
-	FundingWindow     time.Duration
-	RefundDelay       time.Duration
 	ResolutionTimeout time.Duration
 	CallerID          string
 	Now               func() time.Time
@@ -43,12 +58,13 @@ type Provider struct {
 	config         Config
 	manifestDigest string
 	version        string
+	settlement     nativecore.SoftwareWorkSettlementV1
 }
 
 func New(config Config) (*Provider, error) {
-	if config.Resolver == nil || config.Network == nil || config.Network.NetworkId == "" ||
-		config.RegistryCodeHash == "" || config.ProviderAgentID == "" || config.ProviderAddress == "" ||
-		len(config.ManifestCBOR) == 0 || config.MaximumPrice == nil || config.CallerID == "" || len(config.CallerID) > 256 {
+	if config.Sessions == nil || config.Network == nil || config.Network.NetworkId == "" ||
+		config.RegistryCodeHash == "" || config.ProviderAgentID == "" ||
+		len(config.ManifestCBOR) == 0 || config.CallerID == "" || len(config.CallerID) > 256 {
 		return nil, errors.New("invalid Quote provider configuration")
 	}
 	manifest, err := nativecore.DecodeCanonicalSoftwareWorkManifestCBOR(config.ManifestCBOR)
@@ -59,39 +75,17 @@ func New(config Config) (*Provider, error) {
 	if err != nil || !bytes.Equal(canonical, config.ManifestCBOR) {
 		return nil, errors.New("Quote provider manifest cannot be reproduced")
 	}
-	termsProbe, termsErr := nativecore.BuildEscrowTermsCellV1(nativecore.EscrowTermsV1{
-		BuyerAddress: "0:" + strings.Repeat("01", 32), ProviderAddress: config.ProviderAddress,
-		FundingDeadline: 1, RefundAvailableAt: 2})
-	_, transportDigest, transportErr := nativecore.BuildTransportBindingCellV1(config.Transport)
-	_, disputeDigest := nativecore.BuildObjectiveDisputePolicyCellV1()
-	probe := &nativev1.QuoteProposalV1{CapabilityId: "cap_" + strings.Repeat("02", 32),
-		CapabilityVersion: manifest.Version, ProviderAgentId: config.ProviderAgentID, ManifestDigest: digest,
-		TransportBindingDigest: transportDigest, MaximumPrice: config.MaximumPrice,
-		DisputePolicyDigest: disputeDigest, ExpiresAtUnixSeconds: 1}
-	if termsErr == nil {
-		probe.EscrowTermsDigest = "sha256:" + hex.EncodeToString(termsProbe.Hash())
-	}
-	if termsErr != nil || transportErr != nil || !cellDigest(config.RegistryCodeHash) {
+	if _, _, err := nativecore.BuildTransportBindingCellV1(config.Transport); err != nil || !cellDigest(config.RegistryCodeHash) {
 		return nil, errors.New("invalid Quote provider policy preimage")
-	}
-	if _, _, err := nativecore.BuildAcceptedQuoteCommitment(config.Network, probe, "sha256:"+strings.Repeat("03", 32)); err != nil {
-		return nil, errors.New("invalid Quote provider commercial policy")
 	}
 	if config.ProposalTTL == 0 {
 		config.ProposalTTL = 15 * time.Minute
 	}
-	if config.FundingWindow == 0 {
-		config.FundingWindow = 10 * time.Minute
-	}
-	if config.RefundDelay == 0 {
-		config.RefundDelay = 30 * time.Minute
-	}
 	if config.ResolutionTimeout == 0 {
 		config.ResolutionTimeout = 30 * time.Second
 	}
-	if config.ProposalTTL < time.Minute || config.ProposalTTL > time.Hour || config.FundingWindow < time.Minute ||
-		config.FundingWindow > config.ProposalTTL || config.RefundDelay <= config.FundingWindow ||
-		config.RefundDelay > 24*time.Hour || config.ResolutionTimeout < time.Second || config.ResolutionTimeout > time.Minute {
+	if config.ProposalTTL < time.Minute || config.ProposalTTL > time.Hour ||
+		config.ResolutionTimeout < time.Second || config.ResolutionTimeout > time.Minute {
 		return nil, errors.New("invalid Quote provider timing policy")
 	}
 	if config.Now == nil {
@@ -102,8 +96,7 @@ func New(config Config) (*Provider, error) {
 	}
 	config.Network = proto.Clone(config.Network).(*nativev1.NetworkDomain)
 	config.ManifestCBOR = append([]byte(nil), config.ManifestCBOR...)
-	config.MaximumPrice = proto.Clone(config.MaximumPrice).(*nativev1.MoneyV1)
-	return &Provider{config: config, manifestDigest: digest, version: manifest.Version}, nil
+	return &Provider{config: config, manifestDigest: digest, version: manifest.Version, settlement: manifest.Settlement}, nil
 }
 
 func cellDigest(value string) bool {
@@ -121,15 +114,16 @@ func (p *Provider) RequestQuoteProposal(ctx context.Context, request *nativev1.R
 	}
 	call, cancel := context.WithTimeout(ctx, p.config.ResolutionTimeout)
 	defer cancel()
-	resolved, err := p.config.Resolver.ResolveNativeState(call, &nativev1.ResolveNativeStateRequest{Context: &nativev1.RequestContext{
-		RequestId: request.Context.RequestId + "-quote-state", CallerId: p.config.CallerID,
-		DeadlineUnixMillis: p.config.Now().Add(p.config.ResolutionTimeout).UnixMilli()}, ObjectId: request.CapabilityId})
-	if err != nil || resolved == nil || !resolved.Found || resolved.State == nil {
+	session, err := p.config.Sessions.BeginSession(call)
+	if err != nil {
+		return nil, errors.New("finalized state is unavailable")
+	}
+	state, found, err := session.ResolveRegistry(call, request.CapabilityId)
+	if err != nil || !found || state == nil {
 		return nil, errors.New("Quote Capability is not available from finalized state")
 	}
-	state := resolved.State
 	capability := state.GetCapability()
-	if !proto.Equal(state.Network, p.config.Network) || state.Reference == nil || state.Reference.FinalizedCheckpoint == 0 ||
+	if !proto.Equal(state.Network, p.config.Network) || state.Reference == nil || state.Reference.FinalizedCheckpoint != session.Checkpoint() ||
 		state.Reference.ContractCodeHash != p.config.RegistryCodeHash || capability == nil || capability.Tombstoned ||
 		capability.CapabilityId != request.CapabilityId || capability.OwnerAgentId != p.config.ProviderAgentID {
 		return nil, errors.New("Quote Capability does not match provider authority")
@@ -143,18 +137,31 @@ func (p *Provider) RequestQuoteProposal(ctx context.Context, request *nativev1.R
 	if !active {
 		return nil, errors.New("Quote Capability version is not active")
 	}
-	now := p.config.Now()
-	terms, err := nativecore.BuildEscrowTermsCellV1(nativecore.EscrowTermsV1{BuyerAddress: request.BuyerAddress,
-		ProviderAddress: p.config.ProviderAddress, FundingDeadline: uint64(now.Add(p.config.FundingWindow).Unix()),
-		RefundAvailableAt: uint64(now.Add(p.config.RefundDelay).Unix())})
-	if err != nil {
-		return nil, err
+	actor := "0:" + hex.EncodeToString(p.settlement.ActorAccountID)
+	account, found, err := session.ReadActor(call, actor)
+	if err != nil || !found || account.Data == nil || !account.Data.Active {
+		return nil, errors.New("Quote Service Actor is not active in finalized state")
 	}
+	policy := account.Data.Policy
+	attestor, err := mldsa44.ParseKeyIDText(p.settlement.AttestorKey)
+	if err != nil || !policy.HasAttestor || policy.AttestorKeyID != attestor {
+		return nil, errors.New("Quote Service Actor attestor differs from manifest key 21")
+	}
+	metadata, err := nativecore.ServiceActorMetadataHash(nativecore.ServiceActorMetadataInputV1{Network: p.config.Network,
+		CapabilityID: request.CapabilityId, ProviderAgentID: p.config.ProviderAgentID, CapabilityVersion: p.version,
+		ManifestDigest: p.manifestDigest})
+	if err != nil || policy.MetadataHash != metadata || policy.ProofSchemeHash != nativecore.ServiceActorSoftwareWorkProofScheme {
+		return nil, errors.New("Quote Service Actor is not configured for this Capability version")
+	}
+	termsHash, err := nativecore.ServiceActorTermsHash(nativecore.TermsOfPolicy(policy))
+	if err != nil || policy.PricePerCall.Sign() <= 0 {
+		return nil, errors.New("Quote Service Actor policy cannot be quoted")
+	}
+	now := p.config.Now()
 	transport, transportDigest, err := nativecore.BuildTransportBindingCellV1(p.config.Transport)
 	if err != nil {
 		return nil, err
 	}
-	dispute, disputeDigest := nativecore.BuildObjectiveDisputePolicyCellV1()
 	nonce := make([]byte, 16)
 	if err := p.config.Random(nonce); err != nil {
 		return nil, errors.New("generate Quote Proposal identity")
@@ -162,11 +169,14 @@ func (p *Provider) RequestQuoteProposal(ctx context.Context, request *nativev1.R
 	proposal := &nativev1.QuoteProposalV1{ProposalId: "provider-" + hex.EncodeToString(nonce),
 		CapabilityId: request.CapabilityId, CapabilityVersion: p.version, ProviderAgentId: p.config.ProviderAgentID,
 		ManifestDigest: p.manifestDigest, TransportBindingDigest: transportDigest,
-		MaximumPrice:      proto.Clone(p.config.MaximumPrice).(*nativev1.MoneyV1),
-		EscrowTermsDigest: "sha256:" + hex.EncodeToString(terms.Hash()), DisputePolicyDigest: disputeDigest,
-		ExpiresAtUnixSeconds: uint64(now.Add(p.config.ProposalTTL).Unix())}
+		ExpiresAtUnixSeconds: uint64(now.Add(p.config.ProposalTTL).Unix()),
+		Actor:                &nativev1.TOSAccountAddressV1{Workchain: 0, AccountId: append([]byte(nil), p.settlement.ActorAccountID...)},
+		ActorCodeHash:        "tvm-cell-sha256:" + hex.EncodeToString(p.settlement.ActorCodeHash),
+		PolicyVersion:        policy.PolicyVersion, TermsHash: hex.EncodeToString(termsHash[:]),
+		PriceNanotos: policy.PricePerCall.String(), StorageFeeNanotos: policy.StorageFee.String(),
+		AttestorKeyId: p.settlement.AttestorKey}
 	value := &nativev1.QuoteProposalPackageV1{Proposal: proposal, CanonicalManifestCbor: append([]byte(nil), p.config.ManifestCBOR...),
-		EscrowTermsBoc: terms.ToBOC(), TransportBindingBoc: transport.ToBOC(), DisputePolicyBoc: dispute.ToBOC()}
+		TransportBindingBoc: transport.ToBOC()}
 	if _, err := quoteexchange.Validate(p.config.Network, request, value, now); err != nil {
 		return nil, errors.New("constructed Quote Proposal package failed validation")
 	}

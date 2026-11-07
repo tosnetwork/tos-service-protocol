@@ -18,11 +18,6 @@ func TestQuotePolicyPreimagesRoundTrip(t *testing.T) {
 	if err != nil || decoded != transport || !strings.HasPrefix(digest, "sha256:") {
 		t.Fatalf("unexpected transport binding: %+v %s %v", decoded, digest, err)
 	}
-	policy, policyDigest := BuildObjectiveDisputePolicyCellV1()
-	if err := ValidateObjectiveDisputePolicyCellV1(policy); err != nil || !strings.HasPrefix(policyDigest, "sha256:") {
-		t.Fatalf("unexpected dispute policy: %s %v", policyDigest, err)
-	}
-	t.Logf("transport=%s dispute=%s", digest, policyDigest)
 }
 
 func TestQuoteTransportBindingRejectsNonCanonicalOrInsecureEndpoints(t *testing.T) {

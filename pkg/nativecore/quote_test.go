@@ -1,146 +1,186 @@
 package nativecore
 
 import (
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"os"
+	"bytes"
 	"strings"
 	"testing"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
-	"github.com/tosnetwork/tos-service-protocol/internal/referencecodec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
+	"google.golang.org/protobuf/proto"
 )
 
-func TestGatewayProposalBecomesCanonicalOnlyThroughTermsCommitment(t *testing.T) {
-	network := &nativev1.NetworkDomain{NetworkId: "tos-testnet", GenesisRootHash: "sha256:" + strings.Repeat("11", 32), GenesisFileHash: "sha256:" + strings.Repeat("22", 32)}
-	master, err := hex.DecodeString("ca11200a7d4a3c6822af077f035131868584f40f48fb1b7b7b1889ae51f9926a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposal := &nativev1.QuoteProposalV1{ProposalId: "gateway-a-local-1", CapabilityId: "cap_" + strings.Repeat("33", 32),
-		CapabilityVersion: "1.0.0", ProviderAgentId: "agent_" + strings.Repeat("44", 32), ManifestDigest: "sha256:" + strings.Repeat("55", 32),
-		TransportBindingDigest: "sha256:" + strings.Repeat("66", 32), MaximumPrice: &nativev1.MoneyV1{Asset: &nativev1.TOSAssetIdentityV1{
-			Master: &nativev1.TOSContractIdentityV1{Workchain: 0, AccountId: master,
-				CodeHash: "tvm-cell-sha256:18d5b6e780ff0bb451254c2c760d09d6e485638cd1407abb97078752c3c1c9ee"},
-			WalletCodeHash: "tvm-cell-sha256:8f452d7a4dfd74066b682365177259ed05734435be76b5fd4bd5d8af2b7c3d68", Decimals: 6}, AtomicAmount: "1000"},
-		EscrowTermsDigest: "sha256:" + strings.Repeat("77", 32), DisputePolicyDigest: "sha256:" + strings.Repeat("88", 32), ExpiresAtUnixSeconds: 12345}
-	_, first, err := BuildAcceptedQuoteCommitment(network, proposal, "sha256:"+strings.Repeat("99", 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	proposal.ProposalId = "gateway-b-different-local-id"
-	_, second, err := BuildAcceptedQuoteCommitment(network, proposal, "sha256:"+strings.Repeat("99", 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first != second {
-		t.Fatal("gateway-local proposal ID changed canonical Accepted Quote")
-	}
+func testRailProposal() *nativev1.QuoteProposalV1 {
+	var keyID [32]byte
+	copy(keyID[:], bytes.Repeat([]byte{0x99}, 32))
+	return &nativev1.QuoteProposalV1{ProposalId: "gateway-a-local-1", CapabilityId: "cap_" + strings.Repeat("33", 32),
+		CapabilityVersion: "1.0.0", ProviderAgentId: "agent_" + strings.Repeat("44", 32),
+		ManifestDigest: "sha256:" + strings.Repeat("55", 32), TransportBindingDigest: "sha256:" + strings.Repeat("66", 32),
+		ExpiresAtUnixSeconds: 12345, Actor: &nativev1.TOSAccountAddressV1{Workchain: 0, AccountId: bytes.Repeat([]byte{0x77}, 32)},
+		ActorCodeHash: "tvm-cell-sha256:" + strings.Repeat("88", 32), PolicyVersion: 4, TermsHash: strings.Repeat("ab", 32),
+		PriceNanotos: "300000000", StorageFeeNanotos: "200000000", AttestorKeyId: mldsa44.KeyIDText(keyID)}
 }
 
-func TestProductionAcceptedQuoteFrozenVector(t *testing.T) {
-	data, err := os.ReadFile("../../internal/referencecodec/testdata/accepted_quote_v1.json")
+func TestAcceptedQuoteRailLayout(t *testing.T) {
+	network := testNetworkDomain()
+	root, commitment, err := BuildAcceptedQuoteCommitment(network, testRailProposal())
 	if err != nil {
 		t.Fatal(err)
 	}
-	var vector referencecodec.QuoteVector
-	if err := json.Unmarshal(data, &vector); err != nil {
-		t.Fatal(err)
+	other := testRailProposal()
+	other.ProposalId = "gateway-b-different-local-id"
+	if _, second, err := BuildAcceptedQuoteCommitment(network, other); err != nil || second != commitment {
+		t.Fatal("the gateway-local proposal ID changed the canonical Accepted Quote")
 	}
-	frozenBOC, err := base64.StdEncoding.DecodeString(vector.Expected.BOCBase64)
-	if err != nil {
-		t.Fatal(err)
+	// The layout of ACCEPTED_QUOTE_TVM_V1, read field by field.
+	s := root.MustBeginParse()
+	if s.MustLoadUInt(32) != acceptedQuoteMagic || s.MustLoadUInt(16) != 1 || s.BitsLeft() != 0 || s.RefsNum() != 4 {
+		t.Fatal("root is not magic schema ^network ^identity ^rail ^authority")
 	}
-	frozenRoot, err := cell.FromBOC(frozenBOC)
-	if err != nil {
-		t.Fatal(err)
+	domain, _ := domainCell(network)
+	if !bytes.Equal(s.MustLoadRef().MustToCell().Hash(), domain.Hash()) {
+		t.Fatal("first reference is not the NetworkDomainV1 cell")
 	}
-	if got := "tvm-cell-sha256:" + hex.EncodeToString(frozenRoot.Hash()); got != vector.Expected.Commitment {
-		t.Fatalf("stored vector bytes decode to %s, want the frozen commitment %s", got, vector.Expected.Commitment)
+	s.MustLoadRef()
+	rail := s.MustLoadRef()
+	if rail.BitsLeft() != 267+256+32 || rail.RefsNum() != 1 {
+		t.Fatalf("rail is %d bits and %d refs, not 555 bits and one ref", rail.BitsLeft(), rail.RefsNum())
 	}
-	account, err := hex.DecodeString(vector.Quote.Asset.MasterAccountID)
-	if err != nil {
-		t.Fatal(err)
+	if rail.MustLoadUInt(2) != 2 || rail.MustLoadBoolBit() || rail.MustLoadInt(8) != 0 ||
+		!bytes.Equal(rail.MustLoadSlice(256), bytes.Repeat([]byte{0x77}, 32)) ||
+		!bytes.Equal(rail.MustLoadSlice(256), bytes.Repeat([]byte{0x88}, 32)) || rail.MustLoadUInt(32) != 4 {
+		t.Fatal("rail is not actor:addr_std actor_code_hash policy_version")
 	}
-	network := &nativev1.NetworkDomain{NetworkId: vector.Network.NetworkID, GenesisRootHash: vector.Network.GenesisRootHash, GenesisFileHash: vector.Network.GenesisFileHash}
-	proposal := &nativev1.QuoteProposalV1{ProposalId: vector.Quote.ProposalID, CapabilityId: vector.Quote.CapabilityID,
-		CapabilityVersion: vector.Quote.CapabilityVersion, ProviderAgentId: vector.Quote.ProviderAgentID,
-		ManifestDigest: vector.Quote.ManifestDigest, TransportBindingDigest: vector.Quote.TransportBindingDigest,
-		MaximumPrice: &nativev1.MoneyV1{Asset: &nativev1.TOSAssetIdentityV1{Master: &nativev1.TOSContractIdentityV1{
-			Workchain: vector.Quote.Asset.Workchain, AccountId: account, CodeHash: vector.Quote.Asset.MasterCodeHash},
-			WalletCodeHash: vector.Quote.Asset.WalletCodeHash, Decimals: vector.Quote.Asset.Decimals}, AtomicAmount: vector.Quote.MaximumAtomicAmount},
-		EscrowTermsDigest: vector.Quote.EscrowTermsDigest, DisputePolicyDigest: vector.Quote.DisputePolicyDigest,
-		ExpiresAtUnixSeconds: vector.Quote.ExpiresAtUnixSeconds}
-	root, commitment, err := BuildAcceptedQuoteCommitment(network, proposal, vector.Quote.SignerAuthorizationDigest)
-	if err != nil {
-		t.Fatal(err)
+	terms := rail.MustLoadRef()
+	if !bytes.Equal(terms.MustLoadSlice(256), bytes.Repeat([]byte{0xab}, 32)) {
+		t.Fatal("rail terms do not start with terms_hash")
 	}
-	actualBOC := base64.StdEncoding.EncodeToString(root.ToBOC())
-	if commitment != vector.Expected.Commitment || actualBOC != vector.Expected.BOCBase64 {
-		t.Logf("replacement expected: commitment=%s boc_base64=%s", commitment, actualBOC)
-		index := 0
-		for index < len(actualBOC) && index < len(vector.Expected.BOCBase64) && actualBOC[index] == vector.Expected.BOCBase64[index] {
-			index++
-		}
-		start := index - 16
-		if start < 0 {
-			start = 0
-		}
-		endActual, endExpected := index+32, index+32
-		if endActual > len(actualBOC) {
-			endActual = len(actualBOC)
-		}
-		if endExpected > len(vector.Expected.BOCBase64) {
-			endExpected = len(vector.Expected.BOCBase64)
-		}
-		t.Fatalf("production Accepted Quote vector mismatch: commitment=%s actual_len=%d expected_len=%d first_diff=%d actual=%q expected=%q", commitment, len(actualBOC), len(vector.Expected.BOCBase64), index, actualBOC[start:endActual], vector.Expected.BOCBase64[start:endExpected])
+	if price, err := loadServiceActorCoins(terms); err != nil || price.Int64() != 300000000 {
+		t.Fatal("rail terms price is not Coins")
 	}
+	if fee, err := loadServiceActorCoins(terms); err != nil || fee.Int64() != 200000000 || terms.BitsLeft() != 0 || terms.RefsNum() != 0 {
+		t.Fatal("rail terms storage fee is not the last Coins field")
+	}
+	authority := s.MustLoadRef()
+	if authority.BitsLeft() != 256 || authority.RefsNum() != 0 || !bytes.Equal(authority.MustLoadSlice(256), bytes.Repeat([]byte{0x99}, 32)) {
+		t.Fatal("authority is not attestor_key_id")
+	}
+
 	decoded, err := DecodeAcceptedQuoteV1(root, network)
-	if err != nil || decoded.Proposal.CapabilityId != proposal.CapabilityId ||
-		decoded.Proposal.CapabilityVersion != proposal.CapabilityVersion ||
-		decoded.Proposal.MaximumPrice.AtomicAmount != proposal.MaximumPrice.AtomicAmount ||
-		decoded.ExecutionSignerAuthorization != vector.Quote.SignerAuthorizationDigest {
-		t.Fatalf("Accepted Quote decode mismatch: decoded=%+v err=%v", decoded, err)
-	}
-	terms, err := BuildEscrowTermsCellV1(EscrowTermsV1{
-		BuyerAddress: vector.Quote.EscrowTerms.BuyerAddress, ProviderAddress: vector.Quote.EscrowTerms.ProviderAddress,
-		FundingDeadline: vector.Quote.EscrowTerms.FundingDeadline, RefundAvailableAt: vector.Quote.EscrowTerms.RefundAvailableAt,
-	})
-	if err != nil || "sha256:"+hex.EncodeToString(terms.Hash()) != vector.Quote.EscrowTermsDigest {
-		t.Fatalf("Accepted Quote escrow terms preimage mismatch: %v", err)
-	}
-	signerKey, err := hex.DecodeString(vector.Quote.ExecutionSignerPublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authorization, err := BuildEscrowAuthorizationCellV1(signerKey)
-	if err != nil || "sha256:"+hex.EncodeToString(authorization.Hash()) != vector.Quote.SignerAuthorizationDigest {
-		t.Fatalf("Accepted Quote execution authorization preimage mismatch: %v", err)
-	}
-	_, transportDigest, err := BuildTransportBindingCellV1(TransportBindingV1{
-		SecurityMode: vector.Quote.TransportBinding.SecurityMode, MaxRequestBytes: vector.Quote.TransportBinding.MaxRequestBytes,
-		BaseURL: vector.Quote.TransportBinding.BaseURL,
-	})
-	if err != nil || transportDigest != vector.Quote.TransportBindingDigest {
-		t.Fatalf("Accepted Quote transport preimage mismatch: %v", err)
-	}
-	dispute, disputeDigest := BuildObjectiveDisputePolicyCellV1()
-	if vector.Quote.DisputePolicy.Mode != ObjectiveDisputeMode || vector.Quote.DisputePolicy.ReleaseRule != ReceiptReleaseRule ||
-		vector.Quote.DisputePolicy.RefundRule != TimeoutRefundRule || disputeDigest != vector.Quote.DisputePolicyDigest ||
-		ValidateObjectiveDisputePolicyCellV1(dispute) != nil {
-		t.Fatal("Accepted Quote dispute policy preimage mismatch")
+	want := testRailProposal()
+	want.ProposalId = ""
+	if !proto.Equal(decoded.Proposal, want) {
+		t.Fatalf("decoded proposal differs:\n%v\n%v", decoded.Proposal, want)
 	}
 }
 
-func TestAcceptedQuoteRejectsDisplayTickerAsAssetIdentity(t *testing.T) {
-	network := &nativev1.NetworkDomain{NetworkId: "tos-testnet", GenesisRootHash: "sha256:" + strings.Repeat("11", 32), GenesisFileHash: "sha256:" + strings.Repeat("22", 32)}
-	proposal := &nativev1.QuoteProposalV1{CapabilityId: "cap_" + strings.Repeat("33", 32), CapabilityVersion: "1.0.0",
-		ProviderAgentId: "agent_" + strings.Repeat("44", 32), ManifestDigest: "sha256:" + strings.Repeat("55", 32),
-		TransportBindingDigest: "sha256:" + strings.Repeat("66", 32), MaximumPrice: &nativev1.MoneyV1{AtomicAmount: "1000"},
-		EscrowTermsDigest: "sha256:" + strings.Repeat("77", 32), DisputePolicyDigest: "sha256:" + strings.Repeat("88", 32), ExpiresAtUnixSeconds: 12345}
-	if _, _, err := BuildAcceptedQuoteCommitment(network, proposal, "sha256:"+strings.Repeat("99", 32)); err == nil {
-		t.Fatal("Accepted Quote accepted an absent contract-bound asset identity")
+func TestAcceptedQuoteRefusesInvalidRails(t *testing.T) {
+	network := testNetworkDomain()
+	for name, edit := range map[string]func(*nativev1.QuoteProposalV1){
+		"masterchain actor": func(p *nativev1.QuoteProposalV1) { p.Actor.Workchain = -1 },
+		"short actor":       func(p *nativev1.QuoteProposalV1) { p.Actor.AccountId = p.Actor.AccountId[:31] },
+		"missing actor":     func(p *nativev1.QuoteProposalV1) { p.Actor = nil },
+		"zero price":        func(p *nativev1.QuoteProposalV1) { p.PriceNanotos = "0" },
+		"leading zero":      func(p *nativev1.QuoteProposalV1) { p.PriceNanotos = "0300000000" },
+		"price too large":   func(p *nativev1.QuoteProposalV1) { p.PriceNanotos = "1329227995784915872903807060280344576" },
+		"zero storage fee":  func(p *nativev1.QuoteProposalV1) { p.StorageFeeNanotos = "0" },
+		"upper terms hash":  func(p *nativev1.QuoteProposalV1) { p.TermsHash = strings.Repeat("AB", 32) },
+		"zero terms hash":   func(p *nativev1.QuoteProposalV1) { p.TermsHash = strings.Repeat("00", 32) },
+		"bad key id":        func(p *nativev1.QuoteProposalV1) { p.AttestorKeyId = "ed25519:" + strings.Repeat("99", 32) },
+		"bad code hash":     func(p *nativev1.QuoteProposalV1) { p.ActorCodeHash = "sha256:" + strings.Repeat("88", 32) },
+		"no expiry":         func(p *nativev1.QuoteProposalV1) { p.ExpiresAtUnixSeconds = 0 },
+	} {
+		proposal := testRailProposal()
+		edit(proposal)
+		if _, _, err := BuildAcceptedQuoteCommitment(network, proposal); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	root, _, err := BuildAcceptedQuoteCommitment(network, testRailProposal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := testNetworkDomain()
+	other.NetworkId = "tos-other"
+	if _, err := DecodeAcceptedQuoteV1(root, other); err == nil {
+		t.Error("a Quote for another network was accepted")
+	}
+	s := root.MustBeginParse()
+	s.MustLoadUInt(48)
+	refs := []*cell.Cell{s.MustLoadRef().MustToCell(), s.MustLoadRef().MustToCell(), s.MustLoadRef().MustToCell(), s.MustLoadRef().MustToCell()}
+	rebuild := func(schema uint64, extra bool, replace int, with *cell.Cell) *cell.Cell {
+		b := cell.BeginCell().MustStoreUInt(acceptedQuoteMagic, 32).MustStoreUInt(schema, 16)
+		for i, ref := range refs {
+			if i == replace {
+				ref = with
+			}
+			b.MustStoreRef(ref)
+		}
+		if extra {
+			b.MustStoreBoolBit(false)
+		}
+		return b.EndCell()
+	}
+	withTrailing := func(c *cell.Cell) *cell.Cell { return c.ToBuilder().MustStoreBoolBit(true).EndCell() }
+	for name, mutated := range map[string]*cell.Cell{
+		"schema 2":              rebuild(2, false, -1, nil),
+		"root trailing":         rebuild(1, true, -1, nil),
+		"identity trailing":     rebuild(1, false, 1, withTrailing(refs[1])),
+		"rail trailing":         rebuild(1, false, 2, withTrailing(refs[2])),
+		"authority trailing":    rebuild(1, false, 3, withTrailing(refs[3])),
+		"rail missing terms":    rebuild(1, false, 2, cell.BeginCell().MustStoreSlice(refs[2].MustBeginParse().MustLoadSlice(555), 555).EndCell()),
+		"rail anycast actor":    rebuild(1, false, 2, anycastRail(t, refs[2])),
+		"rail terms extra coin": rebuild(1, false, 2, railWithTermsTrailing(refs[2])),
+	} {
+		if _, err := DecodeAcceptedQuoteV1(mutated, network); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+func anycastRail(t *testing.T, rail *cell.Cell) *cell.Cell {
+	s := rail.MustBeginParse()
+	s.MustLoadUInt(3)
+	rest := s.MustLoadSlice(s.BitsLeft())
+	bits := uint(267 + 256 + 32 - 3)
+	return cell.BeginCell().MustStoreUInt(2, 2).MustStoreBoolBit(true).MustStoreUInt(1, 5).MustStoreBoolBit(true).
+		MustStoreSlice(rest, bits).MustStoreRef(rail.MustPeekRef(0)).EndCell()
+}
+
+func railWithTermsTrailing(rail *cell.Cell) *cell.Cell {
+	s := rail.MustBeginParse()
+	head := s.MustLoadSlice(555)
+	terms := s.MustLoadRef().MustToCell().ToBuilder().MustStoreUInt(0, 4).EndCell()
+	return cell.BeginCell().MustStoreSlice(head, 555).MustStoreRef(terms).EndCell()
+}
+
+func TestServiceRequestLayoutAndNonZeroFields(t *testing.T) {
+	value := ServiceRequestV1{QuoteCommitment: hash32(1), ExecutionID: hash32(2), InputDigest: hash32(3)}
+	root, err := BuildServiceRequestCellV1(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := root.MustBeginParse()
+	if s.MustLoadUInt(32) != 0x4e535231 || s.MustLoadUInt(16) != 1 || s.BitsLeft() != 768 || s.RefsNum() != 0 {
+		t.Fatal("service request is not NSR1 schema quote execution input")
+	}
+	if decoded, err := DecodeServiceRequestCellV1(root); err != nil || decoded != value {
+		t.Fatalf("decode: %+v %v", decoded, err)
+	}
+	for name, mutated := range map[string]ServiceRequestV1{
+		"zero quote":     {ExecutionID: hash32(2), InputDigest: hash32(3)},
+		"zero execution": {QuoteCommitment: hash32(1), InputDigest: hash32(3)},
+		"zero input":     {QuoteCommitment: hash32(1), ExecutionID: hash32(2)},
+	} {
+		if _, err := BuildServiceRequestCellV1(mutated); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if _, err := DecodeServiceRequestCellV1(root.ToBuilder().MustStoreBoolBit(false).EndCell()); err == nil {
+		t.Error("service request with trailing data was accepted")
 	}
 }
