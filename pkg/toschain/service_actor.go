@@ -565,8 +565,10 @@ func (r *ServiceActorReader) CheckEndpointGenesis(ctx context.Context, endpoint 
 			continue
 		}
 		var master struct {
-			Type string  `json:"@type"`
-			Init blockID `json:"init"`
+			Type          string  `json:"@type"`
+			Last          blockID `json:"last"`
+			StateRootHash string  `json:"state_root_hash"`
+			Init          blockID `json:"init"`
 		}
 		if err := r.chain.nodes[index].client.Call(ctx, "getMasterchainInfo", struct{}{}, &master); err != nil {
 			return err
