@@ -841,3 +841,33 @@ func MinimumServiceActorCallPayment(price, storageFee *big.Int) (*big.Int, error
 	}
 	return new(big.Int).Add(new(big.Int).Add(price, storageFee), big.NewInt(ServiceActorAdmissionGasAllowance)), nil
 }
+
+// ServiceActorRespondDomainTag is the SRP2 statement tag.
+const ServiceActorRespondDomainTag = 0x53525032
+
+// ServiceActorResponseDomainHash is cell_hash(SRP2) of SERVICE_ACTOR_TVM_V1
+// section 6: the signing domain (tag, global_id, actor workchain and
+// address) with request_id, request_hash and response_hash, and a tail of
+// the snapshot caller, terms_hash, price and both deadlines. Every input but
+// response_hash comes from the request snapshot.
+func ServiceActorResponseDomainHash(globalID int32, actor string, snapshot ServiceActorRequestSnapshotV1, responseHash [32]byte) ([32]byte, error) {
+	var out [32]byte
+	parsed, err := parseServiceActorRawAddress(actor, false)
+	if err != nil {
+		return out, errors.New("the actor is not a raw standard address")
+	}
+	tail := cell.BeginCell()
+	if err := tail.StoreSlice(snapshot.Caller.Bits, snapshot.Caller.BitLen); err != nil {
+		return out, err
+	}
+	tail.MustStoreSlice(snapshot.TermsHash[:], 256)
+	if err := storeServiceActorCoins(tail, snapshot.Terms.PricePerCall); err != nil {
+		return out, err
+	}
+	tail.MustStoreUInt(snapshot.ResponseDeadline, 64).MustStoreUInt(snapshot.RefundClaimDeadline, 64)
+	root := cell.BeginCell().MustStoreUInt(ServiceActorRespondDomainTag, 32).MustStoreInt(int64(globalID), 32).
+		MustStoreInt(int64(parsed.workchain), 8).MustStoreSlice(parsed.account, 256).MustStoreUInt(snapshot.RequestID, 64).
+		MustStoreSlice(snapshot.RequestHash[:], 256).MustStoreSlice(responseHash[:], 256).MustStoreRef(tail.EndCell()).EndCell()
+	copy(out[:], root.Hash())
+	return out, nil
+}

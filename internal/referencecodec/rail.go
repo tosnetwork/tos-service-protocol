@@ -423,3 +423,91 @@ func ComputeMetadataHash(network Network, capabilityID, providerAgentID, version
 	}
 	return hex.EncodeToString(root.hash()), nil
 }
+
+// RailResponse is the SRP2 input in its own wire form; addresses are
+// standard "wc:hex" without anycast.
+type RailResponse struct {
+	GlobalID            int32
+	Actor               string
+	Caller              string
+	RequestID           uint64
+	RequestHashHex      string
+	ResponseHashHex     string
+	TermsHashHex        string
+	Price               *big.Int
+	ResponseDeadline    uint64
+	RefundClaimDeadline uint64
+}
+
+func stdAddress(value string) (int8, []byte, error) {
+	parts := strings.SplitN(value, ":", 2)
+	if len(parts) != 2 {
+		return 0, nil, errors.New("invalid address")
+	}
+	var workchain int64
+	switch parts[0] {
+	case "0":
+		workchain = 0
+	case "-1":
+		workchain = -1
+	default:
+		return 0, nil, errors.New("unsupported workchain")
+	}
+	account, err := hex32(parts[1])
+	if err != nil {
+		return 0, nil, err
+	}
+	return int8(workchain), account, nil
+}
+
+// ComputeResponseDomainHash returns cell_hash(SRP2) as 64 lowercase hex.
+func ComputeResponseDomainHash(value RailResponse) (string, error) {
+	actorWC, actor, err := stdAddress(value.Actor)
+	if err != nil {
+		return "", err
+	}
+	callerWC, caller, err := stdAddress(value.Caller)
+	if err != nil {
+		return "", err
+	}
+	request, err := hex32(value.RequestHashHex)
+	if err != nil {
+		return "", err
+	}
+	response, err := hex32(value.ResponseHashHex)
+	if err != nil {
+		return "", err
+	}
+	terms, err := hex32(value.TermsHashHex)
+	if err != nil {
+		return "", err
+	}
+	t := newWriter()
+	t.uint(0b100, 3) // addr_std, no anycast
+	t.uint(uint64(uint8(callerWC)), 8)
+	t.bytes(caller)
+	t.bytes(terms)
+	if err := t.coins(value.Price); err != nil {
+		return "", err
+	}
+	t.uint(value.ResponseDeadline, 64)
+	t.uint(value.RefundClaimDeadline, 64)
+	tail, err := t.done()
+	if err != nil {
+		return "", err
+	}
+	w := newWriter()
+	w.uint(0x53525032, 32)
+	w.uint(uint64(uint32(value.GlobalID)), 32)
+	w.uint(uint64(uint8(actorWC)), 8)
+	w.bytes(actor)
+	w.uint(value.RequestID, 64)
+	w.bytes(request)
+	w.bytes(response)
+	w.ref(tail)
+	root, err := w.done()
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(root.hash()), nil
+}

@@ -303,3 +303,27 @@ func TestLifecycleAcceptsZeroPriceRefundsAndVariableOwners(t *testing.T) {
 		t.Fatal("a respond from another sender was accepted for an addr_var owner")
 	}
 }
+
+// A zero-price request swept after its refund deadline pays no principal
+// and replays; a zero-price request mixed with paid ones does not stop the
+// replay of the paid ones.
+func TestZeroPriceSweepReplays(t *testing.T) {
+	f := newFixture(t)
+	zero := nativecore.TermsOfPolicy(f.evidence.Actor.Data.Policy)
+	zero.PricePerCall = big.NewInt(0)
+	request, err := NewRequest(callFixture(t, f, callNow, zero, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sweep := transition(toschain.ActorTxSweep, 0, callNow+7200, testOwner)
+	if err := request.Apply(sweep, f.evidence.Actor.Data.Owner); err != nil || request.State != StateSwept {
+		t.Fatalf("a zero-price sweep without a principal payout was refused: %v", err)
+	}
+	paid, err := NewRequest(lifecycleCall(t, f, 0, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := paid.Apply(transition(toschain.ActorTxSweep, 0, callNow+7200, testOwner), f.evidence.Actor.Data.Owner); err == nil {
+		t.Fatal("a paid sweep without its principal payout was accepted")
+	}
+}
