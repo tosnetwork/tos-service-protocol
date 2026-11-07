@@ -1,23 +1,29 @@
 // Package agentpacket defines an off-chain, chain-authenticated Agent packet.
 // Payload bytes never become consensus input; finalized Agent state authorizes
 // the signing key and the optional commercial binding.
+//
+// Packets and contact cards are signed with Pure ML-DSA-44 by one of the
+// sending Agent's controller keys, under their own context strings, through
+// the tosctl helper; controller private keys stay in tosctl custody.
 package agentpacket
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"sync"
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 const MaxPayloadBytes = 1 << 20
@@ -37,8 +43,11 @@ type Packet struct {
 	Nonce            [32]byte
 	Payload          []byte
 	CreatedAtUnix    uint64
-	SenderPublicKey  ed25519.PublicKey
-	Signature        []byte
+	// SenderKeyID is the key ID of the sender controller that signs. It is
+	// part of the signed preimage; the key itself is read from the finalized
+	// sender policy.
+	SenderKeyID [mldsa44.KeyIDSize]byte
+	Signature   []byte
 }
 
 type AgentResolver interface {
@@ -55,7 +64,7 @@ type wirePacket struct {
 	NonceHex         string `json:"nonce_hex"`
 	PayloadBase64    string `json:"payload_base64"`
 	CreatedAtUnix    uint64 `json:"created_at_unix"`
-	SenderPublicKey  string `json:"sender_public_key_hex"`
+	SenderKeyID      string `json:"sender_key_id"`
 	Signature        string `json:"signature_hex"`
 }
 
@@ -68,7 +77,7 @@ func EncodeJSON(packet Packet) ([]byte, error) {
 	value := wirePacket{Schema: "tos.service.agent-packet.v1", SenderAgentID: packet.SenderAgentID,
 		RecipientAgentID: packet.RecipientAgentID, CapabilityID: packet.CapabilityID, QuoteCommitment: packet.QuoteCommitment,
 		Sequence: packet.Sequence, NonceHex: hex.EncodeToString(packet.Nonce[:]), PayloadBase64: base64.StdEncoding.EncodeToString(packet.Payload),
-		CreatedAtUnix: packet.CreatedAtUnix, SenderPublicKey: hex.EncodeToString(packet.SenderPublicKey), Signature: hex.EncodeToString(packet.Signature)}
+		CreatedAtUnix: packet.CreatedAtUnix, SenderKeyID: mldsa44.KeyIDText(packet.SenderKeyID), Signature: hex.EncodeToString(packet.Signature)}
 	return json.Marshal(value)
 }
 
@@ -92,12 +101,12 @@ func DecodeJSON(raw []byte) (Packet, error) {
 	if err != nil || len(nonce) != 32 {
 		return Packet{}, errors.New("invalid Agent packet nonce")
 	}
-	publicKey, err := hex.DecodeString(value.SenderPublicKey)
-	if err != nil || len(publicKey) != ed25519.PublicKeySize {
-		return Packet{}, errors.New("invalid Agent packet public key")
+	keyID, err := mldsa44.ParseKeyIDText(value.SenderKeyID)
+	if err != nil {
+		return Packet{}, errors.New("invalid Agent packet sender key ID")
 	}
 	signature, err := hex.DecodeString(value.Signature)
-	if err != nil || len(signature) != ed25519.SignatureSize {
+	if err != nil || len(signature) != mldsa44.SignatureSize || value.Signature != hex.EncodeToString(signature) {
 		return Packet{}, errors.New("invalid Agent packet signature")
 	}
 	payload, err := base64.StdEncoding.Strict().DecodeString(value.PayloadBase64)
@@ -108,7 +117,7 @@ func DecodeJSON(raw []byte) (Packet, error) {
 	copy(nonceValue[:], nonce)
 	packet := Packet{SenderAgentID: value.SenderAgentID, RecipientAgentID: value.RecipientAgentID, CapabilityID: value.CapabilityID,
 		QuoteCommitment: value.QuoteCommitment, Sequence: value.Sequence, Nonce: nonceValue, Payload: payload,
-		CreatedAtUnix: value.CreatedAtUnix, SenderPublicKey: ed25519.PublicKey(publicKey), Signature: signature}
+		CreatedAtUnix: value.CreatedAtUnix, SenderKeyID: keyID, Signature: signature}
 	if err := validate(packet, true); err != nil {
 		return Packet{}, err
 	}
@@ -146,21 +155,74 @@ func (g *ReplayGuard) claim(key string, now time.Time) error {
 	return nil
 }
 
-func Sign(packet Packet, privateKey ed25519.PrivateKey) (Packet, error) {
+// Sign asks custody to sign the packet with the named controller, whose key
+// ID the packet must already carry in SenderKeyID: the key ID is part of the
+// signed preimage. A custody answer for any other key is refused.
+func Sign(ctx context.Context, signer mldsa44.Signer, controller string, packet Packet) (Packet, error) {
 	packet.Signature = nil
-	if len(privateKey) != ed25519.PrivateKeySize {
-		return Packet{}, errors.New("invalid packet signing key")
-	}
-	packet.SenderPublicKey = append(ed25519.PublicKey(nil), privateKey.Public().(ed25519.PublicKey)...)
 	if err := validate(packet, false); err != nil {
 		return Packet{}, err
 	}
-	packet.Signature = ed25519.Sign(privateKey, signingBytes(packet))
+	signature, err := signAs(ctx, signer, controller, mldsa44.UseAgentPacket, packet.SenderKeyID, signingBytes(packet))
+	if err != nil {
+		return Packet{}, err
+	}
+	packet.Signature = signature
 	return packet, nil
 }
 
-func Verify(resolver AgentResolver, guard *ReplayGuard, packet Packet, now time.Time) error {
-	if resolver == nil || guard == nil || now.IsZero() {
+// signAs signs a preimage with a named controller and checks custody signed
+// with the controller key the preimage names.
+func signAs(ctx context.Context, signer mldsa44.Signer, controller string, use mldsa44.Use, keyID [mldsa44.KeyIDSize]byte, preimage []byte) ([]byte, error) {
+	if ctx == nil || signer == nil || controller == "" {
+		return nil, errors.New("invalid Agent signing request")
+	}
+	signature, err := signer.Sign(ctx, controller, use, preimage)
+	if err != nil {
+		return nil, err
+	}
+	if err := mldsa44.CheckSignature(signature); err != nil || signature.KeyID != keyID {
+		return nil, errors.New("custody signed with a controller key other than the one the preimage names")
+	}
+	return signature.Signature, nil
+}
+
+// controllerKey returns the ML-DSA-44 key the finalized policy stores for a
+// key ID, after checking the stored key still derives that ID.
+func controllerKey(policy *nativev1.ControllerPolicyV1, keyID [mldsa44.KeyIDSize]byte) ([]byte, bool) {
+	if policy == nil {
+		return nil, false
+	}
+	text := mldsa44.KeyIDText(keyID)
+	for _, controller := range policy.Controllers {
+		if controller == nil || controller.KeyId != text {
+			continue
+		}
+		derived, err := mldsa44.KeyID(controller.Mldsa44PublicKey)
+		if err != nil || derived != keyID {
+			return nil, false
+		}
+		return controller.Mldsa44PublicKey, true
+	}
+	return nil, false
+}
+
+// verifyAs checks a signature against the key a finalized policy stores. An
+// unavailable verifier is never authorization.
+func verifyAs(ctx context.Context, verifier mldsa44.Verifier, policy *nativev1.ControllerPolicyV1, use mldsa44.Use,
+	keyID [mldsa44.KeyIDSize]byte, preimage, signature []byte) error {
+	key, ok := controllerKey(policy, keyID)
+	if !ok {
+		return errors.New("signer is not a controller of the finalized Agent policy")
+	}
+	if err := verifier.Verify(ctx, use, preimage, key, signature); err != nil {
+		return fmt.Errorf("signature does not verify against the finalized controller key: %w", err)
+	}
+	return nil
+}
+
+func Verify(ctx context.Context, verifier mldsa44.Verifier, resolver AgentResolver, guard *ReplayGuard, packet Packet, now time.Time) error {
+	if ctx == nil || verifier == nil || resolver == nil || guard == nil || now.IsZero() {
 		return errors.New("invalid packet verification context")
 	}
 	if err := validate(packet, true); err != nil {
@@ -173,15 +235,8 @@ func Verify(resolver AgentResolver, guard *ReplayGuard, packet Packet, now time.
 	if !found || state == nil || state.Tombstoned || state.Policy == nil {
 		return errors.New("sender Agent is not finalized and live")
 	}
-	authorized := false
-	for _, controller := range state.Policy.Controllers {
-		if controller != nil && bytes.Equal(controller.Ed25519PublicKey, packet.SenderPublicKey) {
-			authorized = true
-			break
-		}
-	}
-	if !authorized || !ed25519.Verify(packet.SenderPublicKey, signingBytes(packet), packet.Signature) {
-		return errors.New("packet signer is not authorized")
+	if err := verifyAs(ctx, verifier, state.Policy, mldsa44.UseAgentPacket, packet.SenderKeyID, signingBytes(packet), packet.Signature); err != nil {
+		return fmt.Errorf("packet signer is not authorized: %w", err)
 	}
 	if _, found, err := resolver.ResolveAgent(packet.RecipientAgentID); err != nil {
 		return err
@@ -199,7 +254,7 @@ func validate(packet Packet, signature bool) error {
 		packet.SenderAgentID == packet.RecipientAgentID || !capPattern.MatchString(packet.CapabilityID) ||
 		(packet.QuoteCommitment != "" && !digestPattern.MatchString(packet.QuoteCommitment)) || packet.Sequence == 0 ||
 		len(packet.Payload) == 0 || len(packet.Payload) > MaxPayloadBytes || packet.CreatedAtUnix == 0 ||
-		len(packet.SenderPublicKey) != ed25519.PublicKeySize || (signature && len(packet.Signature) != ed25519.SignatureSize) {
+		packet.SenderKeyID == [mldsa44.KeyIDSize]byte{} || (signature && len(packet.Signature) != mldsa44.SignatureSize) {
 		return errors.New("invalid Agent packet shape")
 	}
 	hash := sha256.Sum256(packet.Payload)
@@ -226,7 +281,7 @@ func signingBytes(packet Packet) []byte {
 	buffer.Write(packet.Nonce[:])
 	binary.BigEndian.PutUint64(number[:], packet.CreatedAtUnix)
 	buffer.Write(number[:])
-	buffer.Write(packet.SenderPublicKey)
+	buffer.Write(packet.SenderKeyID[:])
 	buffer.Write(payloadHash[:])
 	return buffer.Bytes()
 }
