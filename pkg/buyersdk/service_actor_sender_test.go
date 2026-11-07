@@ -58,11 +58,11 @@ func testSender(t *testing.T, config string, endpoints vetter, output []byte) (*
 	return sender, calls
 }
 
-const validConfig = `{"chain_rpc":{"urls":["https://a.example", {"url":" https://b.example ","api_key":"k"}],"url":"https://c.example"}}`
+const validConfig = `{"chain_rpc":{"urls":["https://a.example", {"url":" https://B.example:443/ ","api_key":"k"}],"url":"https://c.example"}}`
 
 func TestSenderPreflightBindsWalletNetworkAndAmount(t *testing.T) {
 	intent := testIntent()
-	good := vetter{endpoints: []string{"https://a.example", "https://b.example", "https://c.example"}}
+	good := vetter{endpoints: []string{"https://a.example/jsonRPC", "https://b.example/jsonRPC", "https://c.example/jsonRPC"}}
 	output := preparedOutput(t, saBuyer, saActor, 700_000_000, intent)
 	sender, calls := testSender(t, validConfig, good, output)
 	if err := sender.Preflight(context.Background(), intent); err != nil {
@@ -84,8 +84,8 @@ func TestSenderPreflightBindsWalletNetworkAndAmount(t *testing.T) {
 		"other destination":     {validConfig, good, preparedOutput(t, saBuyer, saOwner, 700_000_000, intent), intent, nil},
 		"other amount":          {validConfig, good, preparedOutput(t, saBuyer, saActor, 700_000_001, intent), intent, nil},
 		"other body":            {validConfig, good, preparedOutput(t, saBuyer, saActor, 700_000_000, func() ServiceActorCallIntent { i := intent; i.QueryID = 8; return i }()), intent, nil},
-		"foreign endpoint":      {validConfig, vetter{endpoints: []string{"https://a.example", "https://b.example"}}, output, intent, nil},
-		"wrong genesis":         {validConfig, vetter{endpoints: good.endpoints, bad: map[string]bool{"https://b.example": true}}, output, intent, nil},
+		"foreign endpoint":      {validConfig, vetter{endpoints: []string{"https://a.example/jsonRPC", "https://b.example/jsonRPC"}}, output, intent, nil},
+		"wrong genesis":         {validConfig, vetter{endpoints: good.endpoints, bad: map[string]bool{"https://b.example/jsonRPC": true}}, output, intent, nil},
 		"no chain_rpc":          {`{"wallets":{}}`, good, output, intent, nil},
 		"key case differential": {`{"chain_rpc":{"urls":["https://foreign.example"],"URLS":["https://a.example"]}}`, good, output, intent, nil},
 		"empty endpoints":       {`{"chain_rpc":{"urls":["  "],"url":""}}`, good, output, intent, nil},
@@ -102,7 +102,7 @@ func TestSenderPreflightBindsWalletNetworkAndAmount(t *testing.T) {
 
 func TestEffectiveEndpointsMirrorTheCustodyResolution(t *testing.T) {
 	endpoints, err := effectiveChainEndpoints([]byte(validConfig))
-	if err != nil || strings.Join(endpoints, ",") != "https://c.example,https://a.example,https://b.example" {
+	if err != nil || strings.Join(endpoints, ",") != "https://c.example/jsonRPC,https://a.example/jsonRPC,https://b.example/jsonRPC" {
 		t.Fatalf("endpoints = %v %v", endpoints, err)
 	}
 	duplicate, err := effectiveChainEndpoints([]byte(`{"chain_rpc":{"urls":["https://a.example","https://a.example "]}}`))
@@ -122,7 +122,7 @@ func TestEffectiveEndpointsMirrorTheCustodyResolution(t *testing.T) {
 		if name == "key case differential" {
 			// tosctl ignores URLS and submits through the foreign endpoint;
 			// the preflight must see exactly that.
-			if err != nil || len(endpoints) != 1 || endpoints[0] != "https://foreign.example" {
+			if err != nil || len(endpoints) != 1 || endpoints[0] != "https://foreign.example/jsonRPC" {
 				t.Errorf("%s: %v %v", name, endpoints, err)
 			}
 			continue

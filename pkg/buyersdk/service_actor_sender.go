@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -268,16 +270,46 @@ func effectiveChainEndpoints(config []byte) ([]string, error) {
 	var result []string
 	for _, candidate := range candidates {
 		trimmed := strings.TrimSpace(candidate)
-		if trimmed == "" || seen[trimmed] {
+		if trimmed == "" {
 			continue
 		}
-		seen[trimmed] = true
-		result = append(result, trimmed)
+		target, err := submissionURL(trimmed)
+		if err != nil {
+			return nil, err
+		}
+		if seen[target] {
+			continue
+		}
+		seen[target] = true
+		result = append(result, target)
 	}
 	if len(result) == 0 {
 		return nil, errors.New("tosctl configuration names no usable chain_rpc endpoint; it would use its built-in default")
 	}
 	return result, nil
+}
+
+// submissionURL is the URL tosctl posts to for a configured endpoint: the
+// endpoint canonicalized (lower-case host, default port and trailing slash
+// removed) with "/jsonRPC" appended. Credentials, a query or a fragment are
+// refused, as tosctl refuses them.
+func submissionURL(endpoint string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(parsed.Path, "%") || parsed.Opaque != "" {
+		return "", fmt.Errorf("tosctl chain_rpc endpoint %q is not an absolute HTTP(S) URL tosctl accepts", endpoint)
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	port := parsed.Port()
+	if parsed.Scheme == "http" && port == "80" || parsed.Scheme == "https" && port == "443" {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return parsed.Scheme + "://" + host + strings.TrimRight(parsed.Path, "/") + "/jsonRPC", nil
 }
 
 // strictObject decodes one JSON object with exact, unique keys.
