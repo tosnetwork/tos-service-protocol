@@ -19,8 +19,13 @@ type senderStub struct {
 	sendErr                      error
 }
 
+// resolverStub answers ResolveState from states. ResolveFinalizedState
+// answers from finalized when it is set (so current and finalized state can
+// differ) and fails for the objects listed in unavailable.
 type resolverStub struct {
 	states      map[string]*nativev1.NativeStateV1
+	finalized   map[string]*nativev1.NativeStateV1
+	unavailable map[string]bool
 	finalizedAt time.Time
 }
 
@@ -30,7 +35,14 @@ func (r resolverStub) ResolveState(_ context.Context, objectID, _ string) (*nati
 }
 
 func (r resolverStub) ResolveFinalizedState(_ context.Context, objectID, _ string) (*nativev1.NativeStateV1, bool, time.Time, error) {
-	state, found := r.states[objectID]
+	if r.unavailable[objectID] {
+		return nil, false, time.Time{}, errors.New("finalized state is unavailable")
+	}
+	states := r.states
+	if r.finalized != nil {
+		states = r.finalized
+	}
+	state, found := states[objectID]
 	finalizedAt := r.finalizedAt
 	if finalizedAt.IsZero() {
 		finalizedAt = time.Unix(1_700_000_000, 0).UTC()

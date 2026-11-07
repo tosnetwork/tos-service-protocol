@@ -305,11 +305,11 @@ func SignatureCell(signatures []*nativev1.SignatureV1) (*cell.Cell, error) {
 func EmptySignatureCell() *cell.Cell { return cell.BeginCell().MustStoreUInt(0, 8).EndCell() }
 
 func MessageBody(action BuiltAction, authority, counterparty []*nativev1.SignatureV1, queryID uint64) (*cell.Cell, error) {
-	return messageBody(0x4e560001, action, authority, counterparty, queryID)
+	return messageBody(opSubmit, action, authority, counterparty, queryID)
 }
 
 func AgentAuthorizationBody(action BuiltAction, authority, counterparty []*nativev1.SignatureV1, queryID uint64) (*cell.Cell, error) {
-	return messageBody(0x4e560002, action, authority, counterparty, queryID)
+	return messageBody(opAuthorizeCapability, action, authority, counterparty, queryID)
 }
 
 func messageBody(opcode uint64, action BuiltAction, authority, counterparty []*nativev1.SignatureV1, queryID uint64) (*cell.Cell, error) {

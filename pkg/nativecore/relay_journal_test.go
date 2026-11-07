@@ -56,7 +56,7 @@ func TestFileRelayJournalIsDurableAndConflictSafe(t *testing.T) {
 	if _, _, err := second.Begin("request-1", "sha256:action-two", journalTestIntent("sha256:second"), journalTestBody, journalTestLimits, time.Unix(1_700_000_002, 0)); err == nil {
 		t.Fatal("idempotency key accepted a different canonical action")
 	}
-	acquired, complete, _, err := second.AcquireBroadcastLease("sha256:action-one", intent)
+	acquired, complete, _, err := second.AcquireBroadcastLease("sha256:action-one", intent, intent.BodyHash, nil)
 	if err != nil || !acquired || complete {
 		t.Fatalf("prepared recovery lease = (%v, %v, %v)", acquired, complete, err)
 	}
@@ -65,7 +65,7 @@ func TestFileRelayJournalIsDurableAndConflictSafe(t *testing.T) {
 	if err != nil || complete || existing != "sha256:first" {
 		t.Fatalf("broadcasting restart = (%v, %q, %v)", complete, existing, err)
 	}
-	acquired, complete, _, err = third.AcquireBroadcastLease("sha256:action-one", intent)
+	acquired, complete, _, err = third.AcquireBroadcastLease("sha256:action-one", intent, intent.BodyHash, nil)
 	if err != nil || acquired || complete {
 		t.Fatalf("broadcasting restart reacquired a lease = (%v, %v, %v)", acquired, complete, err)
 	}
@@ -108,7 +108,7 @@ func TestFileRelayJournalFencesConcurrentBroadcasters(t *testing.T) {
 	for _, journal := range journals {
 		go func(j *FileRelayJournal) {
 			start.Wait()
-			acquired, complete, _, err := j.AcquireBroadcastLease("sha256:canonical-action", intent)
+			acquired, complete, _, err := j.AcquireBroadcastLease("sha256:canonical-action", intent, intent.BodyHash, nil)
 			outcomes <- outcome{acquired: acquired, complete: complete, err: err}
 		}(journal)
 	}
@@ -160,7 +160,7 @@ func TestFileRelayJournalPreparedCrashIsRecoverable(t *testing.T) {
 		journalTestBody, journalTestLimits, time.Unix(1_700_000_001, 0)); err != nil || complete || existing != "" {
 		t.Fatalf("prepared recovery must return a new broadcast candidate, got (%v, %q, %v)", complete, existing, err)
 	}
-	acquired, complete, _, err := afterRestart.AcquireBroadcastLease("sha256:action-identity", intent)
+	acquired, complete, _, err := afterRestart.AcquireBroadcastLease("sha256:action-identity", intent, intent.BodyHash, nil)
 	if err != nil || !acquired || complete {
 		t.Fatalf("prepared recovery must acquire one broadcast lease, got (%v, %v, %v)", acquired, complete, err)
 	}

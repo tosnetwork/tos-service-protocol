@@ -42,11 +42,11 @@ type leaseCrash struct {
 	crash bool
 }
 
-func (j *leaseCrash) AcquireBroadcastLease(actionIdentity string, intent RelayIntent) (bool, bool, []byte, error) {
+func (j *leaseCrash) AcquireBroadcastLease(actionIdentity string, intent RelayIntent, expected string, replacement []byte) (bool, bool, []byte, error) {
 	if j.crash {
 		return false, false, nil, errors.New("process stopped before the broadcast lease")
 	}
-	return j.FileRelayJournal.AcquireBroadcastLease(actionIdentity, intent)
+	return j.FileRelayJournal.AcquireBroadcastLease(actionIdentity, intent, expected, replacement)
 }
 
 type resignFixture struct {
@@ -257,13 +257,13 @@ func TestJournalRefusesASlotWhoseBodyWasAltered(t *testing.T) {
 	}
 	resigned := intent
 	resigned.BodyHash = relayPayloadHash([]byte("re-signed body"))
-	acquired, complete, body, err := journal.AcquireBroadcastLease("sha256:altered-action", resigned)
+	acquired, complete, body, err := journal.AcquireBroadcastLease("sha256:altered-action", resigned, intent.BodyHash, nil)
 	if err != nil || !acquired || complete || string(body) != string(journalTestBody) {
 		t.Fatalf("lease for a re-signed intent = (%v, %v, %q, %v), want the recorded body", acquired, complete, body, err)
 	}
 	other := intent
 	other.FundingNanoTOS++
-	if _, _, _, err := journal.AcquireBroadcastLease("sha256:altered-action", other); err == nil {
+	if _, _, _, err := journal.AcquireBroadcastLease("sha256:altered-action", other, intent.BodyHash, nil); err == nil {
 		t.Fatal("a different funding amount matched the recorded operation")
 	}
 }

@@ -20,12 +20,15 @@ import (
 // may be hedged, so one action can arrive with different, equally valid
 // signature sets and therefore different bodies. A slot records the exact
 // body it was claimed with; a later body for the same action is the same
-// operation, matches the slot, and never replaces the recorded body, which is
-// the only one AcquireBroadcastLease hands out for broadcast.
+// operation and matches the slot. While the slot is prepared (never
+// broadcast) its recorded body is replaced only through AcquireBroadcastLease,
+// when the caller found the recorded signatures no longer authorize; once
+// broadcasting or complete it is never replaced.
 type RelayJournal interface {
 	Lookup(requestKey, actionIdentity string, intent RelayIntent) (found, complete bool, existingHash string, err error)
 	Begin(requestKey, actionIdentity string, intent RelayIntent, body []byte, limits RelaySpendLimits, now time.Time) (complete bool, existingHash string, err error)
-	AcquireBroadcastLease(actionIdentity string, intent RelayIntent) (acquired, complete bool, body []byte, err error)
+	RecordedBody(actionIdentity string, intent RelayIntent) (body []byte, prepared bool, err error)
+	AcquireBroadcastLease(actionIdentity string, intent RelayIntent, expectedBodyHash string, replacement []byte) (acquired, complete bool, body []byte, err error)
 	Complete(actionIdentity string, intent RelayIntent) error
 }
 
@@ -250,13 +253,39 @@ func (j *FileRelayJournal) beginLocked(requestKey, actionIdentity string, intent
 	}
 }
 
-// AcquireBroadcastLease moves a prepared slot to broadcasting and returns the
-// body the slot recorded when it was claimed: the only body the caller may
-// broadcast. A slot already broadcasting or complete yields no lease and no
-// body.
-func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent RelayIntent) (bool, bool, []byte, error) {
+// RecordedBody returns a slot's recorded body and whether the slot is still
+// prepared.
+func (j *FileRelayJournal) RecordedBody(actionIdentity string, intent RelayIntent) ([]byte, bool, error) {
 	if actionIdentity == "" || !intent.valid() {
+		return nil, false, errors.New("empty Native relay journal identity")
+	}
+	var body []byte
+	var prepared bool
+	err := j.withExclusiveLock(func() error {
+		slot, found, err := j.readSlot(intent.StateSlotIdentity)
+		if err != nil || !found || !slot.matches(actionIdentity, intent) {
+			return errors.New("Native relay slot does not record this operation")
+		}
+		body, err = slot.body()
+		prepared = slot.Phase == relaySlotPrepared
+		return err
+	})
+	return body, prepared, err
+}
+
+// AcquireBroadcastLease moves a prepared slot to broadcasting and returns the
+// only body the caller may broadcast. The slot must still record a body
+// hashing to expectedBodyHash, or a concurrent recovery changed it and no
+// lease is given. A non-nil replacement, which must be the caller's own
+// verified body for this intent, becomes the slot's body in the same atomic
+// transition. A slot already broadcasting or complete yields no lease and no
+// body and is never changed.
+func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent RelayIntent, expectedBodyHash string, replacement []byte) (bool, bool, []byte, error) {
+	if actionIdentity == "" || !intent.valid() || expectedBodyHash == "" {
 		return false, false, nil, errors.New("empty Native relay broadcast lease identity")
+	}
+	if replacement != nil && (len(replacement) == 0 || len(replacement) > MaxRelayBodyBytes || relayPayloadHash(replacement) != intent.BodyHash) {
+		return false, false, nil, errors.New("Native relay replacement body does not match its intent")
 	}
 	var acquired, complete bool
 	var body []byte
@@ -270,6 +299,14 @@ func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent R
 			recorded, err := slot.body()
 			if err != nil {
 				return err
+			}
+			if slot.Intent.BodyHash != expectedBodyHash {
+				return errors.New("Native relay slot body changed during recovery")
+			}
+			if replacement != nil {
+				recorded = append([]byte(nil), replacement...)
+				slot.BodyBOCBase64 = base64.StdEncoding.EncodeToString(recorded)
+				slot.Intent.BodyHash = intent.BodyHash
 			}
 			slot.Phase = relaySlotBroadcasting
 			raw, err := json.Marshal(slot)

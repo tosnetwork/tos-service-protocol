@@ -1,12 +1,14 @@
 package nativecore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"time"
@@ -93,7 +95,7 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	actionIdentity := canonicalRelayActionIdentity(submission.Action, built.HashString)
 	stateSlotIdentity := canonicalRelayStateSlotIdentity(submission.Action)
 	queryID := relayQueryID(actionIdentity)
-	bodyBuilder := MessageBody
+	bodyBuilder, opcode := MessageBody, uint64(opSubmit)
 	destinationID := submission.Action.TargetObjectId
 	stateInit := ""
 	switch payload := submission.Action.Payload.(type) {
@@ -101,16 +103,16 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 		// Agent registration deploys the target directly.
 	case *nativev1.NativeActionV1_RegisterCapability:
 		destinationID = payload.RegisterCapability.OwnerAgentId
-		bodyBuilder = AgentAuthorizationBody
+		bodyBuilder, opcode = AgentAuthorizationBody, opAuthorizeCapability
 	case *nativev1.NativeActionV1_AddCapabilityVersion:
 		destinationID = payload.AddCapabilityVersion.OwnerAgentId
-		bodyBuilder = AgentAuthorizationBody
+		bodyBuilder, opcode = AgentAuthorizationBody, opAuthorizeCapability
 	case *nativev1.NativeActionV1_TransferCapability:
 		destinationID = payload.TransferCapability.CurrentOwnerAgentId
-		bodyBuilder = AgentAuthorizationBody
+		bodyBuilder, opcode = AgentAuthorizationBody, opAuthorizeCapability
 	case *nativev1.NativeActionV1_RevokeCapability:
 		destinationID = payload.RevokeCapability.OwnerAgentId
-		bodyBuilder = AgentAuthorizationBody
+		bodyBuilder, opcode = AgentAuthorizationBody, opAuthorizeCapability
 	}
 	body, err := bodyBuilder(built, submission.AuthoritySignatures, submission.CounterpartySignatures, queryID)
 	if err != nil {
@@ -148,20 +150,14 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	if err != nil {
 		return "", err
 	}
-	if built.Kind == KindRegisterAgent {
-		payload := submission.Action.GetRegisterAgent()
-		if payload == nil {
-			return "", nativeError(ErrBadAction, "missing Agent registration policy")
-		}
-		// Possession proves every controller signed; consent is then the
-		// policy's Agent-control weight, as the Registry computes it.
-		if err := VerifyPolicyPossession(ctx, r.Verifier, payload.InitialPolicy, submission.AuthoritySignatures, built); err != nil {
-			return "", err
-		}
-		if err := VerifyRegistrationConsent(payload.InitialPolicy); err != nil {
-			return "", err
-		}
-	} else if err := r.verifyLiveAuthorization(ctx, submission, built, targetState); err != nil {
+	// Authority is resolved once, from finalized state, and every signature
+	// set considered for this attempt is checked against that one snapshot.
+	authority, err := r.resolveAuthority(ctx, submission.Action, built, targetState)
+	if err != nil {
+		return "", err
+	}
+	if err := r.checkAuthority(ctx, submission.Action, built, authority,
+		submission.AuthoritySignatures, submission.CounterpartySignatures); err != nil {
 		return "", err
 	}
 	complete, existing, err = r.Journal.Begin(idempotencyKey, actionIdentity, intent, bodyRaw, r.Limits, r.now())
@@ -174,7 +170,27 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	if existing != "" {
 		return r.resolveRecordedIntent(ctx, submission.Action.TargetObjectId, actionIdentity, intent, false, existing)
 	}
-	acquired, complete, recordedBody, err := r.Journal.AcquireBroadcastLease(actionIdentity, intent)
+	recordedBody, prepared, err := r.Journal.RecordedBody(actionIdentity, intent)
+	if err != nil {
+		return "", err
+	}
+	// A prepared slot was never broadcast. Its recorded body is kept while
+	// its signatures still authorize the action against the authority just
+	// resolved; when they no longer do and this submission's signatures do,
+	// this submission's body replaces it in the same atomic step that takes
+	// the broadcast lease. A slot that is broadcasting or complete is never
+	// refreshed.
+	var replacement []byte
+	if prepared && !bytes.Equal(recordedBody, bodyRaw) {
+		stale, err := r.recordedBodyIsStale(ctx, submission.Action, built, authority, recordedBody, opcode, queryID)
+		if err != nil {
+			return "", err
+		}
+		if stale {
+			replacement = bodyRaw
+		}
+	}
+	acquired, complete, sendBody, err := r.Journal.AcquireBroadcastLease(actionIdentity, intent, relayPayloadHash(recordedBody), replacement)
 	if err != nil {
 		return "", err
 	}
@@ -184,11 +200,11 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	if !acquired {
 		return r.resolveRecordedIntent(ctx, submission.Action.TargetObjectId, actionIdentity, intent, false, built.HashString)
 	}
-	// Broadcast the body the slot was claimed with. It may differ from this
-	// submission's body when the action was re-signed; both authorize the
-	// same single transition.
+	// Broadcast the body the lease handed out: the slot's recorded body, or
+	// this submission's body when it replaced a stale one. Either authorizes
+	// the same single transition.
 	if err := r.Sender.SendContractCell(ctx, identity.Address, r.FundingNanoTOS,
-		base64.StdEncoding.EncodeToString(recordedBody), stateInit); err != nil {
+		base64.StdEncoding.EncodeToString(sendBody), stateInit); err != nil {
 		return "", err
 	}
 	if err := r.Journal.Complete(actionIdentity, intent); err != nil {
@@ -278,54 +294,133 @@ func (r *Relayer) resolveRecordedIntent(ctx context.Context, objectID, actionIde
 	return "", errors.New("Native relay outcome is ambiguous; refusing to rebroadcast")
 }
 
-func (r *Relayer) verifyLiveAuthorization(ctx context.Context, submission *nativev1.SignedNativeActionV1, built BuiltAction, targetState *nativev1.NativeStateV1) error {
-	action := submission.Action
+// errAuthorityUnavailable reports that the finalized authority an action
+// needs could not be resolved. It is never a decision about signatures.
+var errAuthorityUnavailable = errors.New("finalized Native authority is unavailable")
+
+// resolvedAuthority is the finalized authority one relay attempt checks every
+// signature set against.
+type resolvedAuthority struct {
+	policy         *nativev1.ControllerPolicyV1
+	purpose        uint32
+	recovery       bool
+	newOwnerPolicy *nativev1.ControllerPolicyV1
+}
+
+// resolveAuthority resolves, from finalized state only, the policies that
+// authorize an action. A registration carries its own policy. Failure to
+// resolve is errAuthorityUnavailable, without a protocol code.
+func (r *Relayer) resolveAuthority(ctx context.Context, action *nativev1.NativeActionV1, built BuiltAction, targetState *nativev1.NativeStateV1) (resolvedAuthority, error) {
+	if built.Kind == KindRegisterAgent {
+		if action.GetRegisterAgent() == nil {
+			return resolvedAuthority{}, nativeError(ErrBadAction, "missing Agent registration policy")
+		}
+		return resolvedAuthority{}, nil
+	}
 	authorityAgent := action.TargetObjectId
-	expectedAuthorityState := action.PredecessorTvmStateHash
-	purpose, recovery := uint32(PurposeAgentControl), false
+	resolved := resolvedAuthority{purpose: PurposeAgentControl}
 	switch payload := action.Payload.(type) {
 	case *nativev1.NativeActionV1_DelegateAgent:
-		purpose = PurposeDelegation
+		resolved.purpose = PurposeDelegation
 	case *nativev1.NativeActionV1_InitiateRecovery, *nativev1.NativeActionV1_CompleteRecovery:
-		purpose, recovery = PurposeRecovery, true
+		resolved.purpose, resolved.recovery = PurposeRecovery, true
 	case *nativev1.NativeActionV1_RegisterCapability:
-		authorityAgent, expectedAuthorityState, purpose = payload.RegisterCapability.OwnerAgentId, "", PurposeCapabilityControl
+		authorityAgent, resolved.purpose = payload.RegisterCapability.OwnerAgentId, PurposeCapabilityControl
 	case *nativev1.NativeActionV1_AddCapabilityVersion:
-		authorityAgent, expectedAuthorityState, purpose = payload.AddCapabilityVersion.OwnerAgentId, "", PurposeCapabilityControl
+		authorityAgent, resolved.purpose = payload.AddCapabilityVersion.OwnerAgentId, PurposeCapabilityControl
 	case *nativev1.NativeActionV1_TransferCapability:
-		authorityAgent, expectedAuthorityState, purpose = payload.TransferCapability.CurrentOwnerAgentId, "", PurposeCapabilityControl
+		authorityAgent, resolved.purpose = payload.TransferCapability.CurrentOwnerAgentId, PurposeCapabilityControl
 	case *nativev1.NativeActionV1_RevokeCapability:
-		authorityAgent, expectedAuthorityState, purpose = payload.RevokeCapability.OwnerAgentId, "", PurposeCapabilityControl
+		authorityAgent, resolved.purpose = payload.RevokeCapability.OwnerAgentId, PurposeCapabilityControl
 	}
-	state := targetState
-	if authorityAgent != action.TargetObjectId {
-		var found bool
-		var err error
-		state, found, err = r.Resolver.ResolveState(ctx, authorityAgent, expectedAuthorityState)
-		if err != nil || !found || state == nil {
-			return nativeError(ErrBadSignature, "live Native authority is unavailable")
+	if authorityAgent == action.TargetObjectId {
+		agent := targetState.GetAgent()
+		if agent == nil || agent.AgentId != authorityAgent || agent.Tombstoned || agent.Policy == nil {
+			return resolvedAuthority{}, errAuthorityUnavailable
 		}
+		resolved.policy = agent.Policy
+	} else {
+		policy, err := r.finalizedAgentPolicy(ctx, authorityAgent)
+		if err != nil {
+			return resolvedAuthority{}, err
+		}
+		resolved.policy = policy
 	}
-	if state == nil || state.GetAgent() == nil || state.GetAgent().AgentId != authorityAgent || state.GetAgent().Tombstoned {
-		return nativeError(ErrBadSignature, "live Native authority is unavailable")
+	if transfer := action.GetTransferCapability(); transfer != nil {
+		policy, err := r.finalizedAgentPolicy(ctx, transfer.NewOwnerAgentId)
+		if err != nil {
+			return resolvedAuthority{}, err
+		}
+		resolved.newOwnerPolicy = policy
 	}
-	if err := VerifySignatures(ctx, r.Verifier, state.GetAgent().Policy, submission.AuthoritySignatures, purpose, recovery, built); err != nil {
+	return resolved, nil
+}
+
+// finalizedAgentPolicy resolves a live Agent's policy from finalized state.
+func (r *Relayer) finalizedAgentPolicy(ctx context.Context, agentID string) (*nativev1.ControllerPolicyV1, error) {
+	state, found, finalizedAt, err := r.Resolver.ResolveFinalizedState(ctx, agentID, "")
+	if err != nil || !found || state == nil || finalizedAt.IsZero() || finalizedAt.Unix() < 0 {
+		return nil, errAuthorityUnavailable
+	}
+	agent := state.GetAgent()
+	if agent == nil || agent.AgentId != agentID || agent.Tombstoned || agent.Policy == nil {
+		return nil, errAuthorityUnavailable
+	}
+	return agent.Policy, nil
+}
+
+// checkAuthority checks one pair of signature sets against resolved
+// authority, as the Registry would: registration possession and consent,
+// or threshold signatures of the authority policy plus, where the action
+// needs it, possession of the policy being installed or the new owner's
+// consent.
+func (r *Relayer) checkAuthority(ctx context.Context, action *nativev1.NativeActionV1, built BuiltAction, resolved resolvedAuthority,
+	authority, counterparty []*nativev1.SignatureV1) error {
+	if built.Kind == KindRegisterAgent {
+		policy := action.GetRegisterAgent().GetInitialPolicy()
+		// Possession proves every controller signed; consent is then the
+		// policy's Agent-control weight, as the Registry computes it.
+		if err := VerifyPolicyPossession(ctx, r.Verifier, policy, authority, built); err != nil {
+			return err
+		}
+		return VerifyRegistrationConsent(policy)
+	}
+	if err := VerifySignatures(ctx, r.Verifier, resolved.policy, authority, resolved.purpose, resolved.recovery, built); err != nil {
 		return err
 	}
 	switch payload := action.Payload.(type) {
 	case *nativev1.NativeActionV1_UpdateAgentPolicy:
-		return VerifyPolicyPossession(ctx, r.Verifier, payload.UpdateAgentPolicy.NewPolicy, submission.CounterpartySignatures, built)
+		return VerifyPolicyPossession(ctx, r.Verifier, payload.UpdateAgentPolicy.NewPolicy, counterparty, built)
 	case *nativev1.NativeActionV1_InitiateRecovery:
-		return VerifyPolicyPossession(ctx, r.Verifier, payload.InitiateRecovery.NewPolicy, submission.CounterpartySignatures, built)
+		return VerifyPolicyPossession(ctx, r.Verifier, payload.InitiateRecovery.NewPolicy, counterparty, built)
 	case *nativev1.NativeActionV1_TransferCapability:
-		newState, found, err := r.Resolver.ResolveState(ctx, payload.TransferCapability.NewOwnerAgentId, "")
-		if err != nil || !found || newState == nil || newState.GetAgent() == nil ||
-			newState.GetAgent().AgentId != payload.TransferCapability.NewOwnerAgentId || newState.GetAgent().Tombstoned {
-			return nativeError(ErrBadSignature, "new Capability owner authority is unavailable")
-		}
-		return VerifySignatures(ctx, r.Verifier, newState.GetAgent().Policy, submission.CounterpartySignatures, PurposeCapabilityControl, false, built)
+		return VerifySignatures(ctx, r.Verifier, resolved.newOwnerPolicy, counterparty, PurposeCapabilityControl, false, built)
 	}
 	return nil
+}
+
+// recordedBodyIsStale reports whether a prepared slot's recorded body no
+// longer authorizes the action against the authority resolved for this
+// attempt. Only a protocol refusal of its signatures makes it stale; a body
+// that does not decode, or a verifier that cannot answer, fails closed and
+// leaves the slot unchanged.
+func (r *Relayer) recordedBodyIsStale(ctx context.Context, action *nativev1.NativeActionV1, built BuiltAction, resolved resolvedAuthority,
+	recorded []byte, opcode, queryID uint64) (bool, error) {
+	authority, counterparty, err := decodeSubmissionBody(recorded, built, opcode, queryID)
+	if err != nil {
+		return false, fmt.Errorf("recorded Native relay body cannot be checked: %w", err)
+	}
+	err = r.checkAuthority(ctx, action, built, resolved, authority, counterparty)
+	if err == nil {
+		return false, nil
+	}
+	if code, ok := ErrorCodeOf(err); ok {
+		switch code {
+		case ErrBadPolicy, ErrBadSignature, ErrThreshold, ErrDuplicateSignature:
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("recorded Native relay body cannot be checked: %w", err)
 }
 
 func (r *Relayer) now() time.Time {
