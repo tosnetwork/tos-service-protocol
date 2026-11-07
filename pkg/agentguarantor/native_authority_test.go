@@ -213,6 +213,26 @@ func TestCustodySignedNativeAuthorizationVerifies(t *testing.T) {
 
 const vectorStatementDomain = "tos.service.agent-guarantor-quote-request-signature.v1"
 
+// The resolved key must derive the evidence's key ID even when the signature
+// is valid for that key: a resolver answering with another controller's key
+// cannot authorize the named one.
+func TestResolvedKeyMustDeriveTheEvidenceKeyID(t *testing.T) {
+	statement := vectorStatement
+	now := time.Unix(int64(statement.ValidationTimeUnix), 0)
+	signed := testSignAuthorization(t, statement, vectorStatementDomain, "beta", []byte("proof"))
+	resolver := fixedKeyResolver{key: nativeTestFake.PublicKey("beta"), verifier: nativeTestFake}
+	if err := VerifyObjectAuthorization(signed, statement.AuthorizedObjectKind, statement.AuthorizedBodyDigest,
+		vectorStatementDomain, resolver, now); err != nil {
+		t.Fatalf("control: beta's own evidence was refused: %v", err)
+	}
+	renamed := signed
+	renamed.Evidence.KeyID = nativeTestFake.KeyID("alpha")
+	if err := VerifyObjectAuthorization(renamed, statement.AuthorizedObjectKind, statement.AuthorizedBodyDigest,
+		vectorStatementDomain, resolver, now); err == nil {
+		t.Fatal("a key that does not derive the evidence key ID authorized it")
+	}
+}
+
 // Only the exact text forms are accepted: mldsa44:<64 lowercase hex> and
 // mldsa44:<unpadded URL-safe Base64 of 2,420 bytes>.
 func TestNativeTextFormsAreExact(t *testing.T) {
