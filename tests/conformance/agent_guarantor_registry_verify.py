@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Independent Guarantor V1 registry and deterministic-CBOR digest verifier."""
 
+import base64
 import hashlib
 import json
 import struct
@@ -77,6 +78,64 @@ def semantic_action_preimage(action_kind, fields):
     return output
 
 
+MLDSA44_KEY_BYTES = 1312
+MLDSA44_SIGNATURE_BYTES = 2420
+
+
+def mldsa44_key_id(public_key):
+    assert len(public_key) == MLDSA44_KEY_BYTES
+    return "mldsa44:" + hashlib.sha256(b"TOS-PQ-CONSENSUS-KEY-v1" + b"\x01\x00" + public_key).hexdigest()
+
+
+def mldsa44_signature(text):
+    """Decode the only signature text form: mldsa44: + unpadded URL-safe Base64."""
+    assert text.startswith("mldsa44:")
+    encoded = text[len("mldsa44:"):]
+    assert "=" not in encoded and "+" not in encoded and "/" not in encoded
+    raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+    assert len(raw) == MLDSA44_SIGNATURE_BYTES
+    assert base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") == encoded
+    return raw
+
+
+def native_message(domain, statement):
+    canonical = cbor(statement)
+    return hashlib.sha256(domain.encode("ascii") + b"\x00" + struct.pack(">I", len(canonical)) + canonical).digest()
+
+
+def verify_native_vector(item):
+    statement = item["statement"]
+    assert statement["schema_version"] == 1
+    assert item["statement_canonical_cbor_hex"] == cbor(statement).hex()
+    assert item["context"] == "TOS-AGENT-GUARANTOR-V1"
+    assert item["signature_domain"] == "tos.service.agent-guarantor-quote-request-signature.v1"
+    message = native_message(item["signature_domain"], statement)
+    assert len(message) == 32 and item["message_hex"] == message.hex()
+    public_key = bytes.fromhex(item["public_key_hex"])
+    authorization = item["authorization"]
+    evidence = authorization["evidence"]
+    assert set(evidence) == {"key_id", "signature", "historical_authority_proof"}
+    assert evidence["key_id"] == mldsa44_key_id(public_key)
+    mldsa44_signature(evidence["signature"])
+    proof = item["historical_authority_proof"]
+    proof_bytes = cbor(proof)
+    assert item["historical_authority_proof_canonical_cbor_hex"] == proof_bytes.hex()
+    assert base64.b64decode(evidence["historical_authority_proof"], validate=True) == proof_bytes
+    for field in ("authority_subject", "profile_uri", "profile_version", "profile_digest",
+                  "authorized_object_kind", "authorized_body_digest", "validation_time_unix"):
+        assert authorization[field] == statement[field]
+    # The protocol codec carries byte fields in their standard padded Base64
+    # text form, so the proof travels as that text inside the authorization.
+    assert evidence["historical_authority_proof"] == base64.b64encode(proof_bytes).decode("ascii")
+    assert item["authorization_canonical_cbor_hex"] == cbor(authorization).hex()
+    names = [refusal["name"] for refusal in item["refusals"]]
+    assert len(names) == len(set(names)) == 7
+    assert set(names) == {"hash-ml-dsa-sha256", "empty-context", "registry-context", "agent-packet-context",
+                          "agent-contact-context", "service-actor-context", "firm-offer-domain"}
+    for refusal in item["refusals"]:
+        assert mldsa44_signature(refusal["signature"]) != mldsa44_signature(evidence["signature"])
+
+
 def require_registry(registry, expected_size, kind_field):
     assert registry["schema_version"] == 1 and registry["registry_version"] == 1
     assert len(registry["entries"]) == expected_size
@@ -135,6 +194,10 @@ def main():
         preimage = semantic_action_preimage(item["action_kind"], item["fields"])
         assert item["preimage_hex"] == preimage.hex()
         assert item["stable_action_id"] == "sha256:" + hashlib.sha256(preimage).hexdigest()
+    native_vectors = document["native_authorization_vectors"]
+    assert [item["name"] for item in native_vectors] == ["quote-request-native-mldsa44"]
+    for item in native_vectors:
+        verify_native_vector(item)
 
 
 if __name__ == "__main__":
