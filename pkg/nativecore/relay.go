@@ -164,7 +164,7 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	} else if err := r.verifyLiveAuthorization(ctx, submission, built, targetState); err != nil {
 		return "", err
 	}
-	complete, existing, err = r.Journal.Begin(idempotencyKey, actionIdentity, intent, r.Limits, r.now())
+	complete, existing, err = r.Journal.Begin(idempotencyKey, actionIdentity, intent, bodyRaw, r.Limits, r.now())
 	if err != nil {
 		return "", err
 	}
@@ -174,7 +174,7 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	if existing != "" {
 		return r.resolveRecordedIntent(ctx, submission.Action.TargetObjectId, actionIdentity, intent, false, existing)
 	}
-	acquired, complete, err := r.Journal.AcquireBroadcastLease(actionIdentity, intent)
+	acquired, complete, recordedBody, err := r.Journal.AcquireBroadcastLease(actionIdentity, intent)
 	if err != nil {
 		return "", err
 	}
@@ -184,8 +184,11 @@ func (r *Relayer) submit(ctx context.Context, submission *nativev1.SignedNativeA
 	if !acquired {
 		return r.resolveRecordedIntent(ctx, submission.Action.TargetObjectId, actionIdentity, intent, false, built.HashString)
 	}
+	// Broadcast the body the slot was claimed with. It may differ from this
+	// submission's body when the action was re-signed; both authorize the
+	// same single transition.
 	if err := r.Sender.SendContractCell(ctx, identity.Address, r.FundingNanoTOS,
-		base64.StdEncoding.EncodeToString(bodyRaw), stateInit); err != nil {
+		base64.StdEncoding.EncodeToString(recordedBody), stateInit); err != nil {
 		return "", err
 	}
 	if err := r.Journal.Complete(actionIdentity, intent); err != nil {

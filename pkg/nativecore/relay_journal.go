@@ -2,6 +2,7 @@ package nativecore
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,13 +14,24 @@ import (
 
 // RelayJournal provides three independent uniqueness boundaries. Request keys
 // are retry aliases, state slots are canonical fee-spend claims, and action
-// identities bind the exact signed intent occupying a slot.
+// identities bind the action occupying a slot.
+//
+// The operation is the action, never its signature bytes: ML-DSA-44 signing
+// may be hedged, so one action can arrive with different, equally valid
+// signature sets and therefore different bodies. A slot records the exact
+// body it was claimed with; a later body for the same action is the same
+// operation, matches the slot, and never replaces the recorded body, which is
+// the only one AcquireBroadcastLease hands out for broadcast.
 type RelayJournal interface {
 	Lookup(requestKey, actionIdentity string, intent RelayIntent) (found, complete bool, existingHash string, err error)
-	Begin(requestKey, actionIdentity string, intent RelayIntent, limits RelaySpendLimits, now time.Time) (complete bool, existingHash string, err error)
-	AcquireBroadcastLease(actionIdentity string, intent RelayIntent) (acquired, complete bool, err error)
+	Begin(requestKey, actionIdentity string, intent RelayIntent, body []byte, limits RelaySpendLimits, now time.Time) (complete bool, existingHash string, err error)
+	AcquireBroadcastLease(actionIdentity string, intent RelayIntent) (acquired, complete bool, body []byte, err error)
 	Complete(actionIdentity string, intent RelayIntent) error
 }
+
+// MaxRelayBodyBytes bounds the outbound body BOC a slot records. The
+// Registry's largest message is far below it.
+const MaxRelayBodyBytes = 128 << 10
 
 type RelaySpendLimits struct {
 	Window                     time.Duration
@@ -77,18 +89,36 @@ type relaySlotRecord struct {
 	StateSlotIdentity string         `json:"state_slot_identity"`
 	ActionIdentity    string         `json:"action_identity"`
 	Intent            RelayIntent    `json:"intent"`
+	BodyBOCBase64     string         `json:"body_boc_base64"`
 	Phase             relaySlotPhase `json:"phase"`
 	ClaimedUnix       int64          `json:"claimed_unix"`
 }
 
 func (r relaySlotRecord) valid() bool {
-	return r.StateSlotIdentity != "" && r.ActionIdentity != "" && r.Intent.valid() &&
+	_, err := r.body()
+	return r.StateSlotIdentity != "" && r.ActionIdentity != "" && r.Intent.valid() && err == nil &&
 		r.StateSlotIdentity == r.Intent.StateSlotIdentity && r.ClaimedUnix > 0 &&
 		(r.Phase == relaySlotPrepared || r.Phase == relaySlotBroadcasting || r.Phase == relaySlotComplete)
 }
 
+// body returns the recorded outbound body, checked against the recorded
+// body hash.
+func (r relaySlotRecord) body() ([]byte, error) {
+	raw, err := base64.StdEncoding.Strict().DecodeString(r.BodyBOCBase64)
+	if err != nil || len(raw) == 0 || len(raw) > MaxRelayBodyBytes || relayPayloadHash(raw) != r.Intent.BodyHash {
+		return nil, errors.New("Native relay slot body does not match its recorded hash")
+	}
+	return raw, nil
+}
+
+// matches reports whether a submission is the operation the slot records:
+// the same action identity and the same deterministic outbound intent. The
+// body hash is deliberately not compared, because a re-signed body for the
+// same action is the same operation; the slot keeps its own recorded body.
 func (r relaySlotRecord) matches(actionIdentity string, intent RelayIntent) bool {
-	return r.ActionIdentity == actionIdentity && r.StateSlotIdentity == intent.StateSlotIdentity && r.Intent == intent
+	recorded, candidate := r.Intent, intent
+	recorded.BodyHash, candidate.BodyHash = "", ""
+	return r.ActionIdentity == actionIdentity && r.StateSlotIdentity == intent.StateSlotIdentity && recorded == candidate
 }
 
 func NewFileRelayJournal(directory string) (*FileRelayJournal, error) {
@@ -148,21 +178,24 @@ func (j *FileRelayJournal) Lookup(requestKey, actionIdentity string, intent Rela
 	}
 }
 
-func (j *FileRelayJournal) Begin(requestKey, actionIdentity string, intent RelayIntent, limits RelaySpendLimits, now time.Time) (bool, string, error) {
+func (j *FileRelayJournal) Begin(requestKey, actionIdentity string, intent RelayIntent, body []byte, limits RelaySpendLimits, now time.Time) (bool, string, error) {
 	if requestKey == "" || actionIdentity == "" || !intent.valid() || !limits.permitsSingle(intent.FundingNanoTOS) || now.IsZero() {
 		return false, "", errors.New("empty Native relay journal identity")
+	}
+	if len(body) == 0 || len(body) > MaxRelayBodyBytes || relayPayloadHash(body) != intent.BodyHash {
+		return false, "", errors.New("Native relay body does not match its intent")
 	}
 	var complete bool
 	var existingHash string
 	err := j.withExclusiveLock(func() error {
 		var err error
-		complete, existingHash, err = j.beginLocked(requestKey, actionIdentity, intent, limits, now.UTC())
+		complete, existingHash, err = j.beginLocked(requestKey, actionIdentity, intent, body, limits, now.UTC())
 		return err
 	})
 	return complete, existingHash, err
 }
 
-func (j *FileRelayJournal) beginLocked(requestKey, actionIdentity string, intent RelayIntent, limits RelaySpendLimits, now time.Time) (bool, string, error) {
+func (j *FileRelayJournal) beginLocked(requestKey, actionIdentity string, intent RelayIntent, body []byte, limits RelaySpendLimits, now time.Time) (bool, string, error) {
 	if request, found, err := j.readRequest(requestKey); err != nil {
 		return false, "", err
 	} else if found && request.ActionIdentity != actionIdentity {
@@ -183,7 +216,7 @@ func (j *FileRelayJournal) beginLocked(requestKey, actionIdentity string, intent
 			return false, "", err
 		}
 		slot = relaySlotRecord{StateSlotIdentity: intent.StateSlotIdentity, ActionIdentity: actionIdentity,
-			Intent: intent, Phase: relaySlotPrepared, ClaimedUnix: now.Unix()}
+			Intent: intent, BodyBOCBase64: base64.StdEncoding.EncodeToString(body), Phase: relaySlotPrepared, ClaimedUnix: now.Unix()}
 		raw, err := json.Marshal(slot)
 		if err != nil {
 			return false, "", err
@@ -217,11 +250,16 @@ func (j *FileRelayJournal) beginLocked(requestKey, actionIdentity string, intent
 	}
 }
 
-func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent RelayIntent) (bool, bool, error) {
+// AcquireBroadcastLease moves a prepared slot to broadcasting and returns the
+// body the slot recorded when it was claimed: the only body the caller may
+// broadcast. A slot already broadcasting or complete yields no lease and no
+// body.
+func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent RelayIntent) (bool, bool, []byte, error) {
 	if actionIdentity == "" || !intent.valid() {
-		return false, false, errors.New("empty Native relay broadcast lease identity")
+		return false, false, nil, errors.New("empty Native relay broadcast lease identity")
 	}
 	var acquired, complete bool
+	var body []byte
 	err := j.withExclusiveLock(func() error {
 		slot, found, err := j.readSlot(intent.StateSlotIdentity)
 		if err != nil || !found || !slot.matches(actionIdentity, intent) {
@@ -229,6 +267,10 @@ func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent R
 		}
 		switch slot.Phase {
 		case relaySlotPrepared:
+			recorded, err := slot.body()
+			if err != nil {
+				return err
+			}
 			slot.Phase = relaySlotBroadcasting
 			raw, err := json.Marshal(slot)
 			if err != nil {
@@ -237,7 +279,7 @@ func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent R
 			if err := j.atomicReplace(j.slotPath(intent.StateSlotIdentity), raw); err != nil {
 				return err
 			}
-			acquired = true
+			acquired, body = true, recorded
 		case relaySlotBroadcasting:
 		case relaySlotComplete:
 			complete = true
@@ -246,7 +288,10 @@ func (j *FileRelayJournal) AcquireBroadcastLease(actionIdentity string, intent R
 		}
 		return nil
 	})
-	return acquired, complete, err
+	if err != nil {
+		return false, false, nil, err
+	}
+	return acquired, complete, body, nil
 }
 
 func (j *FileRelayJournal) Complete(actionIdentity string, intent RelayIntent) error {
