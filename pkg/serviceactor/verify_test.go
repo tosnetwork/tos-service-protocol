@@ -2,6 +2,7 @@ package serviceactor
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -238,7 +239,7 @@ func TestAdmissionRefusesEachStep(t *testing.T) {
 	// check is reached.
 	f = newFixture(t)
 	f.evidence.Manifest.ExecutionSignerAuthorization = "sha256:" + hex.EncodeToString(testKeyID[:])
-	_, err = VerifyBinding(f.evidence, testCode, &f.rail, f.proposal, testActor, false)
+	_, err = VerifyBinding(f.evidence, testCode, &f.rail, f.proposal, testActor, nil)
 	wantStep(t, "key 18", err, "binding", 1)
 }
 
@@ -270,8 +271,8 @@ func TestExistingRequestVerifiesFromTheSnapshotAlone(t *testing.T) {
 	// The current policy changing after the call does not affect the request.
 	f.evidence.Actor.Data.Policy.PolicyVersion = 9
 	f.evidence.Actor.Data.Policy.AttestorKeyID, f.evidence.Actor.Data.Policy.AttestorKey = otherKeyID, otherKey
-	f.evidence.Capability.GetCapability().Versions[0].Revoked = true
-	request, err := VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, testActor, call, testBuyer, testRequest)
+	request, err := VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, testActor, call, testBuyer, testRequest,
+		acceptanceFor(call))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,8 @@ func TestExistingRequestVerifiesFromTheSnapshotAlone(t *testing.T) {
 			test.edit(f)
 		}
 		f.reparse(t)
-		_, err := VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, testActor, test.call, testBuyer, testRequest)
+		_, err := VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, testActor, test.call, testBuyer, testRequest,
+			acceptanceFor(test.call))
 		procedure := "existing-request"
 		if test.step <= 4 {
 			procedure = "binding"
@@ -356,8 +358,180 @@ func TestExistingRequestVerifiesFromTheSnapshotAlone(t *testing.T) {
 		wantStep(t, test.name, err, procedure, test.step)
 	}
 	// A call found in another account's history is never attributed.
-	_, err = VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, "0:"+strings.Repeat("78", 32), call, testBuyer, testRequest)
+	_, err = VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, "0:"+strings.Repeat("78", 32), call, testBuyer, testRequest,
+		acceptanceFor(call))
 	wantStep(t, "other history", err, "binding", 2)
 }
 
 func addressLib(raw string) (*tosaddress.Address, error) { return tosaddress.ParseRawAddr(raw) }
+
+// acceptanceFor is the liveness proof of a call whose Capability, version and
+// owner Agent are all live: nothing to prove.
+func acceptanceFor(call toschain.ActorTransaction) *Acceptance {
+	return &Acceptance{Call: toschain.ActorTxID{LT: call.LT, Hash: call.Hash}}
+}
+
+const (
+	capabilityLastAction = "sha256:" + "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+	agentLastAction      = "sha256:" + "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+)
+
+func transitionAt(lt uint64, action string) *toschain.RegistryTransitionTx {
+	return &toschain.RegistryTransitionTx{LT: lt, Hash: strings.Repeat("0b", 32), ActionHash: action}
+}
+
+// Step 1's liveness is judged at the call (the call fixture is at LT 10): a
+// tombstone or revocation counts against an existing request only if it is
+// not proven finalized after the call.
+func TestExistingRequestJudgesLivenessAtTheCall(t *testing.T) {
+	type state struct{ capability, version, agent bool }
+	cases := []struct {
+		name  string
+		state state
+		proof func(*Acceptance)
+		ok    bool
+	}{
+		{"Capability tombstoned after the call", state{capability: true},
+			func(a *Acceptance) { a.CapabilityTombstone = transitionAt(11, capabilityLastAction) }, true},
+		{"Capability tombstoned before the call", state{capability: true},
+			func(a *Acceptance) { a.CapabilityTombstone = transitionAt(9, capabilityLastAction) }, false},
+		{"Capability tombstoned at the call's logical time", state{capability: true},
+			func(a *Acceptance) { a.CapabilityTombstone = transitionAt(10, capabilityLastAction) }, false},
+		{"Capability tombstone unproven", state{capability: true}, func(*Acceptance) {}, false},
+		{"Capability tombstone that is not the last action", state{capability: true},
+			func(a *Acceptance) { a.CapabilityTombstone = transitionAt(11, agentLastAction) }, false},
+		{"Capability tombstone proven only for the Agent", state{capability: true},
+			func(a *Acceptance) { a.AgentTombstone = transitionAt(11, capabilityLastAction) }, false},
+		{"Agent tombstoned after the call", state{agent: true},
+			func(a *Acceptance) { a.AgentTombstone = transitionAt(11, agentLastAction) }, true},
+		{"Agent tombstoned before the call", state{agent: true},
+			func(a *Acceptance) { a.AgentTombstone = transitionAt(9, agentLastAction) }, false},
+		{"Agent tombstoned at the call's logical time", state{agent: true},
+			func(a *Acceptance) { a.AgentTombstone = transitionAt(10, agentLastAction) }, false},
+		{"Agent tombstone unproven", state{agent: true}, func(*Acceptance) {}, false},
+		{"Agent tombstone that is not the last action", state{agent: true},
+			func(a *Acceptance) { a.AgentTombstone = transitionAt(11, capabilityLastAction) }, false},
+		{"Agent tombstone proven only for the Capability", state{agent: true},
+			func(a *Acceptance) { a.CapabilityTombstone = transitionAt(11, agentLastAction) }, false},
+		{"version revoked after the call", state{version: true},
+			func(a *Acceptance) { a.VersionRevocation = transitionAt(11, "sha256:"+strings.Repeat("d1", 32)) }, true},
+		{"version revoked before the call", state{version: true},
+			func(a *Acceptance) { a.VersionRevocation = transitionAt(9, "sha256:"+strings.Repeat("d1", 32)) }, false},
+		{"version revoked at the call's logical time", state{version: true},
+			func(a *Acceptance) { a.VersionRevocation = transitionAt(10, "sha256:"+strings.Repeat("d1", 32)) }, false},
+		{"version revocation unproven", state{version: true}, func(*Acceptance) {}, false},
+		{"version revocation proven only as a tombstone", state{version: true},
+			func(a *Acceptance) { a.CapabilityTombstone = transitionAt(11, capabilityLastAction) }, false},
+		{"all three after the call", state{capability: true, version: true, agent: true}, func(a *Acceptance) {
+			a.CapabilityTombstone = transitionAt(11, capabilityLastAction)
+			a.VersionRevocation = transitionAt(12, "sha256:"+strings.Repeat("d1", 32))
+			a.AgentTombstone = transitionAt(13, agentLastAction)
+		}, true},
+		{"all three, the Agent before the call", state{capability: true, version: true, agent: true}, func(a *Acceptance) {
+			a.CapabilityTombstone = transitionAt(11, capabilityLastAction)
+			a.VersionRevocation = transitionAt(12, "sha256:"+strings.Repeat("d1", 32))
+			a.AgentTombstone = transitionAt(9, agentLastAction)
+		}, false},
+	}
+	for _, test := range cases {
+		f := newFixture(t)
+		capability, agent := f.evidence.Capability.GetCapability(), f.evidence.Agent.GetAgent()
+		capability.LastActionHash, agent.LastActionHash = capabilityLastAction, agentLastAction
+		capability.Tombstoned, capability.Versions[0].Revoked, agent.Tombstoned = test.state.capability, test.state.version, test.state.agent
+		call := callFixture(t, f, 1_000_000, nativecore.TermsOfPolicy(f.evidence.Actor.Data.Policy), nil)
+		acceptance := acceptanceFor(call)
+		test.proof(acceptance)
+		_, err := VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, testActor, call, testBuyer, testRequest, acceptance)
+		if test.ok {
+			if err != nil {
+				t.Errorf("%s: refused: %v", test.name, err)
+			}
+			// Admission keeps the current-state check whatever the proof.
+			_, err := VerifyAdmission(f.evidence, testCode, &f.rail, f.proposal, testBuyer)
+			wantStep(t, test.name+" at admission", err, "binding", 1)
+			continue
+		}
+		wantStep(t, test.name, err, "binding", 1)
+	}
+
+	// The proof must be the one made for this call transaction.
+	f := newFixture(t)
+	call := callFixture(t, f, 1_000_000, nativecore.TermsOfPolicy(f.evidence.Actor.Data.Policy), nil)
+	for name, acceptance := range map[string]*Acceptance{
+		"no proof":                 nil,
+		"proof for another LT":     {Call: toschain.ActorTxID{LT: call.LT + 1, Hash: call.Hash}},
+		"proof for another hash":   {Call: toschain.ActorTxID{LT: call.LT, Hash: strings.Repeat("0c", 32)}},
+		"proof for no transaction": {},
+	} {
+		_, err := VerifyExistingRequest(f.evidence, testCode, &f.rail, f.proposal, testActor, call, testBuyer, testRequest, acceptance)
+		wantStep(t, name, err, "binding", 1)
+	}
+}
+
+type transitionRequest struct {
+	object  string
+	kind    nativecore.RegistryTransitionKind
+	version string
+}
+
+type fakeTransitions struct {
+	requests []transitionRequest
+	proofs   map[nativecore.RegistryTransitionKind]*toschain.RegistryTransitionTx
+	err      error
+}
+
+func (f *fakeTransitions) RegistryTransition(_ context.Context, object string, kind nativecore.RegistryTransitionKind,
+	version string) (*toschain.RegistryTransitionTx, error) {
+	f.requests = append(f.requests, transitionRequest{object, kind, version})
+	if f.err != nil {
+		return nil, f.err
+	}
+	if proof := f.proofs[kind]; proof != nil {
+		return proof, nil
+	}
+	return nil, toschain.ErrRegistryTransitionUnproven
+}
+
+func TestProveAcceptanceAsksForExactlyTheShownTransitions(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	call := callFixture(t, f, 1_000_000, nativecore.TermsOfPolicy(f.evidence.Actor.Data.Policy), nil)
+	live := &fakeTransitions{}
+	acceptance, err := ProveAcceptance(ctx, live, f.evidence, call)
+	if err != nil || len(live.requests) != 0 || *acceptance != *acceptanceFor(call) {
+		t.Fatalf("live objects: %+v %v, asked %v", acceptance, err, live.requests)
+	}
+
+	capability, agent := f.evidence.Capability.GetCapability(), f.evidence.Agent.GetAgent()
+	capability.Tombstoned, capability.Versions[0].Revoked, agent.Tombstoned = true, true, true
+	tombstone, revocation := transitionAt(11, capabilityLastAction), transitionAt(12, "sha256:"+strings.Repeat("d1", 32))
+	session := &fakeTransitions{proofs: map[nativecore.RegistryTransitionKind]*toschain.RegistryTransitionTx{
+		nativecore.RegistryCapabilityTombstone: tombstone, nativecore.RegistryVersionRevocation: revocation}}
+	acceptance, err = ProveAcceptance(ctx, session, f.evidence, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []transitionRequest{{testCapability, nativecore.RegistryCapabilityTombstone, ""},
+		{testCapability, nativecore.RegistryVersionRevocation, "1.0.0"}, {testOwnerAgent, nativecore.RegistryAgentTombstone, ""}}
+	if len(session.requests) != len(want) {
+		t.Fatalf("asked %v, want %v", session.requests, want)
+	}
+	for index := range want {
+		if session.requests[index] != want[index] {
+			t.Fatalf("asked %v, want %v", session.requests, want)
+		}
+	}
+	// An unproven transition is left for the verification to refuse.
+	if acceptance.Call != (toschain.ActorTxID{LT: call.LT, Hash: call.Hash}) || acceptance.CapabilityTombstone != tombstone ||
+		acceptance.VersionRevocation != revocation || acceptance.AgentTombstone != nil {
+		t.Fatalf("acceptance = %+v", acceptance)
+	}
+
+	failing := &fakeTransitions{err: errors.New("endpoint unavailable")}
+	if _, err := ProveAcceptance(ctx, failing, f.evidence, call); err == nil || errors.Is(err, toschain.ErrRegistryTransitionUnproven) {
+		t.Fatalf("a read failure was not returned: %v", err)
+	}
+	if _, err := ProveAcceptance(ctx, session, nil, call); err == nil {
+		t.Fatal("missing evidence was proven")
+	}
+}

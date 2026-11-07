@@ -317,11 +317,10 @@ func TestRegistryTransitionIsTheEarliestSuccessfulApplication(t *testing.T) {
 func TestRegistryTransitionRefusesAnotherAccountsTransaction(t *testing.T) {
 	tombstone, _ := revocationBody(t, registryAgent, "", "", 4)
 	history := registryHistory(t, testActor, registryStep{body: tombstone, success: true})
-	if _, found, err := earliestRegistryTransition("0:"+strings.Repeat("78", 32), history, registryAgent,
-		nativecore.RegistryAgentTombstone, ""); err == nil || found {
+	if _, found, err := earliestRegistryTransition("0:"+strings.Repeat("78", 32), history, registryAgent, ""); err == nil || found {
 		t.Fatalf("another account's transaction was read: %v %v", found, err)
 	}
-	if got, found, err := earliestRegistryTransition(testActor, history, registryAgent, nativecore.RegistryAgentTombstone, ""); err != nil ||
+	if got, found, err := earliestRegistryTransition(testActor, history, registryAgent, ""); err != nil ||
 		!found || got.LT != 10 {
 		t.Fatalf("the account's own transaction: %+v %v %v", got, found, err)
 	}

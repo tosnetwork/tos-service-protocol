@@ -31,6 +31,7 @@ import (
 // buyer cross-checks.
 type ServiceActorSession interface {
 	serviceactorindex.Session
+	serviceactor.TransitionSession
 	GetRequest(ctx context.Context, actor string, requestID uint64) (*nativecore.ServiceActorRequestViewV1, error)
 	GetRefund(ctx context.Context, actor string, requestID uint64) (*nativecore.ServiceActorRefundV1, error)
 }
@@ -413,8 +414,12 @@ func (b *ServiceActorBuyer) Resolve(ctx context.Context, requestHash string) (*R
 		report.Phase = updated.Phase
 		return report, nil
 	}
+	acceptance, err := serviceactor.ProveAcceptance(ctx, session, evidence, call)
+	if err != nil {
+		return nil, err
+	}
 	existing, err := serviceactor.VerifyExistingRequest(evidence, b.codeHash, &validated.Rail, validated.Proposal,
-		record.Actor, call, record.BuyerWallet, intent.RequestHash)
+		record.Actor, call, record.BuyerWallet, intent.RequestHash, acceptance)
 	if err != nil {
 		return nil, err
 	}

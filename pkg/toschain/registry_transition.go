@@ -57,7 +57,7 @@ func (s *ServiceActorSession) RegistryTransition(ctx context.Context, objectID s
 		return nil, nativecore.NewProtocolError(nativecore.ErrBadAction, "invalid Native object", err)
 	}
 	vote, _, err := quorumRead(ctx, s.nodes, s.reader.chain.quorum, func(ctx context.Context, node *rpcNode) (registryTransitionVote, error) {
-		return readRegistryTransition(ctx, node, identity.Address, s.seqno, s.reader.maxHistory, objectID, kind, version)
+		return readRegistryTransition(ctx, node, identity.Address, s.seqno, s.reader.maxHistory, objectID, version)
 	})
 	if err != nil {
 		return nil, err
@@ -76,7 +76,7 @@ func (s *ServiceActorSession) RegistryTransition(ctx context.Context, objectID s
 // transaction at the checkpoint, the complete history behind it, and the
 // earliest matching transition in it.
 func readRegistryTransition(ctx context.Context, node *rpcNode, address string, seqno uint64, bound int, objectID string,
-	kind nativecore.RegistryTransitionKind, version string) (registryTransitionVote, error) {
+	version string) (registryTransitionVote, error) {
 	last, root, file, err := finalizedActorLastTransaction(ctx, node, address, seqno)
 	if err != nil {
 		return registryTransitionVote{}, err
@@ -89,7 +89,7 @@ func readRegistryTransition(ctx context.Context, node *rpcNode, address string, 
 	if err != nil {
 		return registryTransitionVote{}, err
 	}
-	transition, found, err := earliestRegistryTransition(address, history, objectID, kind, version)
+	transition, found, err := earliestRegistryTransition(address, history, objectID, version)
 	if err != nil {
 		return registryTransitionVote{}, err
 	}
@@ -98,11 +98,12 @@ func readRegistryTransition(ctx context.Context, node *rpcNode, address string, 
 
 // earliestRegistryTransition scans a complete newest-first history from its
 // oldest transaction and returns the first successful one whose inbound body
-// applies the transition to objectID. A transaction counts only if it is
-// ordinary, its compute phase succeeded, it was not aborted, and its inbound
-// message is an internal, non-bounced message carrying the transition.
+// applies a tombstone of objectID or, with version set, the revocation of that
+// version. A transaction counts only if it is ordinary, its compute phase
+// succeeded, it was not aborted, and its inbound message is an internal,
+// non-bounced message carrying the transition.
 func earliestRegistryTransition(address string, history []tlb.Transaction, objectID string,
-	kind nativecore.RegistryTransitionKind, version string) (RegistryTransitionTx, bool, error) {
+	version string) (RegistryTransitionTx, bool, error) {
 	account, err := hex.DecodeString(strings.TrimPrefix(address, "0:"))
 	if err != nil || len(account) != 32 || !strings.HasPrefix(address, "0:") {
 		return RegistryTransitionTx{}, false, errors.New("invalid Native Registry account address")
@@ -124,8 +125,10 @@ func earliestRegistryTransition(address string, history []tlb.Transaction, objec
 		if in.Bounced || in.Body == nil {
 			continue
 		}
+		// The object prefix and the version, both checked against the
+		// request kind on entry, fix the transition kind.
 		decoded, err := nativecore.DecodeRegistryTransition(in.Body)
-		if err != nil || decoded.Kind != kind || decoded.ObjectID != objectID || decoded.Version != version {
+		if err != nil || decoded.ObjectID != objectID || decoded.Version != version {
 			continue
 		}
 		return RegistryTransitionTx{LT: transaction.LT, Hash: hex.EncodeToString(transaction.Hash), ActionHash: decoded.ActionHash}, true, nil
