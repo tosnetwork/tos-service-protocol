@@ -12,7 +12,7 @@ env:
   # Registry. Tests that check real ML-DSA-44 bytes fail, rather than skip,
   # without it. Repin when the helper lands on the tos main branch.
   TOS_HELPER_REPOSITORY: tosnetwork/tos
-  TOS_HELPER_COMMIT: 33a370aae855a2310e4d3b9d836f9abfbcb4edb4
+  TOS_HELPER_COMMIT: 8aa00640c1edffe6e513a8b5b1291316a5e42310
 
 jobs:
   test:
