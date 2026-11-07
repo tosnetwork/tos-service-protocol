@@ -335,3 +335,48 @@ func TestFakeIsNotTheHelper(t *testing.T) {
 		t.Fatal("the real helper accepted a fake signature")
 	}
 }
+
+// An agent-guarantor signature covers exactly a 32-byte digest under its own
+// context: it verifies only as agent-guarantor, and a signature made for any
+// other use over the same bytes never verifies as agent-guarantor.
+func TestAgentGuarantorUseIsSeparateAndExactlyThirtyTwoBytes(t *testing.T) {
+	if context, err := mldsa44.UseAgentGuarantor.Context(); err != nil || context != "TOS-AGENT-GUARANTOR-V1" {
+		t.Fatalf("agent-guarantor context = %q, %v", context, err)
+	}
+	custody := mldsa44test.NewCustody(t, "alpha")
+	helper := mldsa44test.RequireTosctl(t)
+	ctx := context.Background()
+	digest := sha256.Sum256([]byte("guarantor statement"))
+	signed, err := custody.Signer.Sign(ctx, "alpha", mldsa44.UseAgentGuarantor, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Verify(ctx, mldsa44.UseAgentGuarantor, digest[:], signed.PublicKey, signed.Signature); err != nil {
+		t.Fatalf("agent-guarantor signature refused: %v", err)
+	}
+	for _, other := range []mldsa44.Use{mldsa44.UseAgentPacket, mldsa44.UseAgentContact} {
+		if err := helper.Verify(ctx, other, digest[:], signed.PublicKey, signed.Signature); !errors.Is(err, mldsa44.ErrInvalidSignature) {
+			t.Fatalf("agent-guarantor signature verified as %s: %v", other, err)
+		}
+		foreign, err := custody.Signer.Sign(ctx, "alpha", other, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := helper.Verify(ctx, mldsa44.UseAgentGuarantor, digest[:], foreign.PublicKey, foreign.Signature); !errors.Is(err, mldsa44.ErrInvalidSignature) {
+			t.Fatalf("%s signature verified as agent-guarantor: %v", other, err)
+		}
+	}
+	for _, size := range []int{0, 31, 33} {
+		message := make([]byte, size)
+		if _, err := custody.Signer.Sign(ctx, "alpha", mldsa44.UseAgentGuarantor, message); !errors.Is(err, mldsa44.ErrMalformed) {
+			t.Fatalf("%d-byte agent-guarantor message signed: %v", size, err)
+		}
+		if err := helper.Verify(ctx, mldsa44.UseAgentGuarantor, message, signed.PublicKey, signed.Signature); !errors.Is(err, mldsa44.ErrMalformed) {
+			t.Fatalf("%d-byte agent-guarantor message verified: %v", size, err)
+		}
+	}
+	fake := &mldsa44test.Fake{}
+	if _, err := fake.Sign(ctx, "alpha", mldsa44.UseAgentGuarantor, digest[:31]); !errors.Is(err, mldsa44.ErrMalformed) {
+		t.Fatalf("fake signed a 31-byte agent-guarantor message: %v", err)
+	}
+}

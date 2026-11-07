@@ -219,8 +219,8 @@ func (t *Tosctl) Sign(ctx context.Context, controller string, use Use, payload [
 // cell hash for a registry action, the preimage itself otherwise.
 func signedMessage(use Use, payload []byte) ([]byte, error) {
 	if use != UseRegistry {
-		if len(payload) == 0 || len(payload) > MaxMessageBytes {
-			return nil, ErrMalformed
+		if err := CheckMessage(use, payload); err != nil {
+			return nil, err
 		}
 		return payload, nil
 	}
@@ -247,8 +247,8 @@ func actionCell(boc []byte) (*cell.Cell, error) {
 // reads as descriptor 3.
 func payloadArguments(use Use, payload []byte) (*os.File, []string, error) {
 	if use != UseRegistry {
-		if len(payload) == 0 || len(payload) > MaxMessageBytes {
-			return nil, nil, ErrMalformed
+		if err := CheckMessage(use, payload); err != nil {
+			return nil, nil, err
 		}
 		return nil, []string{"--message-hex", hex.EncodeToString(payload)}, nil
 	}

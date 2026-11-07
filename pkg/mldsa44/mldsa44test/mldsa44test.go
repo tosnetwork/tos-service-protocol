@@ -224,6 +224,11 @@ func fakeSignature(use mldsa44.Use, payload, publicKey []byte) ([]byte, error) {
 		return nil, mldsa44.ErrMalformed
 	}
 	message := payload
+	if use != mldsa44.UseRegistry {
+		if err := mldsa44.CheckMessage(use, payload); err != nil {
+			return nil, err
+		}
+	}
 	if use == mldsa44.UseRegistry {
 		root, err := cell.FromBOC(payload)
 		if err != nil || root == nil {
