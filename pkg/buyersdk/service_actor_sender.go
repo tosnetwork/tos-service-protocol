@@ -10,11 +10,10 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"net"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -269,11 +268,9 @@ func effectiveChainEndpoints(config []byte) ([]string, error) {
 	seen := map[string]bool{}
 	var result []string
 	for _, candidate := range candidates {
-		trimmed := strings.TrimSpace(candidate)
-		if trimmed == "" {
-			continue
-		}
-		target, err := submissionURL(trimmed)
+		// tosctl trims entries and drops empty ones before refusing
+		// whitespace; any whitespace at all is refused here.
+		target, err := submissionURL(candidate)
 		if err != nil {
 			return nil, err
 		}
@@ -289,27 +286,104 @@ func effectiveChainEndpoints(config []byte) ([]string, error) {
 	return result, nil
 }
 
-// submissionURL is the URL tosctl posts to for a configured endpoint: the
-// endpoint canonicalized (lower-case host, default port and trailing slash
-// removed) with "/jsonRPC" appended. Credentials, a query or a fragment are
-// refused, as tosctl refuses them.
+// submissionURL is the URL tosctl posts to for a configured endpoint. It
+// does not reproduce tosctl's URL normalization; it accepts only a closed
+// canonical form on which Go and tosctl cannot disagree, and refuses
+// everything else: a scheme of exactly http or https (http only for a
+// loopback host), a lower-case host of [a-z0-9-] labels (a numeric host only
+// as a canonical dotted quad, no 0x labels, no IPv6 literal), an optional
+// canonical decimal port, and a path of plain segments with no dot segment,
+// empty segment, percent encoding or backslash. No whitespace, userinfo,
+// query or fragment. The result is the endpoint without a default port and
+// without its trailing slash, with /jsonRPC appended, as tosctl joins it.
 func submissionURL(endpoint string) (string, error) {
-	parsed, err := url.Parse(endpoint)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(parsed.Path, "%") || parsed.Opaque != "" {
-		return "", fmt.Errorf("tosctl chain_rpc endpoint %q is not an absolute HTTP(S) URL tosctl accepts", endpoint)
+	refuse := func(reason string) (string, error) {
+		return "", fmt.Errorf("tosctl chain_rpc endpoint %q is refused: %s", endpoint, reason)
 	}
-	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
-	port := parsed.Port()
-	if parsed.Scheme == "http" && port == "80" || parsed.Scheme == "https" && port == "443" {
+	for _, character := range []byte(endpoint) {
+		if character <= 0x20 || character >= 0x7f || strings.IndexByte("\\%?#@", character) >= 0 {
+			return refuse("it holds whitespace, a control or non-ASCII byte, or one of \\ % ? # @")
+		}
+	}
+	scheme, rest, ok := strings.Cut(endpoint, "://")
+	if !ok || scheme != "http" && scheme != "https" {
+		return refuse("the scheme is not exactly http or https")
+	}
+	authority, path := rest, ""
+	if index := strings.IndexByte(rest, '/'); index >= 0 {
+		authority, path = rest[:index], rest[index:]
+	}
+	host, port := authority, ""
+	if index := strings.LastIndexByte(authority, ':'); index >= 0 {
+		host, port = authority[:index], authority[index+1:]
+		if port == "" || port[0] == '0' || len(port) > 5 || strings.Trim(port, "0123456789") != "" {
+			return refuse("the port is not a canonical decimal")
+		}
+		if value, err := strconv.Atoi(port); err != nil || value < 1 || value > 65535 {
+			return refuse("the port is out of range")
+		}
+	}
+	loopback, err := canonicalHost(host)
+	if err != nil {
+		return refuse(err.Error())
+	}
+	if scheme == "http" && !loopback {
+		return refuse("plain http is accepted only for a loopback host")
+	}
+	if path != "" && path != "/" {
+		segments := strings.Split(strings.TrimSuffix(path, "/"), "/")
+		for _, segment := range segments[1:] {
+			if segment == "" || segment == "." || segment == ".." || segment[0] == '.' ||
+				strings.Trim(segment, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._~-") != "" {
+				return refuse("the path has an empty, dot or non-plain segment")
+			}
+		}
+	}
+	if scheme == "http" && port == "80" || scheme == "https" && port == "443" {
 		port = ""
 	}
 	if port != "" {
-		host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		host = "[" + host + "]"
+		host += ":" + port
 	}
-	return parsed.Scheme + "://" + host + strings.TrimRight(parsed.Path, "/") + "/jsonRPC", nil
+	return scheme + "://" + host + strings.TrimSuffix(path, "/") + "/jsonRPC", nil
+}
+
+// canonicalHost accepts a lower-case DNS name of [a-z0-9-] labels or a
+// canonical dotted-quad IPv4 address and reports whether it is loopback.
+func canonicalHost(host string) (bool, error) {
+	if host == "" || len(host) > 253 {
+		return false, errors.New("the host is empty or too long")
+	}
+	labels := strings.Split(host, ".")
+	numeric := true
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.Trim(label, "abcdefghijklmnopqrstuvwxyz0123456789-") != "" ||
+			label[0] == '-' || label[len(label)-1] == '-' {
+			return false, errors.New("the host is not a lower-case name of plain labels")
+		}
+		if strings.HasPrefix(label, "0x") {
+			return false, errors.New("the host has a hexadecimal label")
+		}
+		if strings.Trim(label, "0123456789") != "" {
+			numeric = false
+		}
+	}
+	if !numeric {
+		if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+			return false, errors.New("the host ends in a numeric label")
+		}
+		return host == "localhost", nil
+	}
+	if len(labels) != 4 {
+		return false, errors.New("a numeric host must be a dotted quad")
+	}
+	for _, label := range labels {
+		value, err := strconv.Atoi(label)
+		if err != nil || value > 255 || len(label) > 1 && label[0] == '0' {
+			return false, errors.New("a numeric host must be a canonical dotted quad")
+		}
+	}
+	return labels[0] == "127", nil
 }
 
 // strictObject decodes one JSON object with exact, unique keys.

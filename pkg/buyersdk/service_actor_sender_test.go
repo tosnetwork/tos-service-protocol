@@ -58,7 +58,7 @@ func testSender(t *testing.T, config string, endpoints vetter, output []byte) (*
 	return sender, calls
 }
 
-const validConfig = `{"chain_rpc":{"urls":["https://a.example", {"url":" https://B.example:443/ ","api_key":"k"}],"url":"https://c.example"}}`
+const validConfig = `{"chain_rpc":{"urls":["https://a.example", {"url":"https://b.example:443/","api_key":"k"}],"url":"https://c.example"}}`
 
 func TestSenderPreflightBindsWalletNetworkAndAmount(t *testing.T) {
 	intent := testIntent()
@@ -105,7 +105,7 @@ func TestEffectiveEndpointsMirrorTheCustodyResolution(t *testing.T) {
 	if err != nil || strings.Join(endpoints, ",") != "https://c.example/jsonRPC,https://a.example/jsonRPC,https://b.example/jsonRPC" {
 		t.Fatalf("endpoints = %v %v", endpoints, err)
 	}
-	duplicate, err := effectiveChainEndpoints([]byte(`{"chain_rpc":{"urls":["https://a.example","https://a.example "]}}`))
+	duplicate, err := effectiveChainEndpoints([]byte(`{"chain_rpc":{"urls":["https://a.example","https://a.example/"]}}`))
 	if err != nil || len(duplicate) != 1 {
 		t.Fatalf("duplicates = %v %v", duplicate, err)
 	}
@@ -185,5 +185,37 @@ func TestConfigPathRunnerUsesAPrivateCopy(t *testing.T) {
 	}
 	if _, err := runner.runWithConfigPath(context.Background(), binary, "agent"); !errors.Is(err, ErrCallNotStarted) {
 		t.Fatalf("a substituted executable was started: %v", err)
+	}
+}
+
+// Only a closed canonical endpoint form is accepted, so the URL vetted here
+// is the URL tosctl posts to: its canonicalization trims a trailing slash,
+// drops a default port, and its client joins /jsonRPC.
+func TestSubmissionURLAcceptsOnlyTheCanonicalForm(t *testing.T) {
+	for endpoint, want := range map[string]string{
+		"http://127.0.0.1:47680":          "http://127.0.0.1:47680/jsonRPC",
+		"http://localhost:8080/a/b/":      "http://localhost:8080/a/b/jsonRPC",
+		"https://rpc.example/":            "https://rpc.example/jsonRPC",
+		"https://rpc.example:443/base":    "https://rpc.example/base/jsonRPC",
+		"https://rpc-1.example.org:8443/": "https://rpc-1.example.org:8443/jsonRPC",
+		"http://127.0.0.1:80/v2":          "http://127.0.0.1/v2/jsonRPC",
+	} {
+		if got, err := submissionURL(endpoint); err != nil || got != want {
+			t.Errorf("%s: got %q, %v; want %q", endpoint, got, err, want)
+		}
+	}
+	for _, endpoint := range []string{
+		"https://rpc.example/a/../b", "https://rpc.example/a/./b", "https://rpc.example/a//b", "https://rpc.example/%2e%2e/b",
+		"https://rpc.example/a%2fb", `https://rpc.example\a`, "https://rpc.example/.hidden", "HTTP://127.0.0.1:1",
+		"https://RPC.example", "https://rpc.example./", "http://127.1:1", "http://0x7f.0.0.1:1", "http://[::1]:1",
+		"https://user@rpc.example", "https://rpc.example/?a=1", "https://rpc.example/#x", "https://rpc.example:080",
+		"https://rpc.example:0", "https://rpc.example:65536", "https://rpc.example:", " https://rpc.example",
+		"https://rpc.example ", "https://rpc .example", "http://rpc.example", "http://10.0.0.1:1", "ftp://rpc.example",
+		"https://", "https://rpc..example", "https://-rpc.example", "https://rpc.123", "http://127.0.0.256:1",
+		"http://127.00.0.1:1", "https://rpc.example/a b", "https://rpc.example/é",
+	} {
+		if got, err := submissionURL(endpoint); err == nil {
+			t.Errorf("%q was accepted as %q", endpoint, got)
+		}
 	}
 }
