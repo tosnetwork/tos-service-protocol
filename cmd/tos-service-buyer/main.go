@@ -33,14 +33,16 @@ const usage = "usage: tos-service-buyer <discover|prepare|call|status|requests> 
 // usageOutput receives flag errors and usage text.
 var usageOutput io.Writer = os.Stderr
 
-// callSenderConfig configures tosctl custody for call. The vault URL carries
-// the vault's master key, so it is read from the VAULT_URL environment
-// variable tosctl itself uses and handed to tosctl only in its environment,
-// never on a command line where the process table would show it.
-func callSenderConfig(tosctlPath, tosctlSHA, tosctlConfig, wallet string,
-	endpoints buyersdk.EndpointVetter) buyersdk.TOSCTLServiceActorSenderConfig {
-	return buyersdk.TOSCTLServiceActorSenderConfig{BinaryPath: tosctlPath, BinarySHA256: tosctlSHA,
-		ConfigPath: tosctlConfig, WalletName: wallet, VaultURL: os.Getenv("VAULT_URL"), Endpoints: endpoints}
+// newCallSender builds the tosctl custody sender for call. The vault URL
+// carries the vault's master key, so it is read here, and only here, from the
+// VAULT_URL environment variable tosctl itself uses, and handed to tosctl only
+// in its environment, never on a command line where the process table would
+// show it.
+func newCallSender(tosctlPath, tosctlSHA, tosctlConfig, wallet string,
+	endpoints buyersdk.EndpointVetter) (*buyersdk.TOSCTLServiceActorSender, error) {
+	return buyersdk.NewTOSCTLServiceActorSender(buyersdk.TOSCTLServiceActorSenderConfig{BinaryPath: tosctlPath,
+		BinarySHA256: tosctlSHA, ConfigPath: tosctlConfig, WalletName: wallet, VaultURL: os.Getenv("VAULT_URL"),
+		Endpoints: endpoints})
 }
 
 // requestLister is the index surface the requests command pages through.
@@ -153,8 +155,7 @@ func run(arguments []string, out io.Writer) error {
 		if tosctlPath == "" || tosctlSHA == "" || tosctlConfig == "" || wallet == "" {
 			return errors.New("call needs --tosctl, --tosctl-sha256, --tosctl-config and --wallet")
 		}
-		sender, err = buyersdk.NewTOSCTLServiceActorSender(callSenderConfig(tosctlPath, tosctlSHA, tosctlConfig, wallet,
-			environment.reader))
+		sender, err = newCallSender(tosctlPath, tosctlSHA, tosctlConfig, wallet, environment.reader)
 		if err != nil {
 			return err
 		}
