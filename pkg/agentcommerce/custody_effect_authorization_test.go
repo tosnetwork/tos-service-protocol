@@ -77,7 +77,7 @@ func TestCustodyEffectAuthorizationBindsExactTVMEffect(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x71}, ed25519.SeedSize))
 	value := CustodyEffectAuthorization{SchemaVersion: 1, AuthorityID: "authority:one", OwnerID: "owner:one", AgentID: "agent:buyer",
 		SourceAccount: "0:" + strings.Repeat("1", 64), NetworkID: "tos:test", NetworkGlobalID: -3,
-		ActionKind: "escrow.accept", StableActionID: "sha256:" + strings.Repeat("2", 64), ExactRequestDigest: "sha256:" + strings.Repeat("3", 64),
+		ActionKind: "payment.direct", StableActionID: "sha256:" + strings.Repeat("2", 64), ExactRequestDigest: "sha256:" + strings.Repeat("3", 64),
 		WriterGeneration: 4, WriterFenceDigest: "sha256:" + strings.Repeat("4", 64), PolicyRevision: 5,
 		MandateDigest: "sha256:" + strings.Repeat("5", 64), ApprovalDigestOrZero: "sha256:" + strings.Repeat("0", 64),
 		AgreementBodyDigest: "sha256:" + strings.Repeat("6", 64), ObligationID: "payment:one",

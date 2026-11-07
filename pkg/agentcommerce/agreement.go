@@ -26,16 +26,18 @@ const (
 const (
 	EvidenceProfileAgentSignature     = "tos.agreement.evidence.agent-signature.v1"
 	EvidenceProfileAuthoritySignature = "tos.agreement.evidence.authority-signature.v1"
-	EvidenceProfilePaidDemandQuote    = "tos.agreement.evidence.paid-demand-quote.v1"
 )
+
+// retiredEvidenceProfiles are built-in evidence profiles whose settlement rail
+// no longer exists. An Agreement naming one is refused rather than treated as
+// an external profile that nothing constrains.
+var retiredEvidenceProfiles = map[string]bool{
+	"tos.agreement.evidence.paid-demand-quote.v1": true,
+}
 
 const AgreementAcceptanceContentType = "application/vnd.tos.agreement-acceptance.v1+cbor"
 
-const (
-	AuthorityAcceptanceContentType     = "application/vnd.tos.agreement-authority-acceptance.v1+cbor"
-	PaidDemandBuyerAcceptContentType   = "application/vnd.tos.paid-demand-buyer-accept.v1+cbor"
-	PaidDemandProviderOfferContentType = "application/vnd.tos.paid-demand-provider-offer.v1+cbor"
-)
+const AuthorityAcceptanceContentType = "application/vnd.tos.agreement-authority-acceptance.v1+cbor"
 
 // AgentSignatureProfileDigest returns the immutable descriptor digest for the
 // built-in V1 profile. Implementations must not accept an arbitrary digest
@@ -56,16 +58,6 @@ func AuthoritySignatureProfileDigest() string {
 		[]string{"capability_owner", "custody_principal", "data_owner", "key_owner", "wallet"},
 		[]string{AuthorityAcceptanceContentType}, "complete-subject-profile-group", "agreement-predicate-target-v1",
 		"tos.verifier.authority-signature.v1", "expires-before-agreement")
-	if err != nil {
-		panic(err)
-	}
-	return digest
-}
-
-func PaidDemandQuoteProfileDigest() string {
-	digest, err := ProfileDescriptorDigest(EvidenceProfilePaidDemandQuote, 1, []string{"agent", "wallet"},
-		[]string{PaidDemandBuyerAcceptContentType, PaidDemandProviderOfferContentType}, "complete-subject-profile-group",
-		"agreement-predicate-target-v1", "tos.verifier.paid-demand-quote.v1", "finalized-before-agreement-expiry")
 	if err != nil {
 		panic(err)
 	}
@@ -344,10 +336,8 @@ func validateAgreementBody(body AgentAgreementBody, requireTargets bool) error {
 				predicate.AuthoritySubject.SubjectKind == "agent") {
 			return errors.New("built-in authority-signature evidence profile descriptor mismatch")
 		}
-		if predicate.EvidenceProfileURI == EvidenceProfilePaidDemandQuote &&
-			(predicate.EvidenceProfileVersion != 1 || predicate.EvidenceProfileDigest != PaidDemandQuoteProfileDigest() ||
-				predicate.AuthoritySubject.SubjectKind != "agent" && predicate.AuthoritySubject.SubjectKind != "wallet") {
-			return errors.New("built-in Paid Demand Quote evidence profile descriptor mismatch")
+		if retiredEvidenceProfiles[predicate.EvidenceProfileURI] {
+			return errors.New("agreement names a retired evidence profile")
 		}
 		predicates[predicate.PredicateID] = predicate
 		previousPredicate = predicate.PredicateID

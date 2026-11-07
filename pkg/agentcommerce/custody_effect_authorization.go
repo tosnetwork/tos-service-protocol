@@ -93,7 +93,7 @@ func VerifyCustodyEffectAuthorization(value CustodyEffectAuthorization, resolver
 }
 
 // VerifyRelayCustodyEffectAuthorization rejects legacy V1 at every production
-// relay/escrow effect boundary. V2 binds the exact genesis and target workchain.
+// relay effect boundary. V2 binds the exact genesis and target workchain.
 func VerifyRelayCustodyEffectAuthorization(value CustodyEffectAuthorization,
 	resolver CustodyAuthorityResolver, now time.Time) error {
 	if value.SchemaVersion != 2 || value.NetworkDomain == nil {
