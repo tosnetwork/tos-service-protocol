@@ -132,7 +132,7 @@ func TestAgentAccountRelayProjectsOnlyBoundSponsorshipBeforeFinality(t *testing.
 	}
 	wrongAsset := request
 	wrongAsset.RequestedSponsorship = &agentrelay.AssetAmount{Asset: agentrelay.AssetIdentity{
-		AssetNamespace: "external", AssetIdentifier: "USDT", Unit: "micro"}, AmountAtomic: "1000000"}
+		AssetNamespace: "external", AssetIdentifier: "external-unit", Unit: "micro"}, AmountAtomic: "1000000"}
 	if _, err := inspector.InspectTransaction(t.Context(), wrongAsset, AgentAccountNativeSendRelayProfile(), boc,
 		agentrelay.InspectionAdmission); err == nil {
 		t.Fatal("non-native pending sponsorship was applied to the source balance")

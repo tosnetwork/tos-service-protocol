@@ -97,6 +97,35 @@ func TestAgreementTargetsAndDigestBindEveryObligation(t *testing.T) {
 	}
 }
 
+// An Agreement may name an external evidence profile, but not a retired
+// built-in one: that URI would otherwise pass as an external profile nothing
+// constrains.
+func TestAgreementRefusesARetiredEvidenceProfile(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0).UTC()
+	withProfile := func(uri string) (AgentAgreementBody, error) {
+		body := validAgreementBody(t, now)
+		body.AuthorizationPredicates = append([]AgreementAuthorizationPredicate(nil), body.AuthorizationPredicates...)
+		for index := range body.AuthorizationPredicates {
+			body.AuthorizationPredicates[index].EvidenceTargetProjectionDigest = ""
+		}
+		body.AuthorizationPredicates[0].EvidenceProfileURI = uri
+		body.AuthorizationPredicates[0].EvidenceProfileDigest = "sha256:" + strings.Repeat("e", 64)
+		body.AuthorizationPredicates[0].AuthoritySubject = AgreementAuthoritySubject{SubjectKind: "wallet", SubjectNamespace: "tos.wallet",
+			SubjectIdentifier: "wallet:buyer", RepresentedAgentID: body.Participants[1].AgentID}
+		prepared, err := PrepareAgreementTargets(body)
+		if err != nil {
+			return body, err
+		}
+		return prepared, ValidateAgreementBody(prepared)
+	}
+	if _, err := withProfile("tos.agreement.evidence.external-review.v1"); err != nil {
+		t.Fatalf("an external evidence profile was refused: %v", err)
+	}
+	if _, err := withProfile("tos.agreement.evidence.paid-demand-quote.v1"); err == nil {
+		t.Fatal("an Agreement naming the retired paid-demand evidence profile was accepted")
+	}
+}
+
 func TestAgreementSuccessorRequiresExactConsecutiveLineage(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
 	predecessor := validAgreementBody(t, now)

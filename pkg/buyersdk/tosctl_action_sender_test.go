@@ -87,7 +87,7 @@ func TestTOSCTLEconomicEffectSenderResolvesExactActionBeforeNextSequence(t *test
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x74}, ed25519.SeedSize))
 	authorization, err := commerce.SignCustodyEffectAuthorization(commerce.CustodyEffectAuthorization{SchemaVersion: 1,
 		AuthorityID: "authority:test", OwnerID: "owner:test", AgentID: "agent:buyer", SourceAccount: "0:" + strings.Repeat("1", 64),
-		NetworkID: "tos:test", NetworkGlobalID: -3, ActionKind: "escrow.accept", StableActionID: "sha256:" + strings.Repeat("2", 64),
+		NetworkID: "tos:test", NetworkGlobalID: -3, ActionKind: "payment.direct", StableActionID: "sha256:" + strings.Repeat("2", 64),
 		ExactRequestDigest: "sha256:" + strings.Repeat("3", 64), WriterGeneration: 1, WriterFenceDigest: "sha256:" + strings.Repeat("4", 64),
 		PolicyRevision: 1, MandateDigest: "sha256:" + strings.Repeat("5", 64), ApprovalDigestOrZero: "sha256:" + strings.Repeat("0", 64),
 		AgreementBodyDigest: "sha256:" + strings.Repeat("6", 64), ObligationID: "payment", Destination: "0:" + strings.Repeat("7", 64),
@@ -128,7 +128,7 @@ func TestTOSCTLEconomicEffectSenderPreservesExactAuthorizedBody(t *testing.T) {
 	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x73}, ed25519.SeedSize))
 	authorization, err := commerce.SignCustodyEffectAuthorization(commerce.CustodyEffectAuthorization{SchemaVersion: 1,
 		AuthorityID: "authority:test", OwnerID: "owner:test", AgentID: "agent:buyer", SourceAccount: "0:" + strings.Repeat("1", 64),
-		NetworkID: "tos:test", NetworkGlobalID: -3, ActionKind: "escrow.accept", StableActionID: "sha256:" + strings.Repeat("2", 64),
+		NetworkID: "tos:test", NetworkGlobalID: -3, ActionKind: "payment.direct", StableActionID: "sha256:" + strings.Repeat("2", 64),
 		ExactRequestDigest: "sha256:" + strings.Repeat("3", 64), WriterGeneration: 1, WriterFenceDigest: "sha256:" + strings.Repeat("4", 64),
 		PolicyRevision: 1, MandateDigest: "sha256:" + strings.Repeat("5", 64), ApprovalDigestOrZero: "sha256:" + strings.Repeat("0", 64),
 		AgreementBodyDigest: "sha256:" + strings.Repeat("6", 64), ObligationID: "payment:one", Destination: "0:" + strings.Repeat("7", 64),
