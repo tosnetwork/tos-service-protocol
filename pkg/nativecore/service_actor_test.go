@@ -392,6 +392,12 @@ func TestServiceActorDataRefusesEveryMalformedCell(t *testing.T) {
 					MustStoreBoolBit(true).MustStoreSlice(f.keyID[:], 256).MustStoreMaybeRef(nil)
 			}
 		},
+		"attestor with an unflagged key reference": func(f *actorFixture) {
+			f.mutate = func(c *actorCells) {
+				c.commitments = cell.BeginCell().MustStoreSlice(fill(0x66), 256).MustStoreSlice(fill(0x77), 256).
+					MustStoreBoolBit(true).MustStoreSlice(f.keyID[:], 256).MustStoreBoolBit(false).MustStoreRef(storedBytesCell(f.key))
+			}
+		},
 		"key id mismatch": func(f *actorFixture) { f.keyID[0] ^= 1 },
 		"no attestor with key id": func(f *actorFixture) {
 			f.mutate = func(c *actorCells) {
@@ -454,7 +460,7 @@ func TestServiceActorDictionariesAreWalkedStrictly(t *testing.T) {
 			f.mutate = func(c *actorCells) {
 				counts := cell.NewDict(256)
 				for key, count := range f.counts {
-					_ = counts.SetIntKey(new(big.Int).SetBytes(key[:]), cell.BeginCell().MustStoreUInt(count, 33).EndCell())
+					_ = counts.SetIntKey(new(big.Int).SetBytes(key[:]), cell.BeginCell().MustStoreUInt(count, 32).MustStoreBoolBit(true).EndCell())
 				}
 				c.dicts = cell.BeginCell().MustStoreDict(refDict(t, 64, f.pending)).MustStoreDict(refDict(t, 64, f.refunds)).MustStoreDict(counts)
 			}
