@@ -7,10 +7,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math/big"
+	"regexp"
 	"strconv"
 	"strings"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/internal/jsonstrict"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 	"github.com/tosnetwork/tosutils-go/tlb"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
@@ -42,8 +46,78 @@ type accountInformation struct {
 	ExtraCurrencies   json.RawMessage `json:"extra_currencies"`
 	State             string          `json:"state"`
 	FrozenHash        string          `json:"frozen_hash"`
-	// StorageStat is the account's storage usage, served beside the state.
-	StorageStat json.RawMessage `json:"storage_stat,omitempty"`
+	// StorageStat is the account's storage usage, served beside the state
+	// and omitted for an account without storage metadata.
+	StorageStat accountStorageStat `json:"storage_stat"`
+}
+
+// accountStorageStat is the node's storage.stat object, decoded strictly:
+// {"@type":"storage.stat","used_cells":"<u64>","used_bits":"<u64>",
+// "last_paid":<u32>,"due_payment":null|"<decimal>"}. Every field is
+// required, unknown fields are refused, and an explicit null is refused.
+type accountStorageStat struct {
+	Present    bool
+	UsedCells  uint64
+	UsedBits   uint64
+	LastPaid   uint32
+	DuePayment *big.Int
+}
+
+var canonicalDecimal = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+
+func (s *accountStorageStat) UnmarshalJSON(raw []byte) error {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return errors.New("storage_stat is null")
+	}
+	var fields struct {
+		Type      *string `json:"@type"`
+		UsedCells *string `json:"used_cells"`
+		UsedBits  *string `json:"used_bits"`
+		// RawMessage, not a pointer: a JSON null would leave a pointer nil
+		// and look absent.
+		LastPaid   json.RawMessage `json:"last_paid"`
+		DuePayment json.RawMessage `json:"due_payment"`
+	}
+	if err := jsonstrict.Decode(raw, &fields); err != nil {
+		return fmt.Errorf("storage_stat: %w", err)
+	}
+	if fields.Type == nil || *fields.Type != "storage.stat" || fields.UsedCells == nil || fields.UsedBits == nil ||
+		len(fields.LastPaid) == 0 || len(fields.DuePayment) == 0 {
+		return errors.New("storage_stat is missing a field or has another type")
+	}
+	cells, err := canonicalUint(*fields.UsedCells, 64)
+	if err != nil {
+		return fmt.Errorf("storage_stat used_cells: %w", err)
+	}
+	bitsUsed, err := canonicalUint(*fields.UsedBits, 64)
+	if err != nil {
+		return fmt.Errorf("storage_stat used_bits: %w", err)
+	}
+	lastPaid, err := canonicalUint(string(fields.LastPaid), 32)
+	if err != nil {
+		return fmt.Errorf("storage_stat last_paid: %w", err)
+	}
+	var due *big.Int
+	if string(fields.DuePayment) != "null" {
+		var text string
+		if err := json.Unmarshal(fields.DuePayment, &text); err != nil || !canonicalDecimal.MatchString(text) {
+			return errors.New("storage_stat due_payment is not null or a canonical decimal string")
+		}
+		due, _ = new(big.Int).SetString(text, 10)
+	}
+	*s = accountStorageStat{Present: true, UsedCells: cells, UsedBits: bitsUsed, LastPaid: uint32(lastPaid), DuePayment: due}
+	return nil
+}
+
+func canonicalUint(text string, width int) (uint64, error) {
+	if !canonicalDecimal.MatchString(text) {
+		return 0, errors.New("not a canonical unsigned decimal")
+	}
+	value, err := strconv.ParseUint(text, 10, width)
+	if err != nil {
+		return 0, errors.New("out of range")
+	}
+	return value, nil
 }
 
 type rawTransaction struct {

@@ -462,15 +462,60 @@ func TestVariableAddressDestinationMatchesItsPayout(t *testing.T) {
 	}
 }
 
-// The node's getAddressInformation result carries storage_stat beside the
-// account state; the strict result decoder must accept exactly that shape.
-func TestAccountInformationAcceptsTheServedShape(t *testing.T) {
-	raw := `{"@type":"raw.fullAccountState","balance":"5","code":"","data":"","last_transaction_id":{"@type":"internal.transactionId","lt":"1","hash":"AA=="},` +
-		`"block_id":{"@type":"tos.blockIdExt","workchain":-1,"shard":"-9223372036854775808","seqno":7,"root_hash":"AA==","file_hash":"AA=="},` +
-		`"sync_utime":1,"extra_currencies":[],"state":"active","frozen_hash":"","storage_stat":{"cells":"3","bits":"100"}}`
+// The node's getAddressInformation result carries a storage.stat object
+// beside the account state (json-rpc-server-storage.cpp); the strict account
+// decoder accepts exactly that shape and its omission, and nothing else.
+func TestAccountInformationStorageStatIsStrict(t *testing.T) {
+	account := func(storage string) string {
+		raw := `{"@type":"raw.fullAccountState","balance":"5","code":"","data":"","last_transaction_id":{"@type":"internal.transactionId","lt":"1","hash":"AA=="},` +
+			`"block_id":{"@type":"tos.blockIdExt","workchain":-1,"shard":"-9223372036854775808","seqno":7,"root_hash":"AA==","file_hash":"AA=="},` +
+			`"sync_utime":1,"extra_currencies":[],"state":"active","frozen_hash":""`
+		if storage != "" {
+			raw += `,"storage_stat":` + storage
+		}
+		return raw + "}"
+	}
+	served := `{"@type":"storage.stat","used_cells":"21","used_bits":"8810","last_paid":1794032743,"due_payment":null}`
 	var info accountInformation
-	if err := jsonstrict.Decode([]byte(raw), &info); err != nil {
-		t.Fatalf("served account shape refused: %v", err)
+	if err := jsonstrict.Decode([]byte(account(served)), &info); err != nil || !info.StorageStat.Present ||
+		info.StorageStat.UsedCells != 21 || info.StorageStat.UsedBits != 8810 || info.StorageStat.LastPaid != 1794032743 ||
+		info.StorageStat.DuePayment != nil {
+		t.Fatalf("served storage_stat: %+v %v", info.StorageStat, err)
+	}
+	var due accountInformation
+	if err := jsonstrict.Decode([]byte(account(strings.Replace(served, `"due_payment":null`, `"due_payment":"17"`, 1))), &due); err != nil ||
+		due.StorageStat.DuePayment == nil || due.StorageStat.DuePayment.Int64() != 17 {
+		t.Fatalf("a due payment was not read: %v", err)
+	}
+	var omitted accountInformation
+	if err := jsonstrict.Decode([]byte(account("")), &omitted); err != nil || omitted.StorageStat.Present {
+		t.Fatalf("an account without storage metadata was refused: %v", err)
+	}
+	for name, storage := range map[string]string{
+		"null":                `null`,
+		"number":              `123`,
+		"unknown field":       `{"unknown":true}`,
+		"extra field":         strings.Replace(served, `}`, `,"x":1}`, 1),
+		"other type":          strings.Replace(served, `storage.stat`, `storage.other`, 1),
+		"missing type":        strings.Replace(served, `"@type":"storage.stat",`, ``, 1),
+		"missing used_cells":  strings.Replace(served, `"used_cells":"21",`, ``, 1),
+		"missing used_bits":   strings.Replace(served, `"used_bits":"8810",`, ``, 1),
+		"missing last_paid":   strings.Replace(served, `"last_paid":1794032743,`, ``, 1),
+		"missing due_payment": strings.Replace(served, `,"due_payment":null`, ``, 1),
+		"numeric used_cells":  strings.Replace(served, `"used_cells":"21"`, `"used_cells":21`, 1),
+		"negative used_bits":  strings.Replace(served, `"used_bits":"8810"`, `"used_bits":"-1"`, 1),
+		"leading zero":        strings.Replace(served, `"used_cells":"21"`, `"used_cells":"021"`, 1),
+		"used_cells overflow": strings.Replace(served, `"used_cells":"21"`, `"used_cells":"18446744073709551616"`, 1),
+		"string last_paid":    strings.Replace(served, `"last_paid":1794032743`, `"last_paid":"1794032743"`, 1),
+		"last_paid overflow":  strings.Replace(served, `"last_paid":1794032743`, `"last_paid":4294967296`, 1),
+		"fractional":          strings.Replace(served, `"last_paid":1794032743`, `"last_paid":1.5`, 1),
+		"numeric due":         strings.Replace(served, `"due_payment":null`, `"due_payment":17`, 1),
+		"negative due":        strings.Replace(served, `"due_payment":null`, `"due_payment":"-1"`, 1),
+	} {
+		var refused accountInformation
+		if err := jsonstrict.Decode([]byte(account(storage)), &refused); err == nil {
+			t.Errorf("storage_stat %s was accepted", name)
+		}
 	}
 }
 
