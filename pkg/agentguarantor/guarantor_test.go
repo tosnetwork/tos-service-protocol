@@ -1,8 +1,7 @@
 package agentguarantor
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
+	"context"
 	"math"
 	"strings"
 	"testing"
@@ -12,7 +11,7 @@ import (
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
-type allowAuthorityResolver struct{}
+type allowAuthorityResolver struct{ nativeTestAuthority }
 
 func (allowAuthorityResolver) ResolveGuarantorAuthority(_ AuthorityResolutionScopeV1, _ string, _ time.Time, proof []byte) error {
 	if len(proof) == 0 {
@@ -174,19 +173,12 @@ func testCoverageTerms(t *testing.T) CoverageTermsV1 {
 }
 
 func TestObjectAuthorizationBindsExactBody(t *testing.T) {
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	now := time.Unix(2_000_000_000, 0).UTC()
 	statement := AuthorizationStatementV1{SchemaVersion: 1, AuthoritySubject: "agent:guarantor",
 		ProfileURI: "tos.test.authority.v1", ProfileVersion: 1, ProfileDigest: testDigest("1"),
 		AuthorizedObjectKind: "firm-coverage-offer", AuthorizedBodyDigest: testDigest("2"),
 		ValidationTimeUnix: uint64(now.Unix())}
-	authorization, err := SignObjectAuthorization(statement, "tos.test.signature.v1", key, []byte("historical-proof"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	authorization := testSignAuthorization(t, statement, "tos.test.signature.v1", "guarantor", []byte("historical-proof"))
 	if err := VerifyObjectAuthorization(authorization, statement.AuthorizedObjectKind, statement.AuthorizedBodyDigest,
 		"tos.test.signature.v1", allowAuthorityResolver{}, now); err != nil {
 		t.Fatal(err)
@@ -198,15 +190,12 @@ func TestObjectAuthorizationBindsExactBody(t *testing.T) {
 }
 
 func TestObjectAuthorizationRejectsUnixTimestampWraparound(t *testing.T) {
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	statement := AuthorizationStatementV1{SchemaVersion: 1, AuthoritySubject: "agent:guarantor",
 		ProfileURI: "tos.test.authority.v1", ProfileVersion: 1, ProfileDigest: testDigest("1"),
 		AuthorizedObjectKind: "firm-coverage-offer", AuthorizedBodyDigest: testDigest("2"),
 		ValidationTimeUnix: uint64(math.MaxInt64) + 1}
-	if _, err := SignObjectAuthorization(statement, "tos.test.signature.v1", key, []byte("historical-proof")); err == nil {
+	if _, err := SignObjectAuthorization(context.Background(), statement, "tos.test.signature.v1", nativeTestFake,
+		"guarantor", []byte("historical-proof")); err == nil {
 		t.Fatal("authorization timestamp above MaxInt64 was accepted")
 	}
 	if validUnixTimestampV1(0) || validUnixTimestampV1(uint64(math.MaxInt64)+1) ||
@@ -245,10 +234,6 @@ func TestReleasedObjectRegistryIsExactAndExhaustive(t *testing.T) {
 
 func TestCancellationRequestBindsPolicyAgreementEvidenceAndRequester(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	_, requesterKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
 	authorizationProfile := testRef("1", "cancellation-authority")
 	agreement := agentcommerce.AgentAgreementBody{SchemaVersion: 1, AgreementID: "agreement:cancellation", Version: 1,
 		NetworkContext: "tos:test", Participants: []agentcommerce.AgreementParticipant{
@@ -264,7 +249,7 @@ func TestCancellationRequestBindsPolicyAgreementEvidenceAndRequester(t *testing.
 			EvidenceProfileURI: agentcommerce.EvidenceProfileAgentSignature, EvidenceProfileVersion: 1,
 			EvidenceProfileDigest: agentcommerce.AgentSignatureProfileDigest(), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())}},
 		ValidFromUnix: uint64(now.Add(-time.Minute).Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())}
-	agreement, err = agentcommerce.PrepareAgreementTargets(agreement)
+	agreement, err := agentcommerce.PrepareAgreementTargets(agreement)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,15 +268,12 @@ func TestCancellationRequestBindsPolicyAgreementEvidenceAndRequester(t *testing.
 		EffectiveNotBeforeUnix: uint64(now.Unix()), EffectiveNotAfterUnix: uint64(now.Add(5 * time.Minute).Unix()),
 		CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: uint64(now.Add(5 * time.Minute).Unix())}
 	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-cancellation-request-body.v1", body)
-	authorization, err := SignObjectAuthorization(AuthorizationStatementV1{SchemaVersion: 1,
+	authorization := testSignAuthorization(t, AuthorizationStatementV1{SchemaVersion: 1,
 		AuthoritySubject: body.RequesterSubject, ProfileURI: authorizationProfile.ProfileURI,
 		ProfileVersion: authorizationProfile.ProfileVersion, ProfileDigest: authorizationProfile.ProfileDigest,
 		AuthorizedObjectKind: "coverage-cancellation-request", AuthorizedBodyDigest: bodyDigest,
 		ValidationTimeUnix: uint64(now.Unix())}, "tos.service.agent-guarantor-cancellation-request-signature.v1",
-		requesterKey, []byte("requester-history"))
-	if err != nil {
-		t.Fatal(err)
-	}
+		"requester", []byte("requester-history"))
 	request := AuthorizedCoverageCancellationRequestV1{Body: body, CoverageAgreementBody: agreement,
 		Authorizations: []ProfileQualifiedObjectAuthorizationV1{authorization}}
 	if err := VerifyCoverageCancellationRequestV1(request, policy, allowAuthorityResolver{}, now); err != nil {

@@ -62,13 +62,13 @@ type PortableStageActionAdmissionBodyV1 struct {
 }
 
 type PortableStageActionAdmissionEvidenceV1 struct {
-	Body                         PortableStageActionAdmissionBodyV1    `json:"body"`
-	CanonicalRequestContentType  string                                `json:"canonical_request_content_type"`
-	CanonicalRequest             []byte                                `json:"canonical_request"`
-	AuthorizedAction             agentcommerce.AuthorizedAction        `json:"authorized_action"`
-	WriterFence                  agentcommerce.WriterFence             `json:"writer_fence"`
-	ActionResolution             agentcommerce.ActionResolution        `json:"action_resolution"`
-	ActionAdmissionAuthorization ProfileQualifiedObjectAuthorizationV1 `json:"action_admission_authorization"`
+	Body                         PortableStageActionAdmissionBodyV1  `json:"body"`
+	CanonicalRequestContentType  string                              `json:"canonical_request_content_type"`
+	CanonicalRequest             []byte                              `json:"canonical_request"`
+	AuthorizedAction             agentcommerce.AuthorizedAction      `json:"authorized_action"`
+	WriterFence                  agentcommerce.WriterFence           `json:"writer_fence"`
+	ActionResolution             agentcommerce.ActionResolution      `json:"action_resolution"`
+	ActionAdmissionAuthorization StageActionAdmissionAuthorizationV1 `json:"action_admission_authorization"`
 }
 
 type CoverageActivationActionBodyV1 struct {

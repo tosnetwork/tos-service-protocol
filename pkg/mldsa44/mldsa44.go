@@ -43,7 +43,14 @@ const (
 	UseAgentPacket Use = "agent-packet"
 	// UseAgentContact signs an Agent contact card preimage.
 	UseAgentContact Use = "agent-contact"
+	// UseAgentGuarantor signs the 32-byte message digest of an Agent
+	// Guarantor object authorization.
+	UseAgentGuarantor Use = "agent-guarantor"
 )
+
+// AgentGuarantorMessageSize is the exact length of an Agent Guarantor
+// message: a SHA-256 digest that already separates the object kind.
+const AgentGuarantorMessageSize = 32
 
 // Context returns the FIPS 204 context string of a use, or an error for an
 // unknown use.
@@ -55,6 +62,8 @@ func (u Use) Context() (string, error) {
 		return "TOS-AGENT-PACKET-V1", nil
 	case UseAgentContact:
 		return "TOS-AGENT-CONTACT-V1", nil
+	case UseAgentGuarantor:
+		return "TOS-AGENT-GUARANTOR-V1", nil
 	default:
 		return "", errors.New("unknown ML-DSA-44 signature use")
 	}
@@ -92,6 +101,19 @@ type Signature struct {
 // sees.
 type Signer interface {
 	Sign(ctx context.Context, controller string, use Use, payload []byte) (Signature, error)
+}
+
+// CheckMessage validates the shape of a non-registry payload: non-empty and
+// bounded, and exactly AgentGuarantorMessageSize bytes for UseAgentGuarantor.
+func CheckMessage(use Use, payload []byte) error {
+	if _, err := use.Context(); err != nil || use == UseRegistry {
+		return ErrMalformed
+	}
+	if len(payload) == 0 || len(payload) > MaxMessageBytes ||
+		use == UseAgentGuarantor && len(payload) != AgentGuarantorMessageSize {
+		return ErrMalformed
+	}
+	return nil
 }
 
 // KeyID derives the controller key ID of an ML-DSA-44 public key:

@@ -8,6 +8,7 @@ import (
 
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 type testImmutableGuarantorPublisher struct {
@@ -71,9 +72,17 @@ func TestBuildGuarantorCommerceEventSelectsExactCarriage(t *testing.T) {
 	}
 
 	large := request
+	// Two authorizations at the native maximum: a 2,420-byte signature and a
+	// historical proof at its bound each.
+	signatureText, err := NativeAuthorizationSignatureText(make([]byte, mldsa44.SignatureSize))
+	if err != nil {
+		t.Fatal(err)
+	}
 	large.Authorizations = []ProfileQualifiedObjectAuthorizationV1{
-		{Evidence: NativeEd25519AgentAuthorizationEvidenceV1{HistoricalAuthorityProof: []byte(strings.Repeat("a", 60<<10))}},
-		{Evidence: NativeEd25519AgentAuthorizationEvidenceV1{HistoricalAuthorityProof: []byte(strings.Repeat("b", 60<<10))}},
+		{Evidence: NativeMLDSA44AgentAuthorizationEvidenceV1{KeyID: "mldsa44:" + strings.Repeat("a1", 32),
+			Signature: signatureText, HistoricalAuthorityProof: []byte(strings.Repeat("a", MaxHistoricalAuthorityProofBytes))}},
+		{Evidence: NativeMLDSA44AgentAuthorizationEvidenceV1{KeyID: "mldsa44:" + strings.Repeat("b2", 32),
+			Signature: signatureText, HistoricalAuthorityProof: []byte(strings.Repeat("b", MaxHistoricalAuthorityProofBytes))}},
 	}
 	if _, err := BuildCommerceProfileEventV1(context.Background(), "quote-request", large,
 		CommerceEventContextV1{CreatedAtUnix: uint64(now.Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())}, nil); err == nil {

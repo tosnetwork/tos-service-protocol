@@ -1,8 +1,6 @@
 package agentguarantor
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"testing"
 	"time"
 
@@ -11,6 +9,7 @@ import (
 )
 
 type testControlResolver struct {
+	nativeTestAuthority
 	controller             string
 	operationRouteSurvives bool
 }
@@ -50,7 +49,7 @@ func (r testControlResolver) VerifyGuarantorAuthorityControlResolution(_ agentco
 	}, nil
 }
 
-func testOperationalIndependenceEvidence(t *testing.T) (CoverageTermsV1, AuthorizedGuarantorOperationalIndependenceEvidenceV1, ed25519.PrivateKey, time.Time) {
+func testOperationalIndependenceEvidence(t *testing.T) (CoverageTermsV1, AuthorizedGuarantorOperationalIndependenceEvidenceV1, string, time.Time) {
 	t.Helper()
 	now := time.Unix(2_000_000_100, 0).UTC()
 	terms := testCoverageTerms(t)
@@ -104,21 +103,16 @@ func testOperationalIndependenceEvidence(t *testing.T) (CoverageTermsV1, Authori
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	authorization, err := SignObjectAuthorization(AuthorizationStatementV1{SchemaVersion: 1,
+	const controller = "auditor"
+	authorization := testSignAuthorization(t, AuthorizationStatementV1{SchemaVersion: 1,
 		AuthoritySubject: "authority:auditor", ProfileURI: independenceTerms.AuthorityControlResolutionProfile.ProfileURI,
 		ProfileVersion:       independenceTerms.AuthorityControlResolutionProfile.ProfileVersion,
 		ProfileDigest:        independenceTerms.AuthorityControlResolutionProfile.ProfileDigest,
 		AuthorizedObjectKind: "operational-independence-evidence", AuthorizedBodyDigest: bodyDigest,
-		ValidationTimeUnix: uint64(now.Unix())}, "tos.service.agent-guarantor-operational-independence-evidence-signature.v1", key, []byte("authority-proof"))
-	if err != nil {
-		t.Fatal(err)
-	}
+		ValidationTimeUnix: uint64(now.Unix())}, "tos.service.agent-guarantor-operational-independence-evidence-signature.v1",
+		controller, []byte("authority-proof"))
 	return terms, AuthorizedGuarantorOperationalIndependenceEvidenceV1{Body: body,
-		ResolverFinalityEvidence: []byte("finality-proof"), Authorizations: []ProfileQualifiedObjectAuthorizationV1{authorization}}, key, now
+		ResolverFinalityEvidence: []byte("finality-proof"), Authorizations: []ProfileQualifiedObjectAuthorizationV1{authorization}}, controller, now
 }
 
 func TestOperationalIndependenceRequiresDeletionSurvivalAndTransitiveControlClosure(t *testing.T) {

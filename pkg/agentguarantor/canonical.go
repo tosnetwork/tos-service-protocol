@@ -2,6 +2,7 @@ package agentguarantor
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 func equalCanonical(left, right any) bool {
@@ -31,8 +33,29 @@ var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 const NativeAuthorizationContentType = "application/vnd.tos.service.agent-guarantor-native-authorization.v1+cbor"
 
+// NativeAuthorizationSignaturePrefix prefixes the only text form of a native
+// ML-DSA-44 signature.
+const NativeAuthorizationSignaturePrefix = "mldsa44:"
+
+// NativeAgentAuthorityResolver resolves native ML-DSA-44 Agent authority.
+// ResolveNativeAgentKey proves from historicalProof, against finalized TOS
+// state the resolver reads itself, that keyID named an Agent-control
+// controller of scope.AuthoritySubject meeting the ordinary threshold at the
+// signed time, and returns the 1,312-byte key stored for it. Verify checks
+// ML-DSA-44 signatures.
+type NativeAgentAuthorityResolver interface {
+	ResolveNativeAgentKey(scope AuthorityResolutionScopeV1, keyID [mldsa44.KeyIDSize]byte, at time.Time,
+		historicalProof []byte) ([]byte, error)
+	mldsa44.Verifier
+}
+
+// AuthorityKeyResolver is the authority boundary of every Guarantor
+// verifier. ResolveGuarantorAuthority authorizes the Ed25519 key of a scalar
+// Action Authority for a stage admission (Semantic Action Identity scheme);
+// native Agent authorization goes through NativeAgentAuthorityResolver.
 type AuthorityKeyResolver interface {
 	ResolveGuarantorAuthority(scope AuthorityResolutionScopeV1, publicKey string, at time.Time, historicalProof []byte) error
+	NativeAgentAuthorityResolver
 }
 
 // AuthorityResolutionScopeV1 prevents a key authorized for one low-risk role
@@ -83,28 +106,122 @@ func authorizationMessage(signatureDomain string, statement AuthorizationStateme
 	return h.Sum(nil), nil
 }
 
-func SignObjectAuthorization(statement AuthorizationStatementV1, signatureDomain string, key ed25519.PrivateKey,
-	historicalProof []byte) (ProfileQualifiedObjectAuthorizationV1, error) {
-	if len(key) != ed25519.PrivateKeySize || len(historicalProof) == 0 || len(historicalProof) > 64<<10 {
-		return ProfileQualifiedObjectAuthorizationV1{}, errors.New("Guarantor authorization key or authority proof is invalid")
+// NativeAuthorizationMessage returns the 32-byte section 9 message a native
+// authorization signs: SHA-256(domain || 0x00 || uint32_be(len) || CBOR).
+func NativeAuthorizationMessage(signatureDomain string, statement AuthorizationStatementV1) ([]byte, error) {
+	return authorizationMessage(signatureDomain, statement)
+}
+
+// NativeAuthorizationSignatureText renders a 2,420-byte signature in its only
+// text form.
+func NativeAuthorizationSignatureText(signature []byte) (string, error) {
+	if len(signature) != mldsa44.SignatureSize {
+		return "", errors.New("Guarantor authorization signature is not 2,420 bytes")
+	}
+	return NativeAuthorizationSignaturePrefix + base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+// ParseNativeAuthorizationSignatureText accepts only mldsa44: followed by the
+// unpadded URL-safe Base64 of exactly 2,420 bytes, with no padding, other
+// alphabet, trailing bits or alias.
+func ParseNativeAuthorizationSignatureText(value string) ([]byte, error) {
+	if !strings.HasPrefix(value, NativeAuthorizationSignaturePrefix) {
+		return nil, errors.New("Guarantor authorization signature has no mldsa44 prefix")
+	}
+	encoded := value[len(NativeAuthorizationSignaturePrefix):]
+	signature, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(signature) != mldsa44.SignatureSize ||
+		base64.RawURLEncoding.EncodeToString(signature) != encoded {
+		return nil, errors.New("Guarantor authorization signature is not canonical")
+	}
+	return signature, nil
+}
+
+// SignObjectAuthorization signs a native authorization with the custody-held
+// controller named controller, under TOS-AGENT-GUARANTOR-V1 over the section
+// 9 message. historicalProof is the canonical proof the verifier will use to
+// resolve the key; the signer never supplies the key.
+func SignObjectAuthorization(ctx context.Context, statement AuthorizationStatementV1, signatureDomain string,
+	signer mldsa44.Signer, controller string, historicalProof []byte) (ProfileQualifiedObjectAuthorizationV1, error) {
+	if ctx == nil || signer == nil || len(historicalProof) == 0 || len(historicalProof) > MaxHistoricalAuthorityProofBytes {
+		return ProfileQualifiedObjectAuthorizationV1{}, errors.New("Guarantor authorization signer or authority proof is invalid")
 	}
 	message, err := authorizationMessage(signatureDomain, statement)
 	if err != nil {
 		return ProfileQualifiedObjectAuthorizationV1{}, err
 	}
-	public := key.Public().(ed25519.PublicKey)
+	signed, err := signer.Sign(ctx, controller, mldsa44.UseAgentGuarantor, message)
+	if err != nil {
+		return ProfileQualifiedObjectAuthorizationV1{}, fmt.Errorf("Guarantor authorization signing: %w", err)
+	}
+	if err := mldsa44.CheckSignature(signed); err != nil {
+		return ProfileQualifiedObjectAuthorizationV1{}, fmt.Errorf("Guarantor authorization custody answer: %w", err)
+	}
+	signatureText, err := NativeAuthorizationSignatureText(signed.Signature)
+	if err != nil {
+		return ProfileQualifiedObjectAuthorizationV1{}, err
+	}
 	return ProfileQualifiedObjectAuthorizationV1{AuthoritySubject: statement.AuthoritySubject,
 		ProfileURI: statement.ProfileURI, ProfileVersion: statement.ProfileVersion,
 		ProfileDigest: statement.ProfileDigest, AuthorizedObjectKind: statement.AuthorizedObjectKind,
 		AuthorizedBodyDigest: statement.AuthorizedBodyDigest, ValidationTimeUnix: statement.ValidationTimeUnix,
 		EvidenceContentType: NativeAuthorizationContentType,
-		Evidence: NativeEd25519AgentAuthorizationEvidenceV1{PublicKey: "ed25519:" + hex.EncodeToString(public),
-			Signature:                "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, message)),
-			HistoricalAuthorityProof: append([]byte(nil), historicalProof...)}}, nil
+		Evidence: NativeMLDSA44AgentAuthorizationEvidenceV1{KeyID: mldsa44.KeyIDText(signed.KeyID),
+			Signature: signatureText, HistoricalAuthorityProof: append([]byte(nil), historicalProof...)}}, nil
 }
 
+// VerifyObjectAuthorization verifies one native ML-DSA-44 Agent
+// authorization: exact text forms, the recomputed section 9 message, the key
+// the historical authority proof resolves for key_id, and a Pure ML-DSA-44
+// signature under TOS-AGENT-GUARANTOR-V1.
 func VerifyObjectAuthorization(authorization ProfileQualifiedObjectAuthorizationV1, expectedObjectKind, expectedBodyDigest,
 	signatureDomain string, resolver AuthorityKeyResolver, now time.Time) error {
+	statement := authorization.AuthorizationStatement()
+	if authorization.EvidenceContentType != NativeAuthorizationContentType ||
+		statement.AuthorizedObjectKind != expectedObjectKind || statement.AuthorizedBodyDigest != expectedBodyDigest || resolver == nil ||
+		len(authorization.Evidence.HistoricalAuthorityProof) == 0 ||
+		len(authorization.Evidence.HistoricalAuthorityProof) > MaxHistoricalAuthorityProofBytes {
+		return errors.New("Guarantor object authorization does not match the expected body")
+	}
+	if statement.ValidationTimeUnix > uint64(now.UTC().Add(5*time.Minute).Unix()) {
+		return errors.New("Guarantor authorization validation time is in the future")
+	}
+	keyID, err := mldsa44.ParseKeyIDText(authorization.Evidence.KeyID)
+	if err != nil {
+		return errors.New("Guarantor authorization key ID is invalid")
+	}
+	signature, err := ParseNativeAuthorizationSignatureText(authorization.Evidence.Signature)
+	if err != nil {
+		return err
+	}
+	message, err := authorizationMessage(signatureDomain, statement)
+	if err != nil {
+		return err
+	}
+	publicKey, err := resolver.ResolveNativeAgentKey(AuthorityResolutionScopeV1{
+		AuthoritySubject: statement.AuthoritySubject, ProfileURI: statement.ProfileURI,
+		ProfileVersion: statement.ProfileVersion, ProfileDigest: statement.ProfileDigest,
+		AuthorizedKind: statement.AuthorizedObjectKind, AuthorizedDigest: statement.AuthorizedBodyDigest,
+		SignatureDomain: signatureDomain,
+	}, keyID, time.Unix(int64(statement.ValidationTimeUnix), 0).UTC(), authorization.Evidence.HistoricalAuthorityProof)
+	if err != nil {
+		return fmt.Errorf("Guarantor authorization authority: %w", err)
+	}
+	derived, err := mldsa44.KeyID(publicKey)
+	if err != nil || derived != keyID {
+		return errors.New("Guarantor authorization resolved key does not derive its key ID")
+	}
+	if err := resolver.Verify(context.Background(), mldsa44.UseAgentGuarantor, message, publicKey, signature); err != nil {
+		return fmt.Errorf("Guarantor authorization signature does not verify: %w", err)
+	}
+	return nil
+}
+
+// verifyStageActionAdmissionAuthorizationV1 verifies a stage admission under
+// the scalar Action Authority's Semantic Action Identity scheme (Ed25519). It
+// is never native Agent evidence.
+func verifyStageActionAdmissionAuthorizationV1(authorization StageActionAdmissionAuthorizationV1, expectedObjectKind,
+	expectedBodyDigest, signatureDomain string, resolver AuthorityKeyResolver, now time.Time) error {
 	statement := authorization.AuthorizationStatement()
 	if authorization.EvidenceContentType != NativeAuthorizationContentType ||
 		statement.AuthorizedObjectKind != expectedObjectKind || statement.AuthorizedBodyDigest != expectedBodyDigest || resolver == nil ||
