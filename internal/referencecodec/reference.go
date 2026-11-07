@@ -30,6 +30,7 @@ type VectorSet struct {
 	ContractCodeHash       string                 `json:"contract_code_hash"`
 	ContractCodeBOCBase64  string                 `json:"contract_code_boc_base64"`
 	Network                Network                `json:"network"`
+	Signature              SignatureScheme        `json:"signature"`
 	AgentRegistration      AgentRegistration      `json:"agent_registration"`
 	CapabilityRegistration CapabilityRegistration `json:"capability_registration"`
 	NegativeMutations      []NegativeMutation     `json:"negative_mutations"`
@@ -41,8 +42,17 @@ type Network struct {
 	GenesisFileHash string `json:"genesis_file_hash"`
 }
 
+// SignatureScheme names how the vector signatures were produced. The
+// reference codec does not sign or verify; it only encodes signatures.
+type SignatureScheme struct {
+	Suite   string `json:"suite"`
+	Context string `json:"context"`
+	Signing string `json:"signing"`
+}
+
 type Controller struct {
 	PublicKeyHex string `json:"public_key_hex"`
+	KeyID        string `json:"key_id"`
 	Weight       uint32 `json:"weight"`
 	PurposeMask  uint32 `json:"purpose_mask"`
 	Recovery     bool   `json:"recovery"`
@@ -61,6 +71,7 @@ type Expected struct {
 	ActionHash      string `json:"action_hash"`
 	ActionBOCBase64 string `json:"action_boc_base64"`
 	SignatureHex    string `json:"signature_hex"`
+	SubmissionBody  string `json:"submission_body_hash"`
 }
 
 type AgentRegistration struct {
@@ -92,6 +103,10 @@ type Result struct {
 	StateInitBOC    string
 	ActionHash      string
 	ActionBOCBase64 string
+	// SubmissionBodyHash is the hash of the direct or Agent-authorized
+	// submission body carrying the vector's signature, with query ID 1 and
+	// an empty counterparty set, as the vectors were executed.
+	SubmissionBodyHash string
 }
 
 type ValidationError struct {
@@ -144,7 +159,8 @@ func ComputeAgent(v VectorSet) (Result, error) {
 		MustStoreSlice(objectNonce, 256).MustStoreSlice(policy.Hash(), 256).MustStoreRef(domain).EndCell()
 	objectID := "agent_" + hex.EncodeToString(identity.Hash())
 	payload := cell.BeginCell().MustStoreSlice(objectNonce, 256).MustStoreRef(policy).EndCell()
-	return registrationAction(v, objectID, 1, 1, payload, v.AgentRegistration.ActionNonceHex)
+	return registrationAction(v, objectID, 1, 1, payload, v.AgentRegistration.ActionNonceHex,
+		0x4e560001, v.AgentRegistration.Expected.SignatureHex)
 }
 
 func ComputeCapability(v VectorSet) (Result, error) {
@@ -175,7 +191,8 @@ func ComputeCapability(v VectorSet) (Result, error) {
 	versionDetails := cell.BeginCell().MustStoreSlice(versionHash[:], 256).MustStoreSlice(manifest, 256).
 		MustStoreRef(cell.BeginCell().MustStoreBinarySnake([]byte(v.CapabilityRegistration.Version)).EndCell()).EndCell()
 	payload := cell.BeginCell().MustStoreSlice(objectNonce, 256).MustStoreSlice(owner, 256).MustStoreRef(versionDetails).EndCell()
-	return registrationAction(v, objectIDValue, 2, 7, payload, v.CapabilityRegistration.ActionNonceHex)
+	return registrationAction(v, objectIDValue, 2, 7, payload, v.CapabilityRegistration.ActionNonceHex,
+		0x4e560002, v.CapabilityRegistration.Expected.SignatureHex)
 }
 
 // CheckNegative applies one frozen mutation to an independent registration
@@ -292,7 +309,8 @@ func CheckNegative(v VectorSet, mutation NegativeMutation) error {
 	return errors.New("negative mutation was accepted")
 }
 
-func registrationAction(v VectorSet, object string, targetKind, actionKind uint8, payload *cell.Cell, nonceHex string) (Result, error) {
+func registrationAction(v VectorSet, object string, targetKind, actionKind uint8, payload *cell.Cell, nonceHex string,
+	opcode uint64, signatureHex string) (Result, error) {
 	target, err := objectID(object, map[uint8]string{1: "agent_", 2: "cap_"}[targetKind])
 	if err != nil {
 		return Result{}, err
@@ -314,9 +332,37 @@ func registrationAction(v VectorSet, object string, targetKind, actionKind uint8
 	if err != nil {
 		return Result{}, err
 	}
+	body, err := submissionBody(v, opcode, root, signatureHex)
+	if err != nil {
+		return Result{}, err
+	}
 	return Result{ObjectID: object, ContractAddress: address, StateInitBOC: stateInit,
-		ActionHash:      "sha256:" + hex.EncodeToString(root.Hash()),
-		ActionBOCBase64: base64.StdEncoding.EncodeToString(root.ToBOC())}, nil
+		ActionHash:         "sha256:" + hex.EncodeToString(root.Hash()),
+		ActionBOCBase64:    base64.StdEncoding.EncodeToString(root.ToBOC()),
+		SubmissionBodyHash: "tvm-cell-sha256:" + hex.EncodeToString(body.Hash())}, nil
+}
+
+// submissionBody encodes opcode:uint32 query_id:uint64 ^action ^authority
+// ^counterparty with one authority entry, the vector controller's
+// signature, and the empty counterparty set (count 0, no reference).
+func submissionBody(v VectorSet, opcode uint64, action *cell.Cell, signatureHex string) (*cell.Cell, error) {
+	if len(v.AgentRegistration.Policy.Controllers) != 1 {
+		return nil, errors.New("the reference submission carries exactly one signature")
+	}
+	key, err := hex.DecodeString(v.AgentRegistration.Policy.Controllers[0].PublicKeyHex)
+	if err != nil || len(key) != publicKeyBytes {
+		return nil, errors.New("invalid vector controller key")
+	}
+	signature, err := hex.DecodeString(signatureHex)
+	if err != nil || len(signature) != signatureBytes || signatureHex != hex.EncodeToString(signature) {
+		return nil, errors.New("invalid vector signature")
+	}
+	keyID := controllerKeyID(key)
+	entry := cell.BeginCell().MustStoreSlice(keyID[:], 256).MustStoreRef(storedMaterial(signature)).EndCell()
+	authority := cell.BeginCell().MustStoreUInt(1, 8).MustStoreRef(entry).EndCell()
+	counterparty := cell.BeginCell().MustStoreUInt(0, 8).EndCell()
+	return cell.BeginCell().MustStoreUInt(opcode, 32).MustStoreUInt(1, 64).MustStoreRef(action).
+		MustStoreRef(authority).MustStoreRef(counterparty).EndCell(), nil
 }
 
 func locate(v VectorSet, kind uint8, objectID []byte) (string, string, error) {
@@ -353,51 +399,99 @@ func locate(v VectorSet, kind uint8, objectID []byte) (string, string, error) {
 	return "0:" + hex.EncodeToString(stateInit.Hash()), base64.StdEncoding.EncodeToString(stateInit.ToBOC()), nil
 }
 
-// maxPolicyControllers is the Native Registry contract's policy width limit.
-const maxPolicyControllers = 20
+// The Native Registry contract's controller limits and ML-DSA-44 sizes.
+const (
+	maxPolicyControllers = 8
+	publicKeyBytes       = 1312
+	signatureBytes       = 2420
+	chainCellBytes       = 127
+)
+
+// controllerKeyID is SHA-256("TOS-PQ-CONSENSUS-KEY-v1" || 01 00 || key),
+// suite 1 as two little-endian bytes.
+func controllerKeyID(key []byte) [32]byte {
+	preimage := make([]byte, 0, 25+len(key))
+	preimage = append(preimage, "TOS-PQ-CONSENSUS-KEY-v1"...)
+	preimage = append(preimage, 0x01, 0x00)
+	preimage = append(preimage, key...)
+	return sha256.Sum256(preimage)
+}
+
+// storedMaterial encodes len:uint32 ^chain, the chain cut front to back into
+// 127-byte cells with the remainder in the last cell.
+func storedMaterial(data []byte) *cell.Cell {
+	var chunks [][]byte
+	for offset := 0; offset < len(data); offset += chainCellBytes {
+		chunks = append(chunks, data[offset:min(offset+chainCellBytes, len(data))])
+	}
+	var chain *cell.Cell
+	for i := len(chunks) - 1; i >= 0; i-- {
+		builder := cell.BeginCell().MustStoreSlice(chunks[i], uint(len(chunks[i])*8))
+		if chain != nil {
+			builder.MustStoreRef(chain)
+		}
+		chain = builder.EndCell()
+	}
+	return cell.BeginCell().MustStoreUInt(uint64(len(data)), 32).MustStoreRef(chain).EndCell()
+}
 
 func policyCell(policy Policy) (*cell.Cell, error) {
 	if len(policy.Controllers) > maxPolicyControllers {
-		return nil, validationError(2215, "policy names more than 20 controllers")
+		return nil, validationError(2215, "policy names more than 8 controllers")
 	}
 	if policy.Threshold == 0 || policy.RecoveryThreshold == 0 || len(policy.Controllers) == 0 {
-		return nil, errors.New("invalid policy header")
+		return nil, validationError(2207, "invalid policy header")
 	}
 	type parsed struct {
+		id       [32]byte
 		key      []byte
 		weight   uint32
 		purpose  uint32
 		recovery bool
 	}
 	controllers := make([]parsed, len(policy.Controllers))
-	var total, recoveryTotal uint64
+	var agentTotal, delegationTotal, capabilityTotal, recoveryTotal uint64
 	for i, controller := range policy.Controllers {
-		key, err := hex32(controller.PublicKeyHex)
-		if err != nil || zero(key) || controller.Weight == 0 || controller.Weight > 1_000_000 || controller.PurposeMask == 0 || controller.PurposeMask&^uint32(15) != 0 || controller.Recovery && controller.PurposeMask&4 == 0 {
-			return nil, errors.New("invalid controller")
+		key, err := hex.DecodeString(controller.PublicKeyHex)
+		if err != nil || len(key) != publicKeyBytes || controller.PublicKeyHex != hex.EncodeToString(key) ||
+			controller.Weight == 0 || controller.Weight > 1_000_000 || controller.PurposeMask == 0 ||
+			controller.PurposeMask&^uint32(15) != 0 || controller.Recovery != (controller.PurposeMask&4 != 0) {
+			return nil, validationError(2207, "invalid controller")
 		}
-		if weakControllerKey(key) {
-			return nil, validationError(2214, "controller key is a small-order or non-canonical Ed25519 point")
+		id := controllerKeyID(key)
+		if controller.KeyID != "mldsa44:"+hex.EncodeToString(id[:]) {
+			return nil, validationError(2207, "declared controller key ID does not match its key")
 		}
-		controllers[i] = parsed{key: key, weight: controller.Weight, purpose: controller.PurposeMask, recovery: controller.Recovery}
-		total += uint64(controller.Weight)
+		controllers[i] = parsed{id: id, key: key, weight: controller.Weight, purpose: controller.PurposeMask, recovery: controller.Recovery}
+		weight := uint64(controller.Weight)
+		if controller.PurposeMask&1 != 0 {
+			agentTotal += weight
+		}
+		if controller.PurposeMask&2 != 0 {
+			delegationTotal += weight
+		}
+		if controller.PurposeMask&8 != 0 {
+			capabilityTotal += weight
+		}
 		if controller.Recovery {
-			recoveryTotal += uint64(controller.Weight)
+			recoveryTotal += weight
 		}
 	}
-	if uint64(policy.Threshold) > total || uint64(policy.RecoveryThreshold) > recoveryTotal || policy.RecoveryTimelockSeconds > 31536000 {
-		return nil, errors.New("unattainable policy")
+	threshold := uint64(policy.Threshold)
+	if threshold > agentTotal || threshold > delegationTotal || threshold > capabilityTotal ||
+		uint64(policy.RecoveryThreshold) > recoveryTotal || policy.RecoveryTimelockSeconds > 31536000 {
+		return nil, validationError(2207, "unattainable policy")
 	}
-	sort.Slice(controllers, func(i, j int) bool { return bytes.Compare(controllers[i].key, controllers[j].key) < 0 })
+	sort.Slice(controllers, func(i, j int) bool { return bytes.Compare(controllers[i].id[:], controllers[j].id[:]) < 0 })
 	var next *cell.Cell
 	for i := len(controllers) - 1; i >= 0; i-- {
-		if i > 0 && bytes.Equal(controllers[i-1].key, controllers[i].key) {
-			return nil, errors.New("duplicate controller")
+		if i > 0 && controllers[i-1].id == controllers[i].id {
+			return nil, validationError(2207, "duplicate controller")
 		}
 		controller := controllers[i]
-		builder := cell.BeginCell().MustStoreSlice(controller.key, 256).MustStoreSlice(controller.key, 256).
+		builder := cell.BeginCell().MustStoreSlice(controller.id[:], 256).
 			MustStoreUInt(uint64(controller.weight), 32).MustStoreUInt(uint64(controller.purpose), 16).
-			MustStoreBoolBit(controller.recovery)
+			MustStoreBoolBit(controller.recovery).MustStoreRef(storedMaterial(controller.key))
 		if next != nil {
 			builder.MustStoreRef(next)
 		}
