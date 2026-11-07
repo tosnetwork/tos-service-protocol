@@ -71,6 +71,13 @@ class RedactionTest(unittest.TestCase):
             self.assertNotIn('"cc"', clean.replace("\\", ""))
             self.assertIn("bb" * 8, clean)
 
+    def test_unregistered_master_key_value(self):
+        # A master key the run never registered (another run's) is still removed.
+        other = secrets.token_hex(32)
+        clean = redaction.redact(f"file:///x/vault.json?master_key={other}&x=1")
+        self.assertNotIn(other, clean)
+        self.assertIn("master_key=<redacted>&x=1", clean)
+
     def test_redact_value_and_file(self):
         value = redaction.redact_value({"detail": [VAULT, {"k": MASTER_KEY}]})
         self.assertClean(json.dumps(value))

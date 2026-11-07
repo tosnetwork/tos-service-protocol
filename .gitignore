@@ -3,3 +3,4 @@
 /coverage.out
 *.local.json
 *.sock
+__pycache__/
