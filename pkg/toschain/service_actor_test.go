@@ -306,6 +306,18 @@ func TestActorHistoryWalkIsCompleteOrAnchoredNeverPartial(t *testing.T) {
 	if _, _, err := walkActorHistory(ctx, node, testActor, headID(history[0]), forged, 1000); !errors.Is(err, ErrHistoryAnchorMissing) {
 		t.Fatalf("an anchor absent from the history was not refused: %v", err)
 	}
+	// A forged anchor inside the walked range is refused as soon as the walk
+	// passes its logical time, before the bound is spent.
+	early := &ActorTxID{LT: history[20].LT, Hash: strings.Repeat("ab", 32)}
+	if _, _, err := walkActorHistory(ctx, node, testActor, headID(history[0]), early, 50); !errors.Is(err, ErrHistoryAnchorMissing) {
+		t.Fatalf("a forged anchor was not refused at its logical time: %v", err)
+	}
+	// An anchor older than the account's first transaction is refused at the
+	// origin, never reported as complete.
+	beforeOrigin := &ActorTxID{LT: 1, Hash: strings.Repeat("ab", 32)}
+	if _, _, err := walkActorHistory(ctx, node, testActor, headID(history[0]), beforeOrigin, 1000); !errors.Is(err, ErrHistoryAnchorMissing) {
+		t.Fatalf("an anchor before the origin was not refused: %v", err)
+	}
 	if _, _, err := walkActorHistory(ctx, node, testActor, headID(history[0]), nil, 299); !errors.Is(err, ErrHistoryBoundExceeded) {
 		t.Fatalf("the bound was not enforced: %v", err)
 	}
