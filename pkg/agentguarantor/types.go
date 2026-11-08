@@ -104,11 +104,15 @@ func (authorization ProfileQualifiedObjectAuthorizationV1) AuthorizationStatemen
 		ValidationTimeUnix:   authorization.ValidationTimeUnix}
 }
 
-// ActionAuthorityEd25519EvidenceV1 is the stage-admission evidence of a
-// scalar Action Authority under its Semantic Action Identity scheme. It is
-// never native Agent evidence.
-type ActionAuthorityEd25519EvidenceV1 struct {
-	PublicKey                string `json:"public_key"`
+// ActionAuthorityMLDSA44EvidenceV1 is the stage-admission evidence of a
+// scalar Action Authority under its Semantic Action Identity scheme: a Pure
+// ML-DSA-44 signature under TOS-ACTION-AUTHORITY-V1. It is never native Agent
+// evidence.
+type ActionAuthorityMLDSA44EvidenceV1 struct {
+	// KeyID is mldsa44:<64 lowercase hex>, the admitted action's
+	// authority_key_id.
+	KeyID string `json:"key_id"`
+	// Signature is mldsa44:<unpadded URL-safe Base64 of 2,420 bytes>.
 	Signature                string `json:"signature"`
 	HistoricalAuthorityProof []byte `json:"historical_authority_proof"`
 }
@@ -126,7 +130,7 @@ type StageActionAdmissionAuthorizationV1 struct {
 	AuthorizedBodyDigest string                           `json:"authorized_body_digest"`
 	ValidationTimeUnix   uint64                           `json:"validation_time_unix"`
 	EvidenceContentType  string                           `json:"evidence_content_type"`
-	Evidence             ActionAuthorityEd25519EvidenceV1 `json:"evidence"`
+	Evidence             ActionAuthorityMLDSA44EvidenceV1 `json:"evidence"`
 }
 
 func (authorization StageActionAdmissionAuthorizationV1) AuthorizationStatement() AuthorizationStatementV1 {

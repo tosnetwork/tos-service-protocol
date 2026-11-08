@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -46,11 +47,22 @@ const (
 	// UseAgentGuarantor signs the 32-byte message digest of an Agent
 	// Guarantor object authorization.
 	UseAgentGuarantor Use = "agent-guarantor"
+	// UseActionAuthority signs the 32-byte framed digest of an Action
+	// Authority object: an AuthorizedActionV1, a WriterFenceV1, a relay
+	// side-effect admission receipt or a Guarantor stage-action admission.
+	UseActionAuthority Use = "action-authority"
 )
 
 // AgentGuarantorMessageSize is the exact length of an Agent Guarantor
 // message: a SHA-256 digest that already separates the object kind.
 const AgentGuarantorMessageSize = 32
+
+// ActionAuthorityMessageSize is the exact length of an Action Authority
+// message: a framed SHA-256 digest whose domain separates the object kind.
+const ActionAuthorityMessageSize = 32
+
+// SignaturePrefix is the text prefix of an ML-DSA-44 signature.
+const SignaturePrefix = "mldsa44:"
 
 // Context returns the FIPS 204 context string of a use, or an error for an
 // unknown use.
@@ -64,6 +76,8 @@ func (u Use) Context() (string, error) {
 		return "TOS-AGENT-CONTACT-V1", nil
 	case UseAgentGuarantor:
 		return "TOS-AGENT-GUARANTOR-V1", nil
+	case UseActionAuthority:
+		return "TOS-ACTION-AUTHORITY-V1", nil
 	default:
 		return "", errors.New("unknown ML-DSA-44 signature use")
 	}
@@ -104,16 +118,45 @@ type Signer interface {
 }
 
 // CheckMessage validates the shape of a non-registry payload: non-empty and
-// bounded, and exactly AgentGuarantorMessageSize bytes for UseAgentGuarantor.
+// bounded, exactly AgentGuarantorMessageSize bytes for UseAgentGuarantor and
+// exactly ActionAuthorityMessageSize bytes for UseActionAuthority.
 func CheckMessage(use Use, payload []byte) error {
 	if _, err := use.Context(); err != nil || use == UseRegistry {
 		return ErrMalformed
 	}
 	if len(payload) == 0 || len(payload) > MaxMessageBytes ||
-		use == UseAgentGuarantor && len(payload) != AgentGuarantorMessageSize {
+		use == UseAgentGuarantor && len(payload) != AgentGuarantorMessageSize ||
+		use == UseActionAuthority && len(payload) != ActionAuthorityMessageSize {
 		return ErrMalformed
 	}
 	return nil
+}
+
+// SignatureText renders an ML-DSA-44 signature in its only text form,
+// mldsa44:<unpadded URL-safe Base64 of SignatureSize bytes>.
+func SignatureText(signature []byte) (string, error) {
+	if len(signature) != SignatureSize {
+		return "", ErrMalformed
+	}
+	return SignaturePrefix + base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+// ParseSignatureText parses the exact text form of a signature and refuses
+// any other prefix, alphabet, padding, embedded whitespace, non-zero
+// trailing bits or length.
+func ParseSignatureText(value string) ([]byte, error) {
+	if !strings.HasPrefix(value, SignaturePrefix) {
+		return nil, ErrMalformed
+	}
+	encoded := value[len(SignaturePrefix):]
+	if len(encoded) != base64.RawURLEncoding.EncodedLen(SignatureSize) {
+		return nil, ErrMalformed
+	}
+	signature, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(signature) != SignatureSize || base64.RawURLEncoding.EncodeToString(signature) != encoded {
+		return nil, ErrMalformed
+	}
+	return signature, nil
 }
 
 // KeyID derives the controller key ID of an ML-DSA-44 public key:

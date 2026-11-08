@@ -815,7 +815,7 @@ func verifyPortableStage(stage PortableStageActionAdmissionEvidenceV1, bound *Gu
 	}
 	stageBodyDigest, _ := codec.Digest("tos.service.agent-guarantor-stage-action-admission.v1", stage.Body)
 	return verifyStageActionAdmissionAuthorizationV1(stage.ActionAdmissionAuthorization, stage.AuthorizedAction,
-		stageBodyDigest, authorityResolver, now)
+		stageBodyDigest, authorityResolver, fenceResolver, now)
 }
 
 func ValidateTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1) error {

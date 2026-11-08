@@ -1,15 +1,122 @@
 package agentcommerce
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
+
+// ErrEd25519ActionAuthority reports an Ed25519 Action Authority key or
+// signature. The Action Authority suite is Pure ML-DSA-44 only; there is no
+// other suite to select, so this error is a diagnostic for the refusal the
+// canonical text parsers already make.
+var ErrEd25519ActionAuthority = errors.New(
+	"Ed25519 Action Authority keys and signatures are not accepted; the Action Authority suite is ML-DSA-44")
+
+const removedActionAuthorityPrefix = "ed25519:"
+
+// ParseActionAuthorityKeyID reads the only text form of an Action Authority
+// key reference, mldsa44:<64 lowercase hex> of the ML-DSA-44 controller key ID
+// (NATIVE_IDENTIFIERS_V1), exactly as AuthorizedAction.AuthorityKeyID and
+// WriterFence.KeyID are read.
+func ParseActionAuthorityKeyID(value string) ([mldsa44.KeyIDSize]byte, error) {
+	if strings.HasPrefix(value, removedActionAuthorityPrefix) {
+		return [mldsa44.KeyIDSize]byte{}, ErrEd25519ActionAuthority
+	}
+	keyID, err := mldsa44.ParseKeyIDText(value)
+	if err != nil {
+		return [mldsa44.KeyIDSize]byte{}, errors.New("Action Authority key ID is not canonical mldsa44:<64 lowercase hex>")
+	}
+	return keyID, nil
+}
+
+// ParseActionAuthoritySignature reads the only text form of an Action
+// Authority signature, mldsa44:<canonical unpadded URL-safe Base64 of 2,420
+// bytes>, exactly as AuthorizedAction.AuthorizationProof and
+// WriterFence.Proof are read.
+func ParseActionAuthoritySignature(value string) ([]byte, error) {
+	if strings.HasPrefix(value, removedActionAuthorityPrefix) {
+		return nil, ErrEd25519ActionAuthority
+	}
+	signature, err := mldsa44.ParseSignatureText(value)
+	if err != nil {
+		return nil, errors.New("Action Authority signature is not canonical mldsa44:<Base64url of 2,420 bytes>")
+	}
+	return signature, nil
+}
+
+// ActionAuthoritySignatureText renders a 2,420-byte ML-DSA-44 signature in the
+// only Action Authority signature text form.
+func ActionAuthoritySignatureText(signature []byte) (string, error) {
+	text, err := mldsa44.SignatureText(signature)
+	if err != nil {
+		return "", errors.New("Action Authority signature is not 2,420 bytes")
+	}
+	return text, nil
+}
+
+// SignActionAuthorityMessage asks key custody to sign one 32-byte Action
+// Authority message with a named controller and returns the key ID and
+// signature in their text forms. The returned key and signature are checked
+// for shape and for a key ID that matches the key.
+func SignActionAuthorityMessage(ctx context.Context, signer mldsa44.Signer, controller string,
+	message []byte) (string, string, error) {
+	if ctx == nil || signer == nil || mldsa44.CheckMessage(mldsa44.UseActionAuthority, message) != nil {
+		return "", "", errors.New("Action Authority signing request is invalid")
+	}
+	signed, err := signer.Sign(ctx, controller, mldsa44.UseActionAuthority, message)
+	if err != nil {
+		return "", "", fmt.Errorf("Action Authority signing failed: %w", err)
+	}
+	if err := mldsa44.CheckSignature(signed); err != nil {
+		return "", "", errors.New("Action Authority signer returned a malformed signature")
+	}
+	signature, err := mldsa44.SignatureText(signed.Signature)
+	if err != nil {
+		return "", "", errors.New("Action Authority signer returned a malformed signature")
+	}
+	return mldsa44.KeyIDText(signed.KeyID), signature, nil
+}
+
+// VerifyActionAuthoritySignature resolves the key named by keyIDText as
+// authorized for authorityID at the authority time, requires the resolved key
+// to derive exactly that key ID, and verifies the Pure ML-DSA-44 signature
+// over the 32-byte message under the Action Authority context.
+func VerifyActionAuthoritySignature(resolver FenceAuthorityResolver, authorityID, keyIDText, signatureText string,
+	message []byte, at time.Time) error {
+	if resolver == nil {
+		return errors.New("Action Authority resolver is unavailable")
+	}
+	if len(message) != mldsa44.ActionAuthorityMessageSize {
+		return errors.New("Action Authority message is not a 32-byte digest")
+	}
+	keyID, err := ParseActionAuthorityKeyID(keyIDText)
+	if err != nil {
+		return err
+	}
+	signature, err := ParseActionAuthoritySignature(signatureText)
+	if err != nil {
+		return err
+	}
+	publicKey, err := resolver.ResolveActionAuthorityKey(authorityID, keyID, at.UTC())
+	if err != nil {
+		return fmt.Errorf("Action Authority key is not authorized: %w", err)
+	}
+	derived, err := mldsa44.KeyID(publicKey)
+	if err != nil || derived != keyID {
+		return errors.New("Action Authority resolved key does not derive its key ID")
+	}
+	if err := resolver.Verify(context.Background(), mldsa44.UseActionAuthority, message, publicKey, signature); err != nil {
+		return fmt.Errorf("Action Authority signature does not verify: %w", err)
+	}
+	return nil
+}
 
 type WriterFenceBody struct {
 	SchemaVersion    uint16   `json:"schema_version"`
@@ -25,13 +132,20 @@ type WriterFenceBody struct {
 }
 
 type WriterFence struct {
-	Body      WriterFenceBody `json:"body"`
-	PublicKey string          `json:"public_key"`
-	Proof     string          `json:"fence_proof"`
+	Body  WriterFenceBody `json:"body"`
+	KeyID string          `json:"key_id"`
+	Proof string          `json:"fence_proof"`
 }
 
+// FenceAuthorityResolver resolves Action Authority keys and verifies their
+// ML-DSA-44 signatures. ResolveActionAuthorityKey returns the 1,312-byte
+// public key named by keyID only when that key is authorized for authorityID
+// at `at`; any unknown, revoked, ambiguous or unavailable state is an error.
+// Verify is the ML-DSA-44 verification boundary (normally the pinned tosctl
+// helper). Callers always recompute the key ID of the returned key.
 type FenceAuthorityResolver interface {
-	AuthorizeFenceKey(authorityID string, publicKey ed25519.PublicKey, at time.Time) error
+	mldsa44.Verifier
+	ResolveActionAuthorityKey(authorityID string, keyID [mldsa44.KeyIDSize]byte, at time.Time) ([]byte, error)
 }
 
 // CurrentWriterFenceResolver adds a live, fail-closed lease check to the
@@ -86,7 +200,7 @@ type AuthorizedAction struct {
 	ExpectedPriorState string `json:"expected_prior_state"`
 	ExpiresAtUnix      uint64 `json:"expires_at_unix"`
 	AuthorityID        string `json:"authority_id"`
-	AuthorityPublicKey string `json:"authority_public_key"`
+	AuthorityKeyID     string `json:"authority_key_id"`
 	AuthorizationProof string `json:"authorization_proof"`
 }
 
@@ -129,21 +243,31 @@ type AuthorityInstanceRecord struct {
 	Terminal            bool   `json:"terminal"`
 }
 
-func SignWriterFence(body WriterFenceBody, privateKey ed25519.PrivateKey) (WriterFence, error) {
-	if len(privateKey) != ed25519.PrivateKeySize {
-		return WriterFence{}, errors.New("writer fence signing key is invalid")
-	}
+// WriterFenceSignatureMessage is the 32-byte message an Action Authority
+// signs for a Writer Fence: the framed SHA-256 of its canonical body.
+func WriterFenceSignatureMessage(body WriterFenceBody) ([]byte, error) {
 	if err := validateWriterFenceBody(body); err != nil {
-		return WriterFence{}, err
+		return nil, err
 	}
 	canonical, err := codec.Marshal(body)
 	if err != nil {
+		return nil, err
+	}
+	return framedSHA256("tos.writer-fence.v1\x00", canonical), nil
+}
+
+// SignWriterFence has the Action Authority controller in custody sign a
+// Writer Fence body; the fence carries the controller's key ID.
+func SignWriterFence(ctx context.Context, body WriterFenceBody, signer mldsa44.Signer, controller string) (WriterFence, error) {
+	message, err := WriterFenceSignatureMessage(body)
+	if err != nil {
 		return WriterFence{}, err
 	}
-	message := framedSHA256("tos.writer-fence.v1\x00", canonical)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-	return WriterFence{Body: body, PublicKey: "ed25519:" + hex.EncodeToString(publicKey),
-		Proof: "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, message))}, nil
+	keyID, proof, err := SignActionAuthorityMessage(ctx, signer, controller, message)
+	if err != nil {
+		return WriterFence{}, err
+	}
+	return WriterFence{Body: body, KeyID: keyID, Proof: proof}, nil
 }
 
 func VerifyWriterFence(fence WriterFence, resolver FenceAuthorityResolver, now time.Time, actionKind string) error {
@@ -164,23 +288,13 @@ func verifyWriterFenceAtAuthorityTime(fence WriterFence, resolver FenceAuthority
 		!containsSorted(fence.Body.Scope, actionKind) {
 		return errors.New("writer fence is expired, premature, or out of scope")
 	}
-	publicKey, err := parseEd25519PublicKey(fence.PublicKey)
+	message, err := WriterFenceSignatureMessage(fence.Body)
 	if err != nil {
 		return err
 	}
-	if err := resolver.AuthorizeFenceKey(fence.Body.AuthorityID, publicKey, authorityAt); err != nil {
-		return err
-	}
-	proof, err := parseEd25519Signature(fence.Proof)
-	if err != nil {
-		return err
-	}
-	canonical, err := codec.Marshal(fence.Body)
-	if err != nil {
-		return err
-	}
-	if !ed25519.Verify(publicKey, framedSHA256("tos.writer-fence.v1\x00", canonical), proof) {
-		return errors.New("writer fence proof is invalid")
+	if err := VerifyActionAuthoritySignature(resolver, fence.Body.AuthorityID, fence.KeyID, fence.Proof,
+		message, authorityAt); err != nil {
+		return fmt.Errorf("writer fence proof is invalid: %w", err)
 	}
 	return nil
 }
@@ -189,11 +303,11 @@ func WriterFenceDigest(fence WriterFence) (string, error) {
 	if err := validateWriterFenceBody(fence.Body); err != nil {
 		return "", err
 	}
-	if _, err := parseEd25519PublicKey(fence.PublicKey); err != nil {
-		return "", errors.New("writer fence public key encoding is invalid")
+	if _, err := ParseActionAuthorityKeyID(fence.KeyID); err != nil {
+		return "", fmt.Errorf("writer fence key ID encoding is invalid: %w", err)
 	}
-	if _, err := parseEd25519Signature(fence.Proof); err != nil {
-		return "", errors.New("writer fence proof encoding is invalid")
+	if _, err := ParseActionAuthoritySignature(fence.Proof); err != nil {
+		return "", fmt.Errorf("writer fence proof encoding is invalid: %w", err)
 	}
 	return codec.Digest("tos.writer-fence-envelope.v1", fence)
 }
@@ -203,7 +317,7 @@ func WriterFenceDigest(fence WriterFence) (string, error) {
 // approval, writer generation, authority key, or proof cannot preserve an
 // already-issued side-effect admission.
 func AuthorizedActionDigest(action AuthorizedAction) (string, error) {
-	if err := validateAuthorizedActionShape(action); err != nil || action.AuthorityPublicKey == "" {
+	if err := validateAuthorizedActionShape(action); err != nil || action.AuthorityKeyID == "" {
 		return "", errors.New("authorized action envelope is invalid")
 	}
 	return codec.Digest("tos.authorized-action-envelope.v1", action)
@@ -238,35 +352,35 @@ func BuildAuthorizedAction(ownerID, agentID, actionKind string, semanticFields m
 	return action, nil
 }
 
-func SignAuthorizedAction(action AuthorizedAction, privateKey ed25519.PrivateKey) (AuthorizedAction, error) {
-	if len(privateKey) != ed25519.PrivateKeySize || action.AuthorityPublicKey != "" || action.AuthorizationProof != "" {
+// SignAuthorizedAction has the Action Authority controller in custody sign
+// an unsigned AuthorizedAction. The key ID is part of the signed canonical
+// object, so the caller names it first; custody must sign with exactly that
+// key.
+func SignAuthorizedAction(ctx context.Context, action AuthorizedAction, keyID string, signer mldsa44.Signer,
+	controller string) (AuthorizedAction, error) {
+	if action.AuthorityKeyID != "" || action.AuthorizationProof != "" {
 		return AuthorizedAction{}, errors.New("authorized action signing request is invalid")
+	}
+	if _, err := ParseActionAuthorityKeyID(keyID); err != nil {
+		return AuthorizedAction{}, err
 	}
 	if err := validateAuthorizedActionShape(action); err != nil {
 		return AuthorizedAction{}, err
 	}
-	public := privateKey.Public().(ed25519.PublicKey)
-	action.AuthorityPublicKey = "ed25519:" + hex.EncodeToString(public)
-	message, err := authorizedActionSignatureMessage(action)
+	action.AuthorityKeyID = keyID
+	message, err := AuthorizedActionSignatureMessage(action)
 	if err != nil {
 		return AuthorizedAction{}, err
 	}
-	action.AuthorizationProof = "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, message))
+	signedKeyID, proof, err := SignActionAuthorityMessage(ctx, signer, controller, message)
+	if err != nil {
+		return AuthorizedAction{}, err
+	}
+	if signedKeyID != keyID {
+		return AuthorizedAction{}, errors.New("authorized action was signed by a key other than the named key")
+	}
+	action.AuthorizationProof = proof
 	return action, nil
-}
-
-// ParseAuthorizedActionPublicKey reads the only text form of an Action
-// Authority key, `ed25519:` and 64 lowercase hex characters, exactly as
-// AuthorizedAction.AuthorityPublicKey is read.
-func ParseAuthorizedActionPublicKey(value string) (ed25519.PublicKey, error) {
-	return parseEd25519PublicKey(value)
-}
-
-// ParseAuthorizedActionProof reads the only text form of an Action Authority
-// signature, `ed25519:` and the canonical unpadded URL-safe Base64 of 64
-// bytes, exactly as AuthorizedAction.AuthorizationProof is read.
-func ParseAuthorizedActionProof(value string) ([]byte, error) {
-	return parseEd25519Signature(value)
 }
 
 func VerifyAuthorizedAction(action AuthorizedAction, semanticFields map[string]SemanticValue, canonicalRequest []byte,
@@ -295,17 +409,16 @@ func VerifyAuthorizedActionAtAuthorityTime(action AuthorizedAction, semanticFiel
 	if err := verifyWriterFenceAtAuthorityTime(fence, resolver, validityAt, authorityAt, action.ActionKind); err != nil {
 		return err
 	}
-	if action.AuthorityID != fence.Body.AuthorityID || action.AuthorityPublicKey != fence.PublicKey {
+	if action.AuthorityID != fence.Body.AuthorityID || action.AuthorityKeyID != fence.KeyID {
 		return errors.New("authorized action authority differs from the writer fence")
 	}
-	authorityKey, err := parseEd25519PublicKey(action.AuthorityPublicKey)
-	if err != nil || resolver.AuthorizeFenceKey(action.AuthorityID, authorityKey, authorityAt.UTC()) != nil {
-		return errors.New("authorized action authority key is not authorized")
-	}
-	authorizationProof, err := parseEd25519Signature(action.AuthorizationProof)
-	message, messageErr := authorizedActionSignatureMessage(action)
-	if err != nil || messageErr != nil || !ed25519.Verify(authorityKey, message, authorizationProof) {
+	message, err := AuthorizedActionSignatureMessage(action)
+	if err != nil {
 		return errors.New("authorized action proof is invalid")
+	}
+	if err := VerifyActionAuthoritySignature(resolver, action.AuthorityID, action.AuthorityKeyID,
+		action.AuthorizationProof, message, authorityAt); err != nil {
+		return fmt.Errorf("authorized action proof is invalid: %w", err)
 	}
 	fenceDigest, err := WriterFenceDigest(fence)
 	if err != nil || fenceDigest != action.WriterFenceDigest {
@@ -404,18 +517,28 @@ func validateAuthorizedActionShape(action AuthorizedAction) error {
 		!canonicalDigestPattern.MatchString(action.WriterFenceDigest) || action.PolicyRevision == 0 ||
 		!canonicalDigestPattern.MatchString(action.MandateDigest) || action.ApprovalDigest != "" && !canonicalDigestPattern.MatchString(action.ApprovalDigest) ||
 		!boundedIdentifier(action.ExpectedPriorState, 128) || action.ExpiresAtUnix == 0 || !boundedIdentifier(action.AuthorityID, 256) ||
-		(action.AuthorityPublicKey == "") != (action.AuthorizationProof == "") {
+		(action.AuthorityKeyID == "") != (action.AuthorizationProof == "") {
 		return errors.New("authorized action is invalid")
 	}
-	if action.AuthorityPublicKey != "" {
-		if _, err := parseEd25519PublicKey(action.AuthorityPublicKey); err != nil {
-			return errors.New("authorized action authority key is invalid")
+	if action.AuthorityKeyID != "" {
+		if _, err := ParseActionAuthorityKeyID(action.AuthorityKeyID); err != nil {
+			return fmt.Errorf("authorized action authority key ID is invalid: %w", err)
 		}
-		if _, err := parseEd25519Signature(action.AuthorizationProof); err != nil {
-			return errors.New("authorized action proof encoding is invalid")
+		if _, err := ParseActionAuthoritySignature(action.AuthorizationProof); err != nil {
+			return fmt.Errorf("authorized action proof encoding is invalid: %w", err)
 		}
 	}
 	return nil
+}
+
+// AuthorizedActionSignatureMessage is the 32-byte message an Action Authority
+// signs for an AuthorizedAction: the framed SHA-256 of its canonical object
+// with an empty authorization_proof (authority_key_id included).
+func AuthorizedActionSignatureMessage(action AuthorizedAction) ([]byte, error) {
+	if !strings.HasPrefix(action.AuthorityKeyID, mldsa44.KeyIDPrefix) {
+		return nil, errors.New("authorized action names no Action Authority key")
+	}
+	return authorizedActionSignatureMessage(action)
 }
 
 func authorizedActionSignatureMessage(action AuthorizedAction) ([]byte, error) {

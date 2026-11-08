@@ -2,7 +2,6 @@ package agentrelay
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,7 +17,7 @@ import (
 
 type conformanceAdmissionAuthority struct {
 	mu       sync.Mutex
-	key      ed25519.PrivateKey
+	key      relayAuthorityKey
 	resolver agentcommerce.CurrentWriterFenceResolver
 	now      time.Time
 	next     uint64
@@ -26,7 +25,7 @@ type conformanceAdmissionAuthority struct {
 	bindings map[RelaySideEffectAdmissionBindingKey]SignedRelaySideEffectAdmissionReceipt
 }
 
-func newConformanceAdmissionAuthority(key ed25519.PrivateKey,
+func newConformanceAdmissionAuthority(key relayAuthorityKey,
 	resolver agentcommerce.CurrentWriterFenceResolver, now time.Time) *conformanceAdmissionAuthority {
 	return &conformanceAdmissionAuthority{key: key, resolver: resolver, now: now.UTC(), next: 1,
 		receipts: make(map[string]SignedRelaySideEffectAdmissionReceipt),
@@ -56,7 +55,7 @@ func (authority *conformanceAdmissionAuthority) AdmitRelaySideEffects(_ context.
 	}
 	bindingKey := descriptor.BindingKey()
 	if predecessor, found := authority.bindings[bindingKey]; found {
-		if err := ValidateRelaySideEffectAdmissionRouteTransition(predecessor, descriptor); err != nil {
+		if err := ValidateRelaySideEffectAdmissionRouteTransition(predecessor, descriptor, authority.resolver); err != nil {
 			return SignedRelaySideEffectAdmissionReceipt{}, ErrRelayConflict
 		}
 	} else if descriptor.RouteAttempt != 1 {
@@ -74,7 +73,7 @@ func (authority *conformanceAdmissionAuthority) AdmitRelaySideEffects(_ context.
 	if err != nil {
 		return SignedRelaySideEffectAdmissionReceipt{}, err
 	}
-	receipt, err := SignRelaySideEffectAdmissionReceipt(body, authority.key)
+	receipt, err := signTestReceipt(body, authority.key)
 	if err != nil {
 		return SignedRelaySideEffectAdmissionReceipt{}, err
 	}
@@ -199,22 +198,22 @@ func TestRelayAdmissionReceiptRejectsFieldAndPrincipalSubstitution(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			body := request.AdmissionReceipt.Body
 			mutate(&body)
-			mutated, err := SignRelaySideEffectAdmissionReceipt(body, fixture.authorityKey)
+			mutated, err := signTestReceipt(body, fixture.authorityKey)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := VerifyRelaySideEffectAdmissionReceipt(mutated, request, fixture.now); err == nil {
+			if err := VerifyRelaySideEffectAdmissionReceipt(mutated, request, fixture.resolver, fixture.now); err == nil {
 				t.Fatal("re-signed receipt field substitution was accepted")
 			}
 		})
 	}
 	invalidRoute := request.AdmissionReceipt.Body
 	invalidRoute.RouteAttempt++
-	if _, err := SignRelaySideEffectAdmissionReceipt(invalidRoute, fixture.authorityKey); err == nil {
+	if _, err := signTestReceipt(invalidRoute, fixture.authorityKey); err == nil {
 		t.Fatal("successor route without a predecessor receipt digest was signed")
 	}
 
-	if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request,
+	if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request, fixture.resolver,
 		time.Unix(int64(request.AdmissionReceipt.Body.StartNotAfterUnix), 0)); err == nil {
 		t.Fatal("receipt was consumed at its exclusive start boundary")
 	}
@@ -315,7 +314,7 @@ func TestRelayAdmissionRouteSuccessorBindsPriorReceiptAndExactTransaction(t *tes
 		t.Fatal(err)
 	}
 	successorDescriptor, err := BuildRelaySideEffectAdmissionSuccessorDescriptor(next,
-		"principal:openfox-client", first)
+		"principal:openfox-client", first, fixture.resolver)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,11 +326,11 @@ func TestRelayAdmissionRouteSuccessorBindsPriorReceiptAndExactTransaction(t *tes
 		second.Body.TransactionIdentityDigest != first.Body.TransactionIdentityDigest {
 		t.Fatalf("successor receipt lost its route lineage: %+v", second.Body)
 	}
-	if err := VerifyRelaySideEffectAdmissionSuccessorReceipt(second, next, first, fixture.now); err != nil {
+	if err := VerifyRelaySideEffectAdmissionSuccessorReceipt(second, next, first, fixture.resolver, fixture.now); err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateRelaySideEffectAdmissionRouteChain(
-		[]SignedRelaySideEffectAdmissionReceipt{first, second}); err != nil {
+		[]SignedRelaySideEffectAdmissionReceipt{first, second}, fixture.resolver); err != nil {
 		t.Fatalf("persisted route-head chain failed validation: %v", err)
 	}
 	takeoverBody := second.Body
@@ -339,12 +338,12 @@ func TestRelayAdmissionRouteSuccessorBindsPriorReceiptAndExactTransaction(t *tes
 	takeoverBody.WriterGeneration++
 	takeoverBody.WriterFenceDigest = digest("b")
 	takeoverBody.AuthorizedActionDigest = digest("d")
-	takeoverSecond, err := SignRelaySideEffectAdmissionReceipt(takeoverBody, fixture.authorityKey)
+	takeoverSecond, err := signTestReceipt(takeoverBody, fixture.authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateRelaySideEffectAdmissionRouteChain(
-		[]SignedRelaySideEffectAdmissionReceipt{first, takeoverSecond}); err != nil {
+		[]SignedRelaySideEffectAdmissionReceipt{first, takeoverSecond}, fixture.resolver); err != nil {
 		t.Fatalf("persisted route-head chain rejected a same-Authority writer takeover: %v", err)
 	}
 	for name, mutate := range map[string]func(*RelaySideEffectAdmissionDescriptor){
@@ -364,7 +363,7 @@ func TestRelayAdmissionRouteSuccessorBindsPriorReceiptAndExactTransaction(t *tes
 		t.Run("descriptor-"+name, func(t *testing.T) {
 			mutated := successorDescriptor
 			mutate(&mutated)
-			if err := ValidateRelaySideEffectAdmissionRouteTransition(first, mutated); err == nil {
+			if err := ValidateRelaySideEffectAdmissionRouteTransition(first, mutated, fixture.resolver); err == nil {
 				t.Fatal("route successor changed immutable owner authority context")
 			}
 		})
@@ -380,12 +379,12 @@ func TestRelayAdmissionRouteSuccessorBindsPriorReceiptAndExactTransaction(t *tes
 		t.Run("persisted-"+name, func(t *testing.T) {
 			mutatedBody := second.Body
 			mutate(&mutatedBody)
-			mutated, signErr := SignRelaySideEffectAdmissionReceipt(mutatedBody, fixture.authorityKey)
+			mutated, signErr := signTestReceipt(mutatedBody, fixture.authorityKey)
 			if signErr != nil {
 				t.Fatal(signErr)
 			}
 			if err := ValidateRelaySideEffectAdmissionRouteChain(
-				[]SignedRelaySideEffectAdmissionReceipt{first, mutated}); err == nil {
+				[]SignedRelaySideEffectAdmissionReceipt{first, mutated}, fixture.resolver); err == nil {
 				t.Fatal("persisted route chain accepted an immutable owner authority mutation")
 			}
 		})
@@ -406,20 +405,20 @@ func TestRelayAdmissionRouteSuccessorBindsPriorReceiptAndExactTransaction(t *tes
 	sameProviderRequote.QuoteRequest.Body.ProviderAgentID = first.Body.ProviderAgentID
 	sameProviderRequote.ProviderQuote.Body.ProviderAgentID = first.Body.ProviderAgentID
 	if _, err := BuildRelaySideEffectAdmissionSuccessorDescriptor(sameProviderRequote,
-		"principal:openfox-client", first); err == nil {
+		"principal:openfox-client", first, fixture.resolver); err == nil {
 		t.Fatal("same Provider obtained a successor route through a requote")
 	}
 
 	changedTransaction := next
 	changedTransaction.QuoteRequest.Body.SourceSequence++
 	if _, err := BuildRelaySideEffectAdmissionSuccessorDescriptor(changedTransaction,
-		"principal:openfox-client", second); err == nil {
+		"principal:openfox-client", second, fixture.resolver); err == nil {
 		t.Fatal("successor route changed the exact transaction identity")
 	}
 	sponsorSuccessor := successorDescriptor
 	sponsorSuccessor.Mode = ModeSponsorOnly
 	sponsorSuccessor.StageMask = []SideEffectStage{SideEffectSponsorship}
-	if err := ValidateRelaySideEffectAdmissionRouteTransition(second, sponsorSuccessor); err == nil {
+	if err := ValidateRelaySideEffectAdmissionRouteTransition(second, sponsorSuccessor, fixture.resolver); err == nil {
 		t.Fatal("sponsorship received a successor Provider route")
 	}
 }
@@ -461,7 +460,7 @@ func TestRelayAdmissionRouteAttemptCapAndSponsorshipFirstRouteOnly(t *testing.T)
 	body.StageMask = []SideEffectStage{SideEffectBroadcast}
 	body.RouteAttempt = MaxRelayRouteAttempts + 1
 	body.PredecessorReceiptDigest = predecessorDigest
-	if _, err := SignRelaySideEffectAdmissionReceipt(body, fixture.authorityKey); err == nil {
+	if _, err := signTestReceipt(body, fixture.authorityKey); err == nil {
 		t.Fatal("receipt exceeded the V1 route-attempt cap")
 	}
 
@@ -499,12 +498,12 @@ func TestRelayAdmissionRouteAttemptCapAndSponsorshipFirstRouteOnly(t *testing.T)
 	last.StageMask = []SideEffectStage{SideEffectBroadcast}
 	last.RouteAttempt = MaxRelayRouteAttempts
 	last.PredecessorReceiptDigest = predecessorDigest
-	signedLast, err := SignRelaySideEffectAdmissionReceipt(last, fixture.authorityKey)
+	signedLast, err := signTestReceipt(last, fixture.authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := BuildRelaySideEffectAdmissionSuccessorDescriptor(fixture.execution,
-		"principal:openfox-client", signedLast); err == nil {
+		"principal:openfox-client", signedLast, fixture.resolver); err == nil {
 		t.Fatal("route-attempt 32 produced an unbounded successor")
 	}
 }
@@ -546,8 +545,15 @@ func TestRelayTransactionIdentityIgnoresRouteButBindsSignedTransaction(t *testin
 func TestRelayPreparedAdmissionRejectsExpiredStartReceipt(t *testing.T) {
 	fixture := newRelayFixture(t)
 	atBoundary := time.Unix(int64(fixture.execution.AdmissionReceipt.Body.StartNotAfterUnix), 0).UTC()
-	if _, err := NewPreparedRecord(fixture.execution, atBoundary); err == nil {
+	verified := verifiedTestReceipt(t, fixture.execution, fixture.resolver)
+	if _, err := NewPreparedRecord(fixture.execution, verified, atBoundary); err == nil {
 		t.Fatal("NewPreparedRecord consumed a receipt at its exclusive start boundary")
+	}
+	if _, err := NewPreparedRecord(fixture.execution, verified, atBoundary.Add(-time.Second)); err != nil {
+		t.Fatalf("NewPreparedRecord refused a receipt one second before its start boundary: %v", err)
+	}
+	if _, err := NewPreparedRecord(fixture.execution, VerifiedRelayAdmissionReceipt{}, fixture.now); err == nil {
+		t.Fatal("NewPreparedRecord accepted a receipt whose Action Authority was never verified")
 	}
 }
 
@@ -572,19 +578,34 @@ func TestRelayAdmissionCrossLanguageRequestAndReceiptVectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fence := agentcommerce.WriterFence{Body: agentcommerce.WriterFenceBody{SchemaVersion: 1,
+	// The Action Authority signatures here come from the deterministic test
+	// Fake, so these pins cover the canonical request and receipt encoding
+	// only; real ML-DSA-44 bytes are pinned by the shared Action Authority
+	// vector (pkg/agentcommerce/testdata).
+	fence, err := signTestFence(agentcommerce.WriterFenceBody{SchemaVersion: 1,
 		OwnerID: "owner:client", AgentID: "agent:client", InstanceID: "instance:client", LeaseID: "lease:client",
 		WriterGeneration: 1, IssuedAtUnix: 1_799_999_940, ExpiresAtUnix: 1_800_000_600,
-		AuthorityID: "authority:client", Scope: []string{"payment.domain-bound"}},
-		PublicKey: "ed25519:17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce",
-		Proof:     "ed25519:PxvAJJKKcEX_7OJG8zVDRk4Q0jEnY0AXHjm9GOizPDIJ4lpU7kyHfxs27tNdyidev-qh6-H8_ksoOUNrPGeCBA"}
-	action := agentcommerce.AuthorizedAction{SchemaVersion: 1, OwnerID: "owner:client", AgentID: "agent:client",
+		AuthorityID: "authority:client", Scope: []string{"payment.domain-bound"}}, fixture.authorityKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fenceDigest, err := agentcommerce.WriterFenceDigest(fence)
+	if err != nil || fenceDigest != "sha256:973cf592d478afe576378e5bc800d69cb2175a96e752534d9842f9b82c3e998f" {
+		t.Fatalf("cross-language writer fence digest changed: got=%s err=%v", fenceDigest, err)
+	}
+	action, err := signTestAction(agentcommerce.AuthorizedAction{SchemaVersion: 1, OwnerID: "owner:client", AgentID: "agent:client",
 		ActionKind: "payment.domain-bound", StableActionID: payment.StableActionID,
 		ExactRequestDigest: "sha256:c16ad477c999b08ea3fefece7ec62fd4f8bee1805a1fc76f45a45623c3a6a294",
-		WriterGeneration:   1, WriterFenceDigest: "sha256:c798f9edd3883480b8e87e7e1cfe2b2834fc398de26c18232be0599b69ae0020",
+		WriterGeneration:   1, WriterFenceDigest: fenceDigest,
 		PolicyRevision: 1, MandateDigest: digest("c"), ExpectedPriorState: "unknown", ExpiresAtUnix: 1_800_000_480,
-		AuthorityID: "authority:client", AuthorityPublicKey: fence.PublicKey,
-		AuthorizationProof: "ed25519:t-3hbvDEroZZAtwYIuhTO1wfGw4yftPVud40xGNSW0hs1sMOTuj0A7iVL4a__e8pVkLHCGFP-C_ldrdScrwVAg"}
+		AuthorityID: "authority:client"}, fixture.authorityKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionDigest, err := agentcommerce.AuthorizedActionDigest(action)
+	if err != nil || actionDigest != "sha256:854a90cdc387b2500265eda4cff1edbc4bb704ba030446e8c7cab1565180cd3c" {
+		t.Fatalf("cross-language authorized action digest changed: got=%s err=%v", actionDigest, err)
+	}
 	wire := RelaySideEffectAdmissionRequest{SchemaVersion: 1, OwnerID: "owner:client", AgentID: "agent:client",
 		AuthenticatedPrincipal: "principal:openfox-client", ProviderAgentID: "agent:provider",
 		ServiceProfileDigest:      "sha256:434777cea11e97002fac9923772e10bb314dd2a17ea2804d682b7719222f51b9",
@@ -605,7 +626,7 @@ func TestRelayAdmissionCrossLanguageRequestAndReceiptVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	canonicalHash := sha256.Sum256(canonical)
-	if got, want := hex.EncodeToString(canonicalHash[:]), "160c75b01f41928160b9385376b1a872dc26d60ab1d4f424d69e2b413def521b"; got != want {
+	if got, want := hex.EncodeToString(canonicalHash[:]), "c70b908e9496073c0790c72b177e02f6c5d5ac37ffd167d466c13adb89d0c649"; got != want {
 		t.Fatalf("cross-language admission request bytes changed: got=%s want=%s", got, want)
 	}
 
@@ -618,17 +639,19 @@ func TestRelayAdmissionCrossLanguageRequestAndReceiptVectors(t *testing.T) {
 		StageMask:      append([]SideEffectStage(nil), wire.StageMask...), RouteAttempt: 1,
 		StableActionID: wire.StableActionID, ExactRequestDigest: wire.ExactRequestDigest,
 		RelayExecutionDigest:   wire.RelayExecutionDigest,
-		AuthorizedActionDigest: "sha256:1e698bf952d46cf52146486147a4ace0f3b854d2bcf4690f48e1f044bc31efe6",
+		AuthorizedActionDigest: actionDigest,
 		WriterFenceDigest:      action.WriterFenceDigest, WriterLeaseID: "lease:client", WriterGeneration: 1,
 		PolicyRevision: 1, MandateDigest: digest("c"), AdmissionSequence: 1,
 		IssuedAtUnix: 1_800_000_000, StartNotAfterUnix: 1_800_000_030}
 	if got, err := RelaySideEffectAdmissionReceiptBodyDigest(body); err != nil ||
-		got != "sha256:d9f0de29b8c178e1bdd1303eb790c441dbfec19d58ab5ce1d68dac9f9b0d5bbd" {
+		got != "sha256:ba9bdb7a05297e8c7bd14c1a764e24f89423618e37b964fc1d567a8b57be58d7" {
 		t.Fatalf("cross-language admission receipt digest changed: got=%s err=%v", got, err)
 	}
-	signed := SignedRelaySideEffectAdmissionReceipt{Body: body, PublicKey: fence.PublicKey,
-		Signature: "ed25519:-_FtPS66t_yNOVPnqtov4P1faXXsf1Yf4tiBhJjZA4xYuTYN0QcZ_qeNMd8koye0JqetUNXuewpPmQY4M80jCw"}
-	if err := VerifyRelaySideEffectAdmissionReceiptSignature(signed); err != nil {
+	signed, err := signTestReceipt(body, fixture.authorityKey)
+	if err != nil || signed.KeyID != fence.KeyID {
+		t.Fatalf("receipt was not signed by the fence key: %v", err)
+	}
+	if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(signed, fixture.resolver); err != nil {
 		t.Fatal(err)
 	}
 }

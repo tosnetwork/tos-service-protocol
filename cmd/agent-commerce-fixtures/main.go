@@ -1,18 +1,23 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/tosnetwork/tos-service-protocol/internal/actionauthorityvector"
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
+	guarantor "github.com/tosnetwork/tos-service-protocol/pkg/agentguarantor"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentrelay"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
@@ -29,7 +34,10 @@ type signatureVector struct {
 	ObjectName         string `json:"object_name"`
 	MessageFormula     string `json:"message_formula"`
 	MessageDomain      string `json:"message_domain"`
+	Suite              string `json:"suite"`
+	Context            string `json:"context,omitempty"`
 	PublicKey          string `json:"public_key"`
+	ResolvedPublicKey  string `json:"resolved_public_key_hex,omitempty"`
 	Signature          string `json:"signature"`
 	ExpectedMessageHex string `json:"expected_message_hex"`
 }
@@ -42,9 +50,27 @@ type document struct {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		panic("usage: agent-commerce-fixtures OUTPUT")
+	vectorPath := flag.String("signature-vector", "",
+		"the shared Action Authority ML-DSA-44 signature vector (pkg/agentcommerce/testdata/action-authority-signature-vector.json)")
+	vectorInputs := flag.String("vector-inputs", "",
+		"write the Action Authority vector inputs for this key ID and exit (with -key-id)")
+	keyID := flag.String("key-id", "", "the Action Authority key ID the vector inputs bind (with -vector-inputs)")
+	previousVector := flag.String("previous-vector", "", "a vector whose fence proof the inputs commit to (with -vector-inputs)")
+	flag.Parse()
+	if *vectorInputs != "" {
+		if *vectorPath != "" || flag.NArg() != 0 {
+			panic("usage: agent-commerce-fixtures -vector-inputs PATH -key-id mldsa44:...")
+		}
+		must(writeVectorInputs(*vectorInputs, *keyID, *previousVector))
+		return
 	}
+	if *vectorPath == "" || flag.NArg() != 1 {
+		panic("usage: agent-commerce-fixtures -signature-vector VECTOR OUTPUT")
+	}
+	vector, mustErr := actionauthorityvector.Load(*vectorPath)
+	must(mustErr)
+	fence, action, mustErr := actionAuthorityObjects(vector)
+	must(mustErr)
 	seed := make([]byte, ed25519.SeedSize)
 	for index := range seed {
 		seed[index] = byte(index + 1)
@@ -94,21 +120,6 @@ func main() {
 		ProposedAgreementBody: &agreement, ExpiresAtUnix: uint64(now.Add(time.Hour).Unix())}
 	must(commerce.ValidateIntentApplication(applicationV2))
 
-	fence, mustErr := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:test", AgentID: agentID,
-		InstanceID: "instance:test", LeaseID: "lease:test", WriterGeneration: 7, IssuedAtUnix: uint64(now.Unix()),
-		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), AuthorityID: "authority:test", Scope: []string{"messenger.contact"}}, key)
-	must(mustErr)
-	request, mustErr := commerce.CanonicalMessengerEffectRequest(commerce.MessengerEffectRequestV1{SchemaVersion: 1,
-		RecipientAgentIDs: []string{buyer}, EventKind: "text", ContentType: "text/plain", Payload: []byte("Can we confirm scope?")})
-	must(mustErr)
-	fields := map[string]commerce.SemanticValue{"owner_id": commerce.ID("owner:test"), "agent_id": commerce.ID(agentID),
-		"recipient_agent_id": commerce.ID(buyer), "intent_reference_digest": commerce.Digest32(intentDigest),
-		"authority_instance_id": commerce.Digest32("sha256:" + strings.Repeat("e", 64))}
-	action, mustErr := commerce.BuildAuthorizedAction("owner:test", agentID, "messenger.contact", fields, request, fence, 3,
-		"sha256:"+strings.Repeat("f", 64), "", "no-contact", uint64(now.Add(30*time.Minute).Unix()))
-	must(mustErr)
-	action, mustErr = commerce.SignAuthorizedAction(action, key)
-	must(mustErr)
 	externalPaymentBody := commerce.ExternalPaymentAttestationBody{SchemaVersion: 1,
 		AdapterURI: "tos.payment.external-attested.v1", AttestorID: "attestor:test",
 		PaymentRequestDigest: "sha256:" + strings.Repeat("1", 64), StableActionID: "sha256:" + strings.Repeat("2", 64),
@@ -149,14 +160,176 @@ func main() {
 	doc.Signatures = []signatureVector{
 		signature("intent", "intent_body", "length-framed-sha256", "tos.agent-intent-signature.v1", signedIntent.PublicKey, signedIntent.Signature, canonicalIntent),
 		signature("intent_withdrawal", "intent_withdrawal_body", "length-framed-sha256", "tos.agent-intent-withdrawal-signature.v1", signedWithdrawal.PublicKey, signedWithdrawal.Signature, canonicalWithdrawal),
-		signature("writer_fence", "writer_fence_body", "framed-sha256", "tos.writer-fence.v1", fence.PublicKey, fence.Proof, canonicalFence),
-		signature("authorized_action", "authorized_action", "framed-sha256", "tos.authorized-action-proof.v1", action.AuthorityPublicKey, action.AuthorizationProof, canonicalAction),
+		actionAuthoritySignature(signature("writer_fence", "writer_fence_body", "framed-sha256", "tos.writer-fence.v1", fence.KeyID, fence.Proof, canonicalFence), vector),
+		actionAuthoritySignature(signature("authorized_action", "authorized_action", "framed-sha256", "tos.authorized-action-proof.v1", action.AuthorityKeyID, action.AuthorizationProof, canonicalAction), vector),
 		signature("external_payment_attestation", "external_payment_attestation_body", "domain-text-digest-sha256",
 			"TOS-EXTERNAL-PAYMENT-ATTESTATION-V1", externalPayment.PublicKey, externalPayment.Signature, canonicalExternalPayment),
 	}
 	raw, mustErr := json.MarshalIndent(doc, "", "  ")
 	must(mustErr)
-	must(os.WriteFile(os.Args[1], append(raw, '\n'), 0o644))
+	must(os.WriteFile(flag.Arg(0), append(raw, '\n'), 0o644))
+}
+
+const (
+	fixtureOwnerID     = "owner:test"
+	fixtureAuthorityID = "authority:test"
+	vectorController   = "vector"
+)
+
+var fixtureAgentID = "agent:" + strings.Repeat("a", 64)
+
+func fixtureNow() time.Time { return time.Unix(2_000_000_000, 0).UTC() }
+
+func fixtureBuyer() string { return "agent:" + strings.Repeat("c", 64) }
+
+func fixtureFenceBody() commerce.WriterFenceBody {
+	now := fixtureNow()
+	return commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: fixtureOwnerID, AgentID: fixtureAgentID,
+		InstanceID: "instance:test", LeaseID: "lease:test", WriterGeneration: 7, IssuedAtUnix: uint64(now.Unix()),
+		ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()), AuthorityID: fixtureAuthorityID, Scope: []string{"messenger.contact"}}
+}
+
+// fixtureAction builds the unsigned messenger.contact action over fence. The
+// Intent it refers to is a fixed digest, so the Action Authority objects do
+// not depend on any other signature in the corpus.
+func fixtureAction(fence commerce.WriterFence) (commerce.AuthorizedAction, error) {
+	request, err := commerce.CanonicalMessengerEffectRequest(commerce.MessengerEffectRequestV1{SchemaVersion: 1,
+		RecipientAgentIDs: []string{fixtureBuyer()}, EventKind: "text", ContentType: "text/plain", Payload: []byte("Can we confirm scope?")})
+	if err != nil {
+		return commerce.AuthorizedAction{}, err
+	}
+	fields := map[string]commerce.SemanticValue{"owner_id": commerce.ID(fixtureOwnerID), "agent_id": commerce.ID(fixtureAgentID),
+		"recipient_agent_id": commerce.ID(fixtureBuyer()), "intent_reference_digest": commerce.Digest32("sha256:" + strings.Repeat("d", 64)),
+		"authority_instance_id": commerce.Digest32("sha256:" + strings.Repeat("e", 64))}
+	return commerce.BuildAuthorizedAction(fixtureOwnerID, fixtureAgentID, "messenger.contact", fields, request, fence, 3,
+		"sha256:"+strings.Repeat("f", 64), "", "no-contact", uint64(fixtureNow().Add(30*time.Minute).Unix()))
+}
+
+// fixtureRelayReceiptBody is a well-formed relay side-effect admission
+// receipt body for the fixture authority.
+func fixtureRelayReceiptBody() agentrelay.RelaySideEffectAdmissionReceiptBody {
+	digest := func(fill string) string { return "sha256:" + strings.Repeat(fill, 64) }
+	now := uint64(fixtureNow().Unix())
+	return agentrelay.RelaySideEffectAdmissionReceiptBody{SchemaVersion: 1, OwnerID: fixtureOwnerID, AgentID: fixtureAgentID,
+		AuthenticatedPrincipal: fixtureAgentID, AuthorityID: fixtureAuthorityID, ProviderAgentID: "agent:" + strings.Repeat("b", 64),
+		ServiceProfileDigest: digest("1"), ProviderQuoteDigest: digest("2"), NetworkDigest: digest("3"),
+		TransactionIdentityDigest: digest("4"), Mode: agentrelay.ModeRelayExact,
+		AssuranceLevel: agentrelay.AssuranceAutonomousDecentralized, StageMask: []agentrelay.SideEffectStage{agentrelay.SideEffectBroadcast},
+		RouteAttempt: 1, StableActionID: digest("5"), ExactRequestDigest: digest("6"), RelayExecutionDigest: digest("7"),
+		AuthorizedActionDigest: digest("8"), WriterFenceDigest: digest("9"), WriterLeaseID: "lease:test", WriterGeneration: 7,
+		PolicyRevision: 3, MandateDigest: digest("f"), AdmissionSequence: 1, IssuedAtUnix: now, StartNotAfterUnix: now + 300}
+}
+
+// fixtureStageStatement is a stage-action admission statement signed by the
+// fixture authority.
+func fixtureStageStatement() guarantor.AuthorizationStatementV1 {
+	return guarantor.AuthorizationStatementV1{SchemaVersion: guarantor.SchemaVersionV1, AuthoritySubject: fixtureAuthorityID,
+		ProfileURI: guarantor.ProfileURI, ProfileVersion: 1, ProfileDigest: "sha256:" + strings.Repeat("1", 64),
+		AuthorizedObjectKind: guarantor.StageActionAdmissionObjectKind, AuthorizedBodyDigest: "sha256:" + strings.Repeat("2", 64),
+		ValidationTimeUnix: uint64(fixtureNow().Unix())}
+}
+
+// actionAuthorityObjects signs the fixture Writer Fence and AuthorizedAction
+// with the vector key and checks that every signed message is one the vector
+// records.
+func actionAuthorityObjects(vector *actionauthorityvector.Vector) (commerce.WriterFence, commerce.AuthorizedAction, error) {
+	ctx := context.Background()
+	fence, err := commerce.SignWriterFence(ctx, fixtureFenceBody(), vector, vectorController)
+	if err != nil {
+		return commerce.WriterFence{}, commerce.AuthorizedAction{}, err
+	}
+	if fence.KeyID != vector.KeyIDText() {
+		return commerce.WriterFence{}, commerce.AuthorizedAction{}, fmt.Errorf("fence key ID %s is not the vector key", fence.KeyID)
+	}
+	action, err := fixtureAction(fence)
+	if err != nil {
+		return commerce.WriterFence{}, commerce.AuthorizedAction{}, err
+	}
+	action, err = commerce.SignAuthorizedAction(ctx, action, vector.KeyIDText(), vector, vectorController)
+	return fence, action, err
+}
+
+// writeVectorInputs writes the four canonical Action Authority objects the
+// tosctl vector test signs. The AuthorizedAction commits to the complete
+// fence envelope, whose proof is a vector output; with -previous-vector the
+// fence proof is taken from that vector (deterministic signing makes it
+// stable), otherwise a well-formed placeholder proof is used and a second run
+// converges.
+func writeVectorInputs(path, keyID, previous string) error {
+	if _, err := commerce.ParseActionAuthorityKeyID(keyID); err != nil {
+		return err
+	}
+	body := fixtureFenceBody()
+	fenceMessage, err := commerce.WriterFenceSignatureMessage(body)
+	if err != nil {
+		return err
+	}
+	placeholder, err := mldsa44SignatureText(make([]byte, 2420))
+	if err != nil {
+		return err
+	}
+	fence := commerce.WriterFence{Body: body, KeyID: keyID, Proof: placeholder}
+	if previous != "" {
+		vector, err := actionauthorityvector.Load(previous)
+		if err != nil {
+			return err
+		}
+		signed, err := vector.Sign(context.Background(), vectorController, "action-authority", fenceMessage)
+		if err != nil {
+			return err
+		}
+		if fence.Proof, err = mldsa44SignatureText(signed.Signature); err != nil {
+			return err
+		}
+	}
+	action, err := fixtureAction(fence)
+	if err != nil {
+		return err
+	}
+	action.AuthorityKeyID = keyID
+	fenceCanonical, err := codec.Marshal(body)
+	if err != nil {
+		return err
+	}
+	actionCanonical, err := codec.Marshal(action)
+	if err != nil {
+		return err
+	}
+	receiptCanonical, err := codec.Marshal(fixtureRelayReceiptBody())
+	if err != nil {
+		return err
+	}
+	statementCanonical, err := codec.Marshal(fixtureStageStatement())
+	if err != nil {
+		return err
+	}
+	inputs := actionauthorityvector.Inputs{Schema: actionauthorityvector.Schema}
+	for index, entry := range []struct {
+		name      string
+		canonical []byte
+	}{{"writer_fence_body", fenceCanonical}, {"authorized_action", actionCanonical},
+		{"relay_side_effect_admission_receipt_body", receiptCanonical}, {"stage_action_admission_statement", statementCanonical}} {
+		inputs.Messages = append(inputs.Messages, actionauthorityvector.Message{Name: entry.name,
+			SignatureDomain: actionauthorityvector.Domains[index], CanonicalCBORHex: hex.EncodeToString(entry.canonical)})
+	}
+	raw, err := json.MarshalIndent(inputs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(raw, '\n'), 0o644)
+}
+
+func mldsa44SignatureText(signature []byte) (string, error) {
+	return commerce.ActionAuthoritySignatureText(signature)
+}
+
+// actionAuthoritySignature marks an Action Authority signature entry with its
+// suite and context and the resolved key a verifier needs.
+func actionAuthoritySignature(entry signatureVector, vector *actionauthorityvector.Vector) signatureVector {
+	entry.Suite = "ml-dsa-44"
+	entry.Context = actionauthorityvector.Context
+	entry.ResolvedPublicKey = vector.PublicKeyHex
+	return entry
 }
 
 func signature(name, object, formula, domain, public, proof string, canonical []byte) signatureVector {
@@ -192,7 +365,7 @@ func signature(name, object, formula, domain, public, proof string, canonical []
 	default:
 		panic("unknown formula")
 	}
-	return signatureVector{Name: name, ObjectName: object, MessageFormula: formula, MessageDomain: domain,
+	return signatureVector{Name: name, ObjectName: object, MessageFormula: formula, MessageDomain: domain, Suite: "ed25519",
 		PublicKey: public, Signature: proof, ExpectedMessageHex: hex.EncodeToString(message)}
 }
 

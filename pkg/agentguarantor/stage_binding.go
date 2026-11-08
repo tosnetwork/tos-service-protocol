@@ -326,5 +326,5 @@ func VerifyPortableStageActionAdmissionEvidenceV1(evidence PortableStageActionAd
 		return err
 	}
 	return verifyStageActionAdmissionAuthorizationV1(evidence.ActionAdmissionAuthorization, evidence.AuthorizedAction,
-		stageBodyDigest, authorityResolver, now)
+		stageBodyDigest, authorityResolver, fenceResolver, now)
 }

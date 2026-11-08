@@ -3,14 +3,12 @@ package agentrelay
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 const (
@@ -110,10 +108,34 @@ type RelaySideEffectAdmissionReceiptBody struct {
 	StartNotAfterUnix         uint64            `json:"start_not_after_unix"`
 }
 
+// SignedRelaySideEffectAdmissionReceipt is signed by the owner Action
+// Authority with Pure ML-DSA-44 under TOS-ACTION-AUTHORITY-V1. KeyID is the
+// mldsa44:<64 hex> key ID of the same key that issued the Writer Fence and the
+// AuthorizedAction; the key itself is resolved, never carried.
 type SignedRelaySideEffectAdmissionReceipt struct {
 	Body      RelaySideEffectAdmissionReceiptBody `json:"body"`
-	PublicKey string                              `json:"public_key"`
+	KeyID     string                              `json:"key_id"`
 	Signature string                              `json:"signature"`
+}
+
+// VerifiedRelayAdmissionReceipt records that one exact signed receipt passed
+// its Action Authority check: its key resolved for the receipt's authority at
+// the receipt's issuance time and its ML-DSA-44 signature verified. Only
+// VerifyRelaySideEffectAdmissionReceiptAuthority constructs it, so a journal
+// that receives one never repeats the resolver or helper work.
+type VerifiedRelayAdmissionReceipt struct {
+	bodyDigest string
+	keyID      string
+	signature  string
+}
+
+func (verified VerifiedRelayAdmissionReceipt) matches(receipt SignedRelaySideEffectAdmissionReceipt) bool {
+	if verified.bodyDigest == "" {
+		return false
+	}
+	bodyDigest, err := RelaySideEffectAdmissionReceiptBodyDigest(receipt.Body)
+	return err == nil && bodyDigest == verified.bodyDigest && receipt.KeyID == verified.keyID &&
+		receipt.Signature == verified.signature
 }
 
 // RelaySideEffectAdmissionLookup is the immutable authority key used after an
@@ -316,8 +338,9 @@ func buildRelaySideEffectAdmissionDescriptorForRoute(request RelayExecutionReque
 // owner, Agent, Authority high-water domain, policy, mandate, approval, stable
 // action, exact underlying request, or network.
 func BuildRelaySideEffectAdmissionSuccessorDescriptor(request RelayExecutionRequest,
-	authenticatedPrincipal string, predecessor SignedRelaySideEffectAdmissionReceipt) (RelaySideEffectAdmissionDescriptor, error) {
-	if err := VerifyRelaySideEffectAdmissionReceiptSignature(predecessor); err != nil ||
+	authenticatedPrincipal string, predecessor SignedRelaySideEffectAdmissionReceipt,
+	resolver agentcommerce.FenceAuthorityResolver) (RelaySideEffectAdmissionDescriptor, error) {
+	if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(predecessor, resolver); err != nil ||
 		predecessor.Body.Mode != ModeRelayExact ||
 		predecessor.Body.AssuranceLevel != AssuranceAutonomousDecentralized ||
 		predecessor.Body.RouteAttempt >= MaxRelayRouteAttempts {
@@ -332,7 +355,7 @@ func BuildRelaySideEffectAdmissionSuccessorDescriptor(request RelayExecutionRequ
 	if err != nil {
 		return RelaySideEffectAdmissionDescriptor{}, err
 	}
-	if err := ValidateRelaySideEffectAdmissionRouteTransition(predecessor, descriptor); err != nil {
+	if err := validateRelaySideEffectAdmissionRouteTransitionShape(predecessor, descriptor); err != nil {
 		return RelaySideEffectAdmissionDescriptor{}, err
 	}
 	return descriptor, nil
@@ -386,8 +409,16 @@ func validateRelayAdmissionRoute(routeAttempt uint32, predecessorReceiptDigest s
 // stages never receive successor receipts in V1 because a second Provider
 // route could duplicate a top-up payment.
 func ValidateRelaySideEffectAdmissionRouteTransition(predecessor SignedRelaySideEffectAdmissionReceipt,
+	descriptor RelaySideEffectAdmissionDescriptor, resolver agentcommerce.FenceAuthorityResolver) error {
+	if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(predecessor, resolver); err != nil {
+		return errors.New("relay admission route predecessor does not verify: " + err.Error())
+	}
+	return validateRelaySideEffectAdmissionRouteTransitionShape(predecessor, descriptor)
+}
+
+func validateRelaySideEffectAdmissionRouteTransitionShape(predecessor SignedRelaySideEffectAdmissionReceipt,
 	descriptor RelaySideEffectAdmissionDescriptor) error {
-	if err := VerifyRelaySideEffectAdmissionReceiptSignature(predecessor); err != nil ||
+	if err := validateRelaySideEffectAdmissionReceiptShape(predecessor); err != nil ||
 		predecessor.Body.Mode != ModeRelayExact || descriptor.Mode != ModeRelayExact ||
 		predecessor.Body.AssuranceLevel != AssuranceAutonomousDecentralized ||
 		descriptor.AssuranceLevel != AssuranceAutonomousDecentralized ||
@@ -420,12 +451,13 @@ func ValidateRelaySideEffectAdmissionRouteTransition(predecessor SignedRelaySide
 // receipt. Writer lease IDs, generations, fence digests, and action-envelope
 // digests may change after a legitimate takeover. The Authority high-water
 // domain and the economic policy/mandate/approval context may not.
-func ValidateRelaySideEffectAdmissionRouteChain(chain []SignedRelaySideEffectAdmissionReceipt) error {
+func ValidateRelaySideEffectAdmissionRouteChain(chain []SignedRelaySideEffectAdmissionReceipt,
+	resolver agentcommerce.FenceAuthorityResolver) error {
 	if len(chain) == 0 || len(chain) > int(MaxRelayRouteAttempts) {
 		return errors.New("relay admission route chain length is invalid")
 	}
 	for index := range chain {
-		if err := VerifyRelaySideEffectAdmissionReceiptSignature(chain[index]); err != nil {
+		if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(chain[index], resolver); err != nil {
 			return errors.New("relay admission route chain contains an invalid receipt")
 		}
 		if index == 0 {
@@ -573,7 +605,7 @@ func validateRelaySideEffectAdmissionRequestShape(request RelaySideEffectAdmissi
 	if fenceErr != nil || action.OwnerID != request.OwnerID || action.AgentID != request.AgentID ||
 		action.StableActionID != request.StableActionID || action.ExactRequestDigest != request.ExactRequestDigest ||
 		action.WriterFenceDigest != fenceDigest || action.AuthorityID != fence.Body.AuthorityID ||
-		action.AuthorityPublicKey != fence.PublicKey || action.WriterGeneration != fence.Body.WriterGeneration ||
+		action.AuthorityKeyID != fence.KeyID || action.WriterGeneration != fence.Body.WriterGeneration ||
 		request.RequestedStartNotAfterUnix > action.ExpiresAtUnix ||
 		request.RequestedStartNotAfterUnix > fence.Body.ExpiresAtUnix {
 		return errors.New("relay side-effect admission wire credentials conflict")
@@ -624,7 +656,7 @@ func ValidateRelaySideEffectAdmissionDescriptor(descriptor RelaySideEffectAdmiss
 		fenceDigest != descriptor.WriterFenceDigest || action.OwnerID != descriptor.OwnerID || action.AgentID != descriptor.AgentID ||
 		action.StableActionID != descriptor.StableActionID || action.ExactRequestDigest != descriptor.ExactRequestDigest ||
 		action.WriterGeneration != fence.Body.WriterGeneration || action.WriterFenceDigest != fenceDigest ||
-		action.AuthorityID != fence.Body.AuthorityID || action.AuthorityPublicKey != fence.PublicKey ||
+		action.AuthorityID != fence.Body.AuthorityID || action.AuthorityKeyID != fence.KeyID ||
 		descriptor.StartNotAfterCapUnix > action.ExpiresAtUnix || descriptor.StartNotAfterCapUnix > fence.Body.ExpiresAtUnix {
 		return errors.New("relay side-effect admission credentials conflict")
 	}
@@ -700,29 +732,86 @@ func RelaySideEffectAdmissionReceiptBodyDigest(body RelaySideEffectAdmissionRece
 	return codec.Digest("tos.agent-relay-side-effect-admission-receipt.v1", body)
 }
 
-func SignRelaySideEffectAdmissionReceipt(body RelaySideEffectAdmissionReceiptBody,
-	key ed25519.PrivateKey) (SignedRelaySideEffectAdmissionReceipt, error) {
-	if len(key) != ed25519.PrivateKeySize || validateRelaySideEffectAdmissionReceiptBody(body) != nil {
-		return SignedRelaySideEffectAdmissionReceipt{}, errors.New("relay side-effect admission receipt is invalid")
+// RelaySideEffectAdmissionReceiptSignatureMessage is the 32-byte message the
+// Action Authority signs for a receipt: the framed SHA-256 of its canonical
+// body.
+func RelaySideEffectAdmissionReceiptSignatureMessage(body RelaySideEffectAdmissionReceiptBody) ([]byte, error) {
+	if err := validateRelaySideEffectAdmissionReceiptBody(body); err != nil {
+		return nil, errors.New("relay side-effect admission receipt is invalid")
 	}
-	message, err := signatureMessage("tos.agent-relay-side-effect-admission-receipt-signature.v1\x00", body)
+	return signatureMessage("tos.agent-relay-side-effect-admission-receipt-signature.v1\x00", body)
+}
+
+// SignRelaySideEffectAdmissionReceipt has the owner Action Authority
+// controller in custody sign a receipt body.
+func SignRelaySideEffectAdmissionReceipt(ctx context.Context, body RelaySideEffectAdmissionReceiptBody,
+	signer mldsa44.Signer, controller string) (SignedRelaySideEffectAdmissionReceipt, error) {
+	message, err := RelaySideEffectAdmissionReceiptSignatureMessage(body)
 	if err != nil {
 		return SignedRelaySideEffectAdmissionReceipt{}, err
 	}
-	public := key.Public().(ed25519.PublicKey)
-	return SignedRelaySideEffectAdmissionReceipt{Body: body,
-		PublicKey: "ed25519:" + hex.EncodeToString(public),
-		Signature: "ed25519:" + base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, message))}, nil
+	keyID, signature, err := agentcommerce.SignActionAuthorityMessage(ctx, signer, controller, message)
+	if err != nil {
+		return SignedRelaySideEffectAdmissionReceipt{}, err
+	}
+	return SignedRelaySideEffectAdmissionReceipt{Body: body, KeyID: keyID, Signature: signature}, nil
 }
 
-func VerifyRelaySideEffectAdmissionReceipt(receipt SignedRelaySideEffectAdmissionReceipt,
-	request RelayExecutionRequest, now time.Time) error {
+// VerifyRelaySideEffectAdmissionReceiptAuthority is the only expensive
+// receipt check: it resolves the receipt key for the receipt's authority at
+// its issuance instant and verifies the ML-DSA-44 signature. It reads no
+// clock, so it can run before any journal lock and its result stays valid
+// for the exact receipt bytes.
+func VerifyRelaySideEffectAdmissionReceiptAuthority(receipt SignedRelaySideEffectAdmissionReceipt,
+	resolver agentcommerce.FenceAuthorityResolver) (VerifiedRelayAdmissionReceipt, error) {
+	if err := validateRelaySideEffectAdmissionReceiptShape(receipt); err != nil {
+		return VerifiedRelayAdmissionReceipt{}, err
+	}
+	if receipt.Body.IssuedAtUnix > uint64(1<<63-1) {
+		return VerifiedRelayAdmissionReceipt{}, errors.New("relay side-effect admission receipt issuance time is invalid")
+	}
+	message, err := RelaySideEffectAdmissionReceiptSignatureMessage(receipt.Body)
+	if err != nil {
+		return VerifiedRelayAdmissionReceipt{}, err
+	}
+	issuedAt := time.Unix(int64(receipt.Body.IssuedAtUnix), 0).UTC()
+	if err := agentcommerce.VerifyActionAuthoritySignature(resolver, receipt.Body.AuthorityID, receipt.KeyID,
+		receipt.Signature, message, issuedAt); err != nil {
+		return VerifiedRelayAdmissionReceipt{}, errors.New("relay side-effect admission receipt signature is invalid: " + err.Error())
+	}
+	bodyDigest, err := RelaySideEffectAdmissionReceiptBodyDigest(receipt.Body)
+	if err != nil {
+		return VerifiedRelayAdmissionReceipt{}, err
+	}
+	return VerifiedRelayAdmissionReceipt{bodyDigest: bodyDigest, keyID: receipt.KeyID, signature: receipt.Signature}, nil
+}
+
+// CheckRelaySideEffectAdmissionReceipt is the cheap admission check for a
+// receipt whose authority was already verified: it requires verified to be
+// for exactly this signed receipt, then checks every execution binding and the
+// exclusive start boundary at now. It calls no resolver or helper.
+func CheckRelaySideEffectAdmissionReceipt(receipt SignedRelaySideEffectAdmissionReceipt,
+	verified VerifiedRelayAdmissionReceipt, request RelayExecutionRequest, now time.Time) error {
+	if !verified.matches(receipt) {
+		return errors.New("relay side-effect admission receipt was not verified by its Action Authority")
+	}
 	descriptor, err := buildRelaySideEffectAdmissionDescriptorForRoute(request, receipt.Body.AuthenticatedPrincipal,
 		receipt.Body.RouteAttempt, receipt.Body.PredecessorReceiptDigest)
 	if err != nil {
 		return err
 	}
-	return VerifyRelaySideEffectAdmissionReceiptForDescriptor(receipt, descriptor, request, now)
+	return checkRelaySideEffectAdmissionReceiptForDescriptor(receipt, descriptor, request, now)
+}
+
+// VerifyRelaySideEffectAdmissionReceipt verifies a receipt's authority and
+// then its bindings and start window at now.
+func VerifyRelaySideEffectAdmissionReceipt(receipt SignedRelaySideEffectAdmissionReceipt,
+	request RelayExecutionRequest, resolver agentcommerce.FenceAuthorityResolver, now time.Time) error {
+	verified, err := VerifyRelaySideEffectAdmissionReceiptAuthority(receipt, resolver)
+	if err != nil {
+		return err
+	}
+	return CheckRelaySideEffectAdmissionReceipt(receipt, verified, request, now)
 }
 
 // VerifyRelaySideEffectAdmissionSuccessorReceipt additionally verifies the
@@ -731,9 +820,10 @@ func VerifyRelaySideEffectAdmissionReceipt(receipt SignedRelaySideEffectAdmissio
 // that is admitting or auditing a successor supplies the stored predecessor so
 // the n+1 transition and route-independent transaction identity are proven.
 func VerifyRelaySideEffectAdmissionSuccessorReceipt(receipt SignedRelaySideEffectAdmissionReceipt,
-	request RelayExecutionRequest, predecessor SignedRelaySideEffectAdmissionReceipt, now time.Time) error {
+	request RelayExecutionRequest, predecessor SignedRelaySideEffectAdmissionReceipt,
+	resolver agentcommerce.FenceAuthorityResolver, now time.Time) error {
 	descriptor, err := BuildRelaySideEffectAdmissionSuccessorDescriptor(request,
-		receipt.Body.AuthenticatedPrincipal, predecessor)
+		receipt.Body.AuthenticatedPrincipal, predecessor, resolver)
 	if err != nil {
 		return err
 	}
@@ -741,12 +831,23 @@ func VerifyRelaySideEffectAdmissionSuccessorReceipt(receipt SignedRelaySideEffec
 		descriptor.PredecessorReceiptDigest != receipt.Body.PredecessorReceiptDigest {
 		return errors.New("relay side-effect admission successor receipt has the wrong lineage")
 	}
-	return VerifyRelaySideEffectAdmissionReceiptForDescriptor(receipt, descriptor, request, now)
+	return VerifyRelaySideEffectAdmissionReceiptForDescriptor(receipt, descriptor, request, resolver, now)
 }
 
+// VerifyRelaySideEffectAdmissionReceiptForDescriptor verifies a receipt's
+// authority and its bindings to descriptor and request at now.
 func VerifyRelaySideEffectAdmissionReceiptForDescriptor(receipt SignedRelaySideEffectAdmissionReceipt,
+	descriptor RelaySideEffectAdmissionDescriptor, request RelayExecutionRequest,
+	resolver agentcommerce.FenceAuthorityResolver, now time.Time) error {
+	if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(receipt, resolver); err != nil {
+		return err
+	}
+	return checkRelaySideEffectAdmissionReceiptForDescriptor(receipt, descriptor, request, now)
+}
+
+func checkRelaySideEffectAdmissionReceiptForDescriptor(receipt SignedRelaySideEffectAdmissionReceipt,
 	descriptor RelaySideEffectAdmissionDescriptor, request RelayExecutionRequest, now time.Time) error {
-	if err := VerifyRelaySideEffectAdmissionReceiptSignature(receipt); err != nil {
+	if err := validateRelaySideEffectAdmissionReceiptShape(receipt); err != nil {
 		return err
 	}
 	body := receipt.Body
@@ -763,7 +864,7 @@ func VerifyRelaySideEffectAdmissionReceiptForDescriptor(receipt SignedRelaySideE
 		body.WriterFenceDigest != descriptor.WriterFenceDigest || body.WriterLeaseID != fence.Body.LeaseID ||
 		body.WriterGeneration != fence.Body.WriterGeneration || body.PolicyRevision != action.PolicyRevision ||
 		body.MandateDigest != action.MandateDigest || body.ApprovalDigest != action.ApprovalDigest ||
-		body.AuthorityID != fence.Body.AuthorityID || receipt.PublicKey != fence.PublicKey || receipt.PublicKey != action.AuthorityPublicKey {
+		body.AuthorityID != fence.Body.AuthorityID || receipt.KeyID != fence.KeyID || receipt.KeyID != action.AuthorityKeyID {
 		return errors.New("relay side-effect admission receipt conflicts with the exact execution")
 	}
 	nowUnix := now.UTC().Unix()
@@ -782,36 +883,23 @@ func VerifyRelaySideEffectAdmissionReceiptForDescriptor(receipt SignedRelaySideE
 	return nil
 }
 
-func VerifyRelaySideEffectAdmissionReceiptSignature(receipt SignedRelaySideEffectAdmissionReceipt) error {
-	if err := validateRelaySideEffectAdmissionReceiptShape(receipt); err != nil {
-		return err
-	}
-	public, err := parsePublicKey(receipt.PublicKey)
-	if err != nil {
-		return err
-	}
-	signature, err := parseSignature(receipt.Signature)
-	if err != nil {
-		return err
-	}
-	message, err := signatureMessage("tos.agent-relay-side-effect-admission-receipt-signature.v1\x00", receipt.Body)
-	if err != nil || !ed25519.Verify(public, message, signature) {
-		return errors.New("relay side-effect admission receipt signature is invalid")
-	}
-	return nil
-}
-
 // VerifyRelaySideEffectAdmissionReceiptIntegrity is for an already-admitted
-// downstream sink. It verifies the immutable receipt/execution/signature at
-// the signed issuance instant but grants no authority to create a new journal
-// admission after StartNotAfterUnix. The Provider's durable receipt digest is
-// the evidence that live admission already happened.
+// downstream sink. It checks the immutable receipt shape and its bindings to
+// the exact execution at the signed issuance instant, and grants no authority
+// to create a new journal admission after StartNotAfterUnix. It does not
+// resolve the Action Authority key: the Provider's durable receipt digest is
+// the evidence that the verified live admission already happened.
 func VerifyRelaySideEffectAdmissionReceiptIntegrity(receipt SignedRelaySideEffectAdmissionReceipt,
 	request RelayExecutionRequest) error {
 	if receipt.Body.IssuedAtUnix == 0 || receipt.Body.IssuedAtUnix > uint64(1<<63-1) {
 		return errors.New("relay side-effect admission receipt issuance time is invalid")
 	}
-	return VerifyRelaySideEffectAdmissionReceipt(receipt, request,
+	descriptor, err := buildRelaySideEffectAdmissionDescriptorForRoute(request, receipt.Body.AuthenticatedPrincipal,
+		receipt.Body.RouteAttempt, receipt.Body.PredecessorReceiptDigest)
+	if err != nil {
+		return err
+	}
+	return checkRelaySideEffectAdmissionReceiptForDescriptor(receipt, descriptor, request,
 		time.Unix(int64(receipt.Body.IssuedAtUnix), 0).UTC())
 }
 
@@ -819,11 +907,11 @@ func validateRelaySideEffectAdmissionReceiptShape(receipt SignedRelaySideEffectA
 	if validateRelaySideEffectAdmissionReceiptBody(receipt.Body) != nil {
 		return errors.New("relay side-effect admission receipt body is invalid")
 	}
-	if _, err := parsePublicKey(receipt.PublicKey); err != nil {
-		return err
+	if _, err := agentcommerce.ParseActionAuthorityKeyID(receipt.KeyID); err != nil {
+		return errors.New("relay side-effect admission receipt key ID is invalid: " + err.Error())
 	}
-	if _, err := parseSignature(receipt.Signature); err != nil {
-		return err
+	if _, err := agentcommerce.ParseActionAuthoritySignature(receipt.Signature); err != nil {
+		return errors.New("relay side-effect admission receipt signature is invalid: " + err.Error())
 	}
 	return nil
 }
