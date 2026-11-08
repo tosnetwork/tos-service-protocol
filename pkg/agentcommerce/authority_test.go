@@ -188,6 +188,24 @@ func TestActionAuthorityKeyMustResolve(t *testing.T) {
 	}
 }
 
+// A fence whose proof is valid under one authorized key but whose key ID
+// names another is refused because the resolved key must derive the carried
+// key ID, even when the resolver returns the signing key for any ID.
+func TestResolvedKeyMustDeriveTheCarriedKeyID(t *testing.T) {
+	f := newAuthorityFixture(t)
+	other := newTestActionAuthority("other", "authority:test")
+	renamed := f.fence
+	renamed.KeyID = other.keyID
+	substituting := substitutingResolver{ActionAuthorityResolver: f.authority.resolver,
+		key: f.authority.fake.PublicKey("authority")}
+	if err := VerifyWriterFence(f.fence, substituting, f.now, "agreement.propose"); err != nil {
+		t.Fatalf("the fence under its own key ID was refused: %v", err)
+	}
+	if err := VerifyWriterFence(renamed, substituting, f.now, "agreement.propose"); err == nil {
+		t.Fatal("a fence naming another key ID verified under the resolved signing key")
+	}
+}
+
 // substitutingResolver returns key for every lookup, whatever ID was asked.
 type substitutingResolver struct {
 	mldsa44test.ActionAuthorityResolver

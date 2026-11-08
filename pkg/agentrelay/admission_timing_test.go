@@ -80,6 +80,17 @@ func (resolver countingVerifyResolver) Verify(ctx context.Context, use mldsa44.U
 	return resolver.relayResolver.Verify(ctx, use, payload, publicKey, signature)
 }
 
+// waitFor fails the test, instead of hanging it, when a blocked call is never
+// reached.
+func waitFor(t *testing.T, reached <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-reached:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("%s was never reached", what)
+	}
+}
+
 // prepareSubmission reserves a quote in the service journal and returns the
 // execution, its Agreement and a broadcaster that accepts it.
 func prepareSubmission(t *testing.T, fixture *relayFixture) (RelayExecutionRequest, agentcommerce.AgentAgreement) {
@@ -125,7 +136,7 @@ func TestRelayAdmissionStartWindowIsCheckedAfterTheAuthoritativeLookup(t *testin
 				record, err := fixture.service.Submit(context.Background(), execution, agreement)
 				done <- outcome{record, err}
 			}()
-			<-blocking.entered
+			waitFor(t, blocking.entered, "the authoritative admission lookup")
 			boundary := time.Unix(int64(execution.AdmissionReceipt.Body.StartNotAfterUnix), 0).UTC()
 			clock.set(boundary.Add(testCase.offset))
 			close(blocking.release)
@@ -241,7 +252,7 @@ func TestRelayReceiptAuthorityIsVerifiedOnceAndOutsideTheJournal(t *testing.T) {
 		_, err := fixture.service.Submit(context.Background(), execution, agreement)
 		done <- err
 	}()
-	<-resolver.entered
+	waitFor(t, resolver.entered, "the receipt authority verification")
 	journalDone := make(chan error, 1)
 	go func() {
 		_, err := fixture.service.Journal.Resolve(execution.AuthorizedAction.StableActionID,
