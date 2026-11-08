@@ -78,6 +78,10 @@ func buildTransportVectors(t *testing.T) transportVectorFile {
 		{"agent-packet-https-url", TransportBindingV1{TransportAgentPacket, 4096, "https://provider.example"}},
 		{"https-naming-agent", TransportBindingV1{TransportHTTPS, 4096, "agent-packet:" + provider}},
 		{"unknown-mode-3", TransportBindingV1{3, 4096, "agent-packet:" + provider}},
+		{"agent-packet-zero-bound", TransportBindingV1{TransportAgentPacket, 0, "agent-packet:" + provider}},
+		{"connect-https-over-16mib", TransportBindingV1{TransportHTTPS, 16<<20 + 1, "https://provider.example"}},
+		{"connect-https-zero-bound", TransportBindingV1{TransportHTTPS, 0, "https://provider.example"}},
+		{"connect-https-url-over-120-bytes", TransportBindingV1{TransportHTTPS, 4096, "https://" + strings.Repeat("a", 110) + ".example"}},
 	} {
 		root := rawTransportCell(value.v.SecurityMode, value.v.MaxRequestBytes, value.v.BaseURL)
 		file.Invalid = append(file.Invalid, transportVectorInvalid{Name: value.name, SecurityMode: value.v.SecurityMode,

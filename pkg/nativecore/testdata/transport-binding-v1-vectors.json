@@ -83,6 +83,34 @@
       "max_request_bytes": 4096,
       "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
       "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQMAABAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWF1ZASG"
+    },
+    {
+      "name": "agent-packet-zero-bound",
+      "security_mode": 2,
+      "max_request_bytes": 0,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQIAAAAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWFmwRF/"
+    },
+    {
+      "name": "connect-https-over-16mib",
+      "security_mode": 1,
+      "max_request_bytes": 16777217,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQEBAAABAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlLi4hXA=="
+    },
+    {
+      "name": "connect-https-zero-bound",
+      "security_mode": 1,
+      "max_request_bytes": 0,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQEAAAAAAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxll8WThg=="
+    },
+    {
+      "name": "connect-https-url-over-120-bytes",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+      "boc_base64": "te6cckEBAgEAjgABFk5UQjEAAQEAABAAAQD8aHR0cHM6Ly9hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYS5leGFtcGxlUbumZA=="
     }
   ],
   "notes": [
