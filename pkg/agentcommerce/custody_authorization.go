@@ -2,12 +2,14 @@ package agentcommerce
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 // CustodyActionAuthorization is the small, language-neutral admission proof
@@ -51,30 +53,25 @@ type CustodyActionAuthorization struct {
 	Destination                              string `json:"destination"`
 	AmountAtomic                             uint64 `json:"amount_atomic"`
 	ExpiresAtUnix                            uint64 `json:"expires_at_unix"`
-	PublicKey                                string `json:"public_key"`
+	KeyID                                    string `json:"key_id"`
 	Proof                                    string `json:"proof"`
 }
 
-// CustodyAuthorityResolver pins the Action Authority independently of the
-// proof. Accepting a public key merely because it appears in the proof would
-// turn the proof into a self-signed bearer token.
-type CustodyAuthorityResolver interface {
-	AuthorizeCustodyKey(authorityID, ownerID, agentID string, publicKey ed25519.PublicKey, at time.Time) error
-}
-
-func SignCustodyActionAuthorization(body CustodyActionAuthorization, privateKey ed25519.PrivateKey) (CustodyActionAuthorization, error) {
-	if len(privateKey) != ed25519.PrivateKeySize {
-		return CustodyActionAuthorization{}, errors.New("custody authority signing key is invalid")
-	}
-	body.PublicKey, body.Proof = "", ""
+// SignCustodyActionAuthorization signs the payment authorization with the
+// custody authorization controller that key custody holds under `controller`
+// and fills its key ID and proof.
+func SignCustodyActionAuthorization(ctx context.Context, body CustodyActionAuthorization, signer mldsa44.Signer,
+	controller string) (CustodyActionAuthorization, error) {
+	body.KeyID, body.Proof = "", ""
 	preimage, err := custodyAuthorizationPreimage(body)
 	if err != nil {
 		return CustodyActionAuthorization{}, err
 	}
-	digest := sha256.Sum256(preimage)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-	body.PublicKey = "ed25519:" + hex.EncodeToString(publicKey)
-	body.Proof = "ed25519:" + hex.EncodeToString(ed25519.Sign(privateKey, digest[:]))
+	keyID, proof, err := signCustodyDigest(ctx, signer, controller, sha256.Sum256(preimage))
+	if err != nil {
+		return CustodyActionAuthorization{}, err
+	}
+	body.KeyID, body.Proof = keyID, proof
 	return body, nil
 }
 
@@ -82,26 +79,15 @@ func VerifyCustodyActionAuthorization(authorization CustodyActionAuthorization, 
 	if resolver == nil || now.Unix() < 0 || uint64(now.Unix()) >= authorization.ExpiresAtUnix {
 		return errors.New("custody authorization is expired or has no authority resolver")
 	}
-	publicKey, err := parseEd25519PublicKey(authorization.PublicKey)
-	if err != nil {
-		return err
-	}
-	if err := resolver.AuthorizeCustodyKey(authorization.AuthorityID, authorization.OwnerID, authorization.AgentID, publicKey, now); err != nil {
-		return err
-	}
-	proof, err := parseHexEd25519Signature(authorization.Proof)
-	if err != nil {
-		return err
-	}
 	body := authorization
-	body.PublicKey, body.Proof = "", ""
+	body.KeyID, body.Proof = "", ""
 	preimage, err := custodyAuthorizationPreimage(body)
 	if err != nil {
 		return err
 	}
-	digest := sha256.Sum256(preimage)
-	if !ed25519.Verify(publicKey, digest[:], proof) {
-		return errors.New("custody authorization proof is invalid")
+	if err := verifyCustodyDigest(resolver, authorization.AuthorityID, authorization.OwnerID, authorization.AgentID,
+		authorization.KeyID, authorization.Proof, sha256.Sum256(preimage), now); err != nil {
+		return fmt.Errorf("custody authorization proof is invalid: %w", err)
 	}
 	return nil
 }
@@ -121,7 +107,7 @@ func VerifyRelayCustodyActionAuthorization(authorization CustodyActionAuthorizat
 // cross-language vectors. It is not a generic serialization format.
 func CustodyActionAuthorizationPreimage(authorization CustodyActionAuthorization) ([]byte, error) {
 	body := authorization
-	body.PublicKey, body.Proof = "", ""
+	body.KeyID, body.Proof = "", ""
 	return custodyAuthorizationPreimage(body)
 }
 
@@ -187,17 +173,4 @@ func custodyAuthorizationPreimage(body CustodyActionAuthorization) ([]byte, erro
 func writeLP32String(output *bytes.Buffer, value string) {
 	_ = binary.Write(output, binary.BigEndian, uint32(len(value)))
 	output.WriteString(value)
-}
-
-func parseHexEd25519Signature(value string) ([]byte, error) {
-	const prefix = "ed25519:"
-	if len(value) != len(prefix)+ed25519.SignatureSize*2 || value[:len(prefix)] != prefix {
-		return nil, errors.New("Ed25519 proof is malformed")
-	}
-	encoded := value[len(prefix):]
-	decoded, err := hex.DecodeString(encoded)
-	if err != nil || len(decoded) != ed25519.SignatureSize || hex.EncodeToString(decoded) != encoded {
-		return nil, errors.New("Ed25519 proof is malformed")
-	}
-	return decoded, nil
 }

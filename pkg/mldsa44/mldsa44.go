@@ -51,6 +51,10 @@ const (
 	// Authority object: an AuthorizedActionV1, a WriterFenceV1, a relay
 	// side-effect admission receipt or a Guarantor stage-action admission.
 	UseActionAuthority Use = "action-authority"
+	// UseCustodyAuthorization signs the 32-byte SHA-256 of a TOS-EAA,
+	// TOS-CEA or TOS-PCEA custody authorization preimage. It is a separate
+	// key and context from the Action Authority.
+	UseCustodyAuthorization Use = "custody-authorization"
 )
 
 // AgentGuarantorMessageSize is the exact length of an Agent Guarantor
@@ -60,6 +64,11 @@ const AgentGuarantorMessageSize = 32
 // ActionAuthorityMessageSize is the exact length of an Action Authority
 // message: a framed SHA-256 digest whose domain separates the object kind.
 const ActionAuthorityMessageSize = 32
+
+// CustodyAuthorizationMessageSize is the exact length of a custody
+// authorization message: the SHA-256 of a preimage whose prefix separates the
+// object kind.
+const CustodyAuthorizationMessageSize = 32
 
 // SignaturePrefix is the text prefix of an ML-DSA-44 signature.
 const SignaturePrefix = "mldsa44:"
@@ -78,6 +87,8 @@ func (u Use) Context() (string, error) {
 		return "TOS-AGENT-GUARANTOR-V1", nil
 	case UseActionAuthority:
 		return "TOS-ACTION-AUTHORITY-V1", nil
+	case UseCustodyAuthorization:
+		return "TOS-CUSTODY-AUTHORIZATION-V1", nil
 	default:
 		return "", errors.New("unknown ML-DSA-44 signature use")
 	}
@@ -118,15 +129,17 @@ type Signer interface {
 }
 
 // CheckMessage validates the shape of a non-registry payload: non-empty and
-// bounded, exactly AgentGuarantorMessageSize bytes for UseAgentGuarantor and
-// exactly ActionAuthorityMessageSize bytes for UseActionAuthority.
+// bounded, exactly AgentGuarantorMessageSize bytes for UseAgentGuarantor,
+// exactly ActionAuthorityMessageSize bytes for UseActionAuthority and exactly
+// CustodyAuthorizationMessageSize bytes for UseCustodyAuthorization.
 func CheckMessage(use Use, payload []byte) error {
 	if _, err := use.Context(); err != nil || use == UseRegistry {
 		return ErrMalformed
 	}
 	if len(payload) == 0 || len(payload) > MaxMessageBytes ||
 		use == UseAgentGuarantor && len(payload) != AgentGuarantorMessageSize ||
-		use == UseActionAuthority && len(payload) != ActionAuthorityMessageSize {
+		use == UseActionAuthority && len(payload) != ActionAuthorityMessageSize ||
+		use == UseCustodyAuthorization && len(payload) != CustodyAuthorizationMessageSize {
 		return ErrMalformed
 	}
 	return nil

@@ -1,10 +1,9 @@
 package buyersdk
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
 	"encoding/json"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 	"os"
 	"strings"
 	"testing"
@@ -84,15 +83,15 @@ func TestTOSCTLEconomicEffectSenderResolvesExactActionBeforeNextSequence(t *test
 		t.Fatal(err)
 	}
 	body := cell.BeginCell().MustStoreUInt(0x4e450003, 32).MustStoreUInt(8, 64).EndCell()
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x74}, ed25519.SeedSize))
-	authorization, err := commerce.SignCustodyEffectAuthorization(commerce.CustodyEffectAuthorization{SchemaVersion: 1,
+	key := &mldsa44test.Fake{}
+	authorization, err := commerce.SignCustodyEffectAuthorization(context.Background(), commerce.CustodyEffectAuthorization{SchemaVersion: 1,
 		AuthorityID: "authority:test", OwnerID: "owner:test", AgentID: "agent:buyer", SourceAccount: "0:" + strings.Repeat("1", 64),
 		NetworkID: "tos:test", NetworkGlobalID: -3, ActionKind: "payment.direct", StableActionID: "sha256:" + strings.Repeat("2", 64),
 		ExactRequestDigest: "sha256:" + strings.Repeat("3", 64), WriterGeneration: 1, WriterFenceDigest: "sha256:" + strings.Repeat("4", 64),
 		PolicyRevision: 1, MandateDigest: "sha256:" + strings.Repeat("5", 64), ApprovalDigestOrZero: "sha256:" + strings.Repeat("0", 64),
 		AgreementBodyDigest: "sha256:" + strings.Repeat("6", 64), ObligationID: "payment", Destination: "0:" + strings.Repeat("7", 64),
 		AmountNanoTOS: 100_000_000, BodyHash: cellHash(body), StateInitHashOrZero: "sha256:" + strings.Repeat("0", 64),
-		ExpiresAtUnix: 2_000_000_100}, key)
+		ExpiresAtUnix: 2_000_000_100}, key, "custody")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,15 +124,15 @@ func TestTOSCTLEconomicEffectSenderPreservesExactAuthorizedBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := cell.BeginCell().MustStoreUInt(0x4e450003, 32).MustStoreUInt(7, 64).EndCell()
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x73}, ed25519.SeedSize))
-	authorization, err := commerce.SignCustodyEffectAuthorization(commerce.CustodyEffectAuthorization{SchemaVersion: 1,
+	key := &mldsa44test.Fake{}
+	authorization, err := commerce.SignCustodyEffectAuthorization(context.Background(), commerce.CustodyEffectAuthorization{SchemaVersion: 1,
 		AuthorityID: "authority:test", OwnerID: "owner:test", AgentID: "agent:buyer", SourceAccount: "0:" + strings.Repeat("1", 64),
 		NetworkID: "tos:test", NetworkGlobalID: -3, ActionKind: "payment.direct", StableActionID: "sha256:" + strings.Repeat("2", 64),
 		ExactRequestDigest: "sha256:" + strings.Repeat("3", 64), WriterGeneration: 1, WriterFenceDigest: "sha256:" + strings.Repeat("4", 64),
 		PolicyRevision: 1, MandateDigest: "sha256:" + strings.Repeat("5", 64), ApprovalDigestOrZero: "sha256:" + strings.Repeat("0", 64),
 		AgreementBodyDigest: "sha256:" + strings.Repeat("6", 64), ObligationID: "payment:one", Destination: "0:" + strings.Repeat("7", 64),
 		AmountNanoTOS: 100_000_000, BodyHash: cellHash(body), StateInitHashOrZero: "sha256:" + strings.Repeat("0", 64),
-		ExpiresAtUnix: 2_000_000_100}, key)
+		ExpiresAtUnix: 2_000_000_100}, key, "custody")
 	if err != nil {
 		t.Fatal(err)
 	}

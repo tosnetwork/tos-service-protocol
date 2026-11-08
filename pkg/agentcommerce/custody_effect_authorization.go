@@ -2,14 +2,16 @@ package agentcommerce
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
 
 var custodyCellDigestPattern = regexp.MustCompile(`^tvm-cell-sha256:[0-9a-f]{64}$`)
@@ -44,23 +46,25 @@ type CustodyEffectAuthorization struct {
 	BodyHash             string                `json:"body_hash"`
 	StateInitHashOrZero  string                `json:"state_init_hash_or_zero"`
 	ExpiresAtUnix        uint64                `json:"expires_at_unix"`
-	PublicKey            string                `json:"public_key"`
+	KeyID                string                `json:"key_id"`
 	Proof                string                `json:"proof"`
 }
 
-func SignCustodyEffectAuthorization(body CustodyEffectAuthorization, privateKey ed25519.PrivateKey) (CustodyEffectAuthorization, error) {
-	if len(privateKey) != ed25519.PrivateKeySize {
-		return CustodyEffectAuthorization{}, errors.New("custody effect signing key is invalid")
-	}
-	body.PublicKey, body.Proof = "", ""
+// SignCustodyEffectAuthorization signs the effect authorization with the
+// custody authorization controller that key custody holds under `controller`
+// and fills its key ID and proof.
+func SignCustodyEffectAuthorization(ctx context.Context, body CustodyEffectAuthorization, signer mldsa44.Signer,
+	controller string) (CustodyEffectAuthorization, error) {
+	body.KeyID, body.Proof = "", ""
 	preimage, err := custodyEffectPreimage(body)
 	if err != nil {
 		return CustodyEffectAuthorization{}, err
 	}
-	digest := sha256.Sum256(preimage)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-	body.PublicKey = "ed25519:" + hex.EncodeToString(publicKey)
-	body.Proof = "ed25519:" + hex.EncodeToString(ed25519.Sign(privateKey, digest[:]))
+	keyID, proof, err := signCustodyDigest(ctx, signer, controller, sha256.Sum256(preimage))
+	if err != nil {
+		return CustodyEffectAuthorization{}, err
+	}
+	body.KeyID, body.Proof = keyID, proof
 	return body, nil
 }
 
@@ -68,26 +72,15 @@ func VerifyCustodyEffectAuthorization(value CustodyEffectAuthorization, resolver
 	if resolver == nil || now.Unix() < 0 || uint64(now.Unix()) >= value.ExpiresAtUnix {
 		return errors.New("custody effect authorization is expired or has no authority resolver")
 	}
-	publicKey, err := parseEd25519PublicKey(value.PublicKey)
-	if err != nil {
-		return err
-	}
-	if err := resolver.AuthorizeCustodyKey(value.AuthorityID, value.OwnerID, value.AgentID, publicKey, now); err != nil {
-		return err
-	}
-	proof, err := parseHexEd25519Signature(value.Proof)
-	if err != nil {
-		return err
-	}
 	body := value
-	body.PublicKey, body.Proof = "", ""
+	body.KeyID, body.Proof = "", ""
 	preimage, err := custodyEffectPreimage(body)
 	if err != nil {
 		return err
 	}
-	digest := sha256.Sum256(preimage)
-	if !ed25519.Verify(publicKey, digest[:], proof) {
-		return errors.New("custody effect authorization proof is invalid")
+	if err := verifyCustodyDigest(resolver, value.AuthorityID, value.OwnerID, value.AgentID, value.KeyID, value.Proof,
+		sha256.Sum256(preimage), now); err != nil {
+		return fmt.Errorf("custody effect authorization proof is invalid: %w", err)
 	}
 	return nil
 }
@@ -103,7 +96,7 @@ func VerifyRelayCustodyEffectAuthorization(value CustodyEffectAuthorization,
 }
 
 func CustodyEffectAuthorizationPreimage(value CustodyEffectAuthorization) ([]byte, error) {
-	value.PublicKey, value.Proof = "", ""
+	value.KeyID, value.Proof = "", ""
 	return custodyEffectPreimage(value)
 }
 

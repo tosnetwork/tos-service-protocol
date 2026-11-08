@@ -1,8 +1,6 @@
 package agentcommerce
 
 import (
-	"bytes"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -40,13 +38,13 @@ func testPredictionCustodyEffect(now time.Time) PredictionCustodyEffectAuthoriza
 
 func TestPredictionCustodyEffectAuthorizationBindsClosedExactEffect(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x75}, ed25519.SeedSize))
+	key := newTestCustodyKey("custody-75")
 	value := testPredictionCustodyEffect(now)
-	signed, err := SignPredictionCustodyEffectAuthorizationV1(value, key)
+	signed, err := key.signPrediction(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := custodyEffectResolver{key: key.Public().(ed25519.PublicKey)}
+	resolver := key.pinnedForAny()
 	if err := VerifyPredictionCustodyEffectAuthorizationV1(signed, resolver, now); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +91,7 @@ func TestPredictionCustodyEffectAuthorizationBindsClosedExactEffect(t *testing.T
 
 func TestPredictionCustodyEffectAuthorizationRejectsWrongProfilesAndKinds(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x75}, ed25519.SeedSize))
+	key := newTestCustodyKey("custody-75")
 	for name, mutate := range map[string]func(*PredictionCustodyEffectAuthorizationV1){
 		"escrow": func(value *PredictionCustodyEffectAuthorizationV1) {
 			value.ActionKind, value.EffectKind = "escrow.accept", "escrow.accept"
@@ -118,7 +116,7 @@ func TestPredictionCustodyEffectAuthorizationRejectsWrongProfilesAndKinds(t *tes
 		t.Run(name, func(t *testing.T) {
 			value := testPredictionCustodyEffect(now)
 			mutate(&value)
-			if _, err := SignPredictionCustodyEffectAuthorizationV1(value, key); err == nil {
+			if _, err := key.signPrediction(value); err == nil {
 				t.Fatal("invalid prediction custody profile was signed")
 			}
 		})
@@ -127,8 +125,8 @@ func TestPredictionCustodyEffectAuthorizationRejectsWrongProfilesAndKinds(t *tes
 
 func TestPredictionCustodyEffectAuthorizationStrictJSON(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x75}, ed25519.SeedSize))
-	signed, err := SignPredictionCustodyEffectAuthorizationV1(testPredictionCustodyEffect(now), key)
+	key := newTestCustodyKey("custody-75")
+	signed, err := key.signPrediction(testPredictionCustodyEffect(now))
 	if err != nil {
 		t.Fatal(err)
 	}
