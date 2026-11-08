@@ -18,6 +18,22 @@
       "transport_binding_digest": "sha256:dca9babcd44775f2c19ef571964c01e2e75b15254d0d16f2349c8d446f76c44c"
     },
     {
+      "name": "connect-https-path-prefix",
+      "security_mode": 1,
+      "max_request_bytes": 1048576,
+      "base_url": "https://provider.example/tos/rpc",
+      "boc_base64": "te6cckEBAgEAMAABFk5UQjEAAQEAEAAAAQBAaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3Rvcy9ycGNjbdQ9",
+      "transport_binding_digest": "sha256:0adfff160240151da85f3b6f97cad545c38f1a7ae31a0c169326cafe0ef5c427"
+    },
+    {
+      "name": "connect-loopback-path-prefix",
+      "security_mode": 0,
+      "max_request_bytes": 4096,
+      "base_url": "http://127.0.0.1:8080/rpc",
+      "boc_base64": "te6cckEBAgEAKQABFk5UQjEAAQAAABAAAQAyaHR0cDovLzEyNy4wLjAuMTo4MDgwL3JwY7J4Lyg=",
+      "transport_binding_digest": "sha256:4d13179f73bba9982acb78332c9515f91c3ac8da7111b155401996be32ae1f64"
+    },
+    {
       "name": "agent-packet-1mib",
       "security_mode": 2,
       "max_request_bytes": 1048576,
@@ -104,6 +120,62 @@
       "max_request_bytes": 0,
       "base_url": "https://provider.example",
       "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQEAAAAAAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxll8WThg=="
+    },
+    {
+      "name": "connect-https-path-trailing-slash",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/rpc/",
+      "boc_base64": "te6cckEBAgEALQABFk5UQjEAAQEAABAAAQA6aHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3JwYy8s64gW"
+    },
+    {
+      "name": "connect-https-path-query",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/rpc?x=1",
+      "boc_base64": "te6cckEBAgEAMAABFk5UQjEAAQEAABAAAQBAaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3JwYz94PTEA+8Yf"
+    },
+    {
+      "name": "connect-https-path-fragment",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/rpc#part",
+      "boc_base64": "te6cckEBAgEAMQABFk5UQjEAAQEAABAAAQBCaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3JwYyNwYXJ0mcVdpg=="
+    },
+    {
+      "name": "connect-https-userinfo",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://user@provider.example/rpc",
+      "boc_base64": "te6cckEBAgEAMQABFk5UQjEAAQEAABAAAQBCaHR0cHM6Ly91c2VyQHByb3ZpZGVyLmV4YW1wbGUvcnBjOeWZIg=="
+    },
+    {
+      "name": "connect-https-empty-segment",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example//rpc",
+      "boc_base64": "te6cckEBAgEALQABFk5UQjEAAQEAABAAAQA6aHR0cHM6Ly9wcm92aWRlci5leGFtcGxlLy9ycGMiJBxM"
+    },
+    {
+      "name": "connect-https-dot-segment",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/a/../rpc",
+      "boc_base64": "te6cckEBAgEAMQABFk5UQjEAAQEAABAAAQBCaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL2EvLi4vcnBjMCVktg=="
+    },
+    {
+      "name": "connect-https-escaped-path",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/r%20pc",
+      "boc_base64": "te6cckEBAgEALwABFk5UQjEAAQEAABAAAQA+aHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3IlMjBwY/Bn21U="
+    },
+    {
+      "name": "connect-loopback-path-trailing-slash",
+      "security_mode": 0,
+      "max_request_bytes": 4096,
+      "base_url": "http://127.0.0.1:8080/rpc/",
+      "boc_base64": "te6cckEBAgEAKgABFk5UQjEAAQAAABAAAQA0aHR0cDovLzEyNy4wLjAuMTo4MDgwL3JwYy+duU0e"
     },
     {
       "name": "connect-https-url-over-120-bytes",

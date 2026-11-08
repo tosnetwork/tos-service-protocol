@@ -56,6 +56,8 @@ func buildTransportVectors(t *testing.T) transportVectorFile {
 	}{
 		{"connect-https", TransportBindingV1{TransportHTTPS, 1 << 20, "https://provider.example"}},
 		{"connect-loopback", TransportBindingV1{TransportLoopbackHTTP, 16 << 20, "http://127.0.0.1:8080"}},
+		{"connect-https-path-prefix", TransportBindingV1{TransportHTTPS, 1 << 20, "https://provider.example/tos/rpc"}},
+		{"connect-loopback-path-prefix", TransportBindingV1{TransportLoopbackHTTP, 4096, "http://127.0.0.1:8080/rpc"}},
 		{"agent-packet-1mib", TransportBindingV1{TransportAgentPacket, MaxAgentPacketTransportRequestBytes, "agent-packet:" + provider}},
 		{"agent-packet-small", TransportBindingV1{TransportAgentPacket, 4096, "agent-packet:" + provider}},
 	} {
@@ -81,6 +83,14 @@ func buildTransportVectors(t *testing.T) transportVectorFile {
 		{"agent-packet-zero-bound", TransportBindingV1{TransportAgentPacket, 0, "agent-packet:" + provider}},
 		{"connect-https-over-16mib", TransportBindingV1{TransportHTTPS, 16<<20 + 1, "https://provider.example"}},
 		{"connect-https-zero-bound", TransportBindingV1{TransportHTTPS, 0, "https://provider.example"}},
+		{"connect-https-path-trailing-slash", TransportBindingV1{TransportHTTPS, 4096, "https://provider.example/rpc/"}},
+		{"connect-https-path-query", TransportBindingV1{TransportHTTPS, 4096, "https://provider.example/rpc?x=1"}},
+		{"connect-https-path-fragment", TransportBindingV1{TransportHTTPS, 4096, "https://provider.example/rpc#part"}},
+		{"connect-https-userinfo", TransportBindingV1{TransportHTTPS, 4096, "https://user@provider.example/rpc"}},
+		{"connect-https-empty-segment", TransportBindingV1{TransportHTTPS, 4096, "https://provider.example//rpc"}},
+		{"connect-https-dot-segment", TransportBindingV1{TransportHTTPS, 4096, "https://provider.example/a/../rpc"}},
+		{"connect-https-escaped-path", TransportBindingV1{TransportHTTPS, 4096, "https://provider.example/r%20pc"}},
+		{"connect-loopback-path-trailing-slash", TransportBindingV1{TransportLoopbackHTTP, 4096, "http://127.0.0.1:8080/rpc/"}},
 		{"connect-https-url-over-120-bytes", TransportBindingV1{TransportHTTPS, 4096, "https://" + strings.Repeat("a", 110) + ".example"}},
 	} {
 		root := rawTransportCell(value.v.SecurityMode, value.v.MaxRequestBytes, value.v.BaseURL)

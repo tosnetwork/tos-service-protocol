@@ -31,6 +31,24 @@ const (
 
 var agentPacketTransportPattern = regexp.MustCompile(`^agent-packet:agent_[0-9a-f]{64}$`)
 
+// transportPathPrefixPattern is the optional path prefix of a Connect base
+// URL: "/"-separated non-empty segments of RFC 3986 unreserved characters.
+var transportPathPrefixPattern = regexp.MustCompile(`^(/[A-Za-z0-9._~-]+)*$`)
+
+// validTransportPathPrefix admits an empty path or a canonical prefix with no
+// dot segments; the trailing slash is refused with the other bounds.
+func validTransportPathPrefix(path string) bool {
+	if !transportPathPrefixPattern.MatchString(path) {
+		return false
+	}
+	for _, segment := range strings.Split(path, "/")[1:] {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // AgentPacketTransportBinding returns the mode-2 binding that delivers work
 // to providerAgentID as Agent Packets, admitting at most maxRequestBytes of
 // inline input.
@@ -81,7 +99,7 @@ func validateTransportBinding(value TransportBindingV1) error {
 	}
 	parsed, err := url.Parse(value.BaseURL)
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" ||
-		parsed.Fragment != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.Opaque != "" ||
+		parsed.Fragment != "" || !validTransportPathPrefix(parsed.Path) || parsed.RawPath != "" || parsed.Opaque != "" ||
 		parsed.ForceQuery || parsed.String() != value.BaseURL || parsed.Host != strings.ToLower(parsed.Host) {
 		return errors.New("transport base URL is not canonical")
 	}

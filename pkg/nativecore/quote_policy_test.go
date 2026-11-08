@@ -27,6 +27,15 @@ func TestQuoteTransportBindingRejectsNonCanonicalOrInsecureEndpoints(t *testing.
 		{TransportHTTPS, 1024, "https://EXAMPLE.com"},
 		{TransportHTTPS, 1024, "https://example.com/"},
 		{TransportHTTPS, 0, "https://example.com"},
+		{TransportHTTPS, 1024, "https://example.com/rpc/"},
+		{TransportHTTPS, 1024, "https://example.com/rpc?x=1"},
+		{TransportHTTPS, 1024, "https://example.com/rpc#part"},
+		{TransportHTTPS, 1024, "https://user@example.com/rpc"},
+		{TransportHTTPS, 1024, "https://example.com//rpc"},
+		{TransportHTTPS, 1024, "https://example.com/a/../rpc"},
+		{TransportHTTPS, 1024, "https://example.com/./rpc"},
+		{TransportHTTPS, 1024, "https://example.com/r%20pc"},
+		{TransportLoopbackHTTP, 1024, "http://127.0.0.1:8080/rpc/"},
 	} {
 		if _, _, err := BuildTransportBindingCellV1(endpoint); err == nil {
 			t.Fatalf("accepted invalid transport binding %+v", endpoint)
@@ -81,5 +90,21 @@ func TestAgentPacketTransportBindingRefusesEveryOtherShape(t *testing.T) {
 	https := TransportBindingV1{TransportHTTPS, 1024, "https://provider.example"}
 	if _, err := https.AgentPacketRecipient(); err == nil {
 		t.Fatal("an HTTPS binding named an Agent Packet recipient")
+	}
+}
+
+func TestQuoteTransportBindingAcceptsACanonicalPathPrefix(t *testing.T) {
+	for _, endpoint := range []TransportBindingV1{
+		{TransportHTTPS, 1024, "https://example.com/rpc"},
+		{TransportHTTPS, 1024, "https://example.com:8443/tos/rpc-v1"},
+		{TransportLoopbackHTTP, 1024, "http://127.0.0.1:8080/rpc"},
+	} {
+		root, _, err := BuildTransportBindingCellV1(endpoint)
+		if err != nil {
+			t.Fatalf("refused canonical transport binding %+v: %v", endpoint, err)
+		}
+		if decoded, err := DecodeTransportBindingCellV1(root); err != nil || decoded != endpoint {
+			t.Fatalf("path prefix did not round-trip: %+v %v", decoded, err)
+		}
 	}
 }
