@@ -69,16 +69,17 @@ func TestAgentPacketTransportBindingRoundTrips(t *testing.T) {
 func TestAgentPacketTransportBindingRefusesEveryOtherShape(t *testing.T) {
 	provider := "agent_" + strings.Repeat("5a", 32)
 	for name, value := range map[string]TransportBindingV1{
-		"over 1 MiB":       {TransportAgentPacket, MaxAgentPacketTransportRequestBytes + 1, "agent-packet:" + provider},
-		"zero bound":       {TransportAgentPacket, 0, "agent-packet:" + provider},
-		"other prefix":     {TransportAgentPacket, 1024, "agent-packets:" + provider},
-		"upper hex":        {TransportAgentPacket, 1024, "agent-packet:agent_" + strings.Repeat("5A", 32)},
-		"short id":         {TransportAgentPacket, 1024, "agent-packet:agent_" + strings.Repeat("5a", 31)},
-		"trailing data":    {TransportAgentPacket, 1024, "agent-packet:" + provider + "x"},
-		"capability id":    {TransportAgentPacket, 1024, "agent-packet:cap_" + strings.Repeat("5a", 32)},
-		"https url":        {TransportAgentPacket, 1024, "https://provider.example"},
-		"unknown mode":     {3, 1024, "agent-packet:" + provider},
-		"https with agent": {TransportHTTPS, 1024, "agent-packet:" + provider},
+		"over 1 MiB":    {TransportAgentPacket, MaxAgentPacketTransportRequestBytes + 1, "agent-packet:" + provider},
+		"zero bound":    {TransportAgentPacket, 0, "agent-packet:" + provider},
+		"other prefix":  {TransportAgentPacket, 1024, "agent-packets:" + provider},
+		"upper hex":     {TransportAgentPacket, 1024, "agent-packet:agent_" + strings.Repeat("5A", 32)},
+		"short id":      {TransportAgentPacket, 1024, "agent-packet:agent_" + strings.Repeat("5a", 31)},
+		"trailing data": {TransportAgentPacket, 1024, "agent-packet:" + provider + "x"},
+		"capability id": {TransportAgentPacket, 1024, "agent-packet:cap_" + strings.Repeat("5a", 32)},
+		"https url":     {TransportAgentPacket, 1024, "https://provider.example"},
+		"unknown mode":  {3, 1024, "agent-packet:" + provider},
+		"unknown mode with a canonical HTTPS URL": {3, 1024, "https://provider.example"},
+		"https with agent":                        {TransportHTTPS, 1024, "agent-packet:" + provider},
 	} {
 		if _, _, err := BuildTransportBindingCellV1(value); err == nil {
 			t.Fatalf("%s: accepted %+v", name, value)

@@ -101,6 +101,13 @@
       "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQMAABAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWF1ZASG"
     },
     {
+      "name": "unknown-mode-3-https-url",
+      "security_mode": 3,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQMAABAAAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlDiGEtg=="
+    },
+    {
       "name": "agent-packet-zero-bound",
       "security_mode": 2,
       "max_request_bytes": 0,
