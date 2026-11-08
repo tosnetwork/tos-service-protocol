@@ -1,11 +1,9 @@
 package agentcommerce
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -173,18 +171,19 @@ func TestRealCustodySignsAndVerifiesFenceAndAction(t *testing.T) {
 	}
 }
 
-// The custody authorization key is separately pinned and stays Ed25519; the
-// Action Authority key is ML-DSA-44. One owner holds both: a custody effect
-// authorization that binds the ML-DSA-44 Writer Fence digest verifies under
-// the Ed25519 custody resolver, while the Ed25519 key text is never accepted
-// as an Action Authority key.
+// The custody authorization key and the Action Authority key are both
+// ML-DSA-44 but separately pinned and separated by context. One owner holds
+// both: a custody effect authorization that binds the Writer Fence digest
+// verifies under the custody resolver; the custody key is not an Action
+// Authority key; and even one key that is trusted for both refuses a custody
+// proof as an Action Authority signature and the reverse.
 func TestCustodyKeyAndActionAuthorityKeyAreSeparate(t *testing.T) {
 	f := newAuthorityFixture(t)
 	fenceDigest, err := WriterFenceDigest(f.fence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	custodyKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x72}, ed25519.SeedSize))
+	custodyKey := newTestCustodyKey("custody-72")
 	domain := &CustodyNetworkDomain{NetworkID: "tos:test", GlobalID: -3,
 		ZeroStateRootHash: "sha256:" + strings.Repeat("a", 64),
 		ZeroStateFileHash: "sha256:" + strings.Repeat("b", 64), WorkchainID: 0}
@@ -198,22 +197,43 @@ func TestCustodyKeyAndActionAuthorityKeyAreSeparate(t *testing.T) {
 		Destination: "0:" + strings.Repeat("7", 64), AmountNanoTOS: 100_000_000,
 		BodyHash: "tvm-cell-sha256:" + strings.Repeat("8", 64), StateInitHashOrZero: custodyNoStateInit,
 		ExpiresAtUnix: uint64(f.now.Add(time.Minute).Unix())}
-	signed, err := SignCustodyEffectAuthorization(value, custodyKey)
+	signed, err := custodyKey.signEffect(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyRelayCustodyEffectAuthorization(signed, custodyEffectResolver{key: custodyKey.Public().(ed25519.PublicKey)}, f.now); err != nil {
-		t.Fatalf("custody authorization under the separate Ed25519 custody key was refused: %v", err)
+	if err := VerifyRelayCustodyEffectAuthorization(signed, custodyKey.pinnedForAny(), f.now); err != nil {
+		t.Fatalf("custody authorization under the separate custody key was refused: %v", err)
 	}
 	if err := f.verify(f.action, f.fence, f.authority.resolver); err != nil {
 		t.Fatalf("the ML-DSA-44 action of the same owner was refused: %v", err)
 	}
-	if _, err := ParseActionAuthorityKeyID(signed.PublicKey); !errors.Is(err, ErrEd25519ActionAuthority) {
-		t.Fatalf("the Ed25519 custody key was not refused as an Action Authority key: %v", err)
+	if signed.KeyID == f.fence.KeyID {
+		t.Fatal("the custody key and the Action Authority key are the same key")
 	}
 	fence := f.fence
-	fence.KeyID = signed.PublicKey
-	if err := VerifyWriterFence(fence, f.authority.resolver, f.now, "agreement.propose"); !errors.Is(err, ErrEd25519ActionAuthority) {
-		t.Fatalf("a fence naming the Ed25519 custody key was not refused: %v", err)
+	fence.KeyID = signed.KeyID
+	if err := VerifyWriterFence(fence, f.authority.resolver, f.now, "agreement.propose"); err == nil {
+		t.Fatal("a fence naming the custody key was accepted by the Action Authority resolver")
+	}
+	preimage, err := CustodyEffectAuthorizationPreimage(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(preimage)
+	both := mldsa44test.ActionAuthorityResolver{Verifier: custodyKey.fake,
+		Keys: map[string][][]byte{"authority:test": {custodyKey.publicKey()}}}
+	if err := VerifyActionAuthoritySignature(both, "authority:test", signed.KeyID, signed.Proof, digest[:], f.now); err == nil {
+		t.Fatal("a custody proof verified as an Action Authority signature")
+	}
+	actionSigned, err := custodyKey.fake.Sign(context.Background(), custodyKey.controller, mldsa44.UseActionAuthority, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := signed
+	if swapped.Proof, err = mldsa44.SignatureText(actionSigned.Signature); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRelayCustodyEffectAuthorization(swapped, custodyKey.pinnedForAny(), f.now); err == nil {
+		t.Fatal("an Action Authority signature verified as a custody authorization")
 	}
 }

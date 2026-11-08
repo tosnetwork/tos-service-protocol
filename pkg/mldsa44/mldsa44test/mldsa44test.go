@@ -288,3 +288,42 @@ func (r ActionAuthorityResolver) ResolveActionAuthorityKey(authorityID string, k
 	}
 	return nil, errors.New("Action Authority key is not authorized for this authority")
 }
+
+// CustodyPrincipal names the exact authority, owner and Agent a custody
+// authorization key is pinned for.
+type CustodyPrincipal struct {
+	AuthorityID string
+	OwnerID     string
+	AgentID     string
+}
+
+// CustodyAuthorizationResolver is a test custody authorization resolver. It
+// returns a key only when that key is pinned for the exact principal, and it
+// verifies through Verifier (Fake for logic tests, a real helper for byte
+// checks).
+type CustodyAuthorizationResolver struct {
+	Verifier mldsa44.Verifier
+	Keys     map[CustodyPrincipal][]byte
+}
+
+// Verify implements mldsa44.Verifier through the configured verifier.
+func (r CustodyAuthorizationResolver) Verify(ctx context.Context, use mldsa44.Use, payload, publicKey, signature []byte) error {
+	if r.Verifier == nil {
+		return mldsa44.ErrUnavailable
+	}
+	return r.Verifier.Verify(ctx, use, payload, publicKey, signature)
+}
+
+// ResolveCustodyAuthorizationKey returns the key pinned for the principal when
+// its key ID is keyID.
+func (r CustodyAuthorizationResolver) ResolveCustodyAuthorizationKey(authorityID, ownerID, agentID string,
+	keyID [mldsa44.KeyIDSize]byte, _ time.Time) ([]byte, error) {
+	key, found := r.Keys[CustodyPrincipal{AuthorityID: authorityID, OwnerID: ownerID, AgentID: agentID}]
+	if !found {
+		return nil, errors.New("no custody authorization key is pinned for this principal")
+	}
+	if id, err := mldsa44.KeyID(key); err != nil || id != keyID {
+		return nil, errors.New("custody authorization key ID is not the pinned key")
+	}
+	return append([]byte(nil), key...), nil
+}

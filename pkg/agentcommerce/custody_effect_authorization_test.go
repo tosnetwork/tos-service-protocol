@@ -1,28 +1,16 @@
 package agentcommerce
 
 import (
-	"bytes"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"testing"
 	"time"
 )
 
-type custodyEffectResolver struct{ key ed25519.PublicKey }
-
-func (resolver custodyEffectResolver) AuthorizeCustodyKey(_, _, _ string, key ed25519.PublicKey, _ time.Time) error {
-	if !resolver.key.Equal(key) {
-		return errors.New("wrong custody key")
-	}
-	return nil
-}
-
 func TestCustodyEffectAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x71}, ed25519.SeedSize))
+	key := newTestCustodyKey("custody-71")
 	domain := &CustodyNetworkDomain{NetworkID: "tos:test", GlobalID: -3,
 		ZeroStateRootHash: "sha256:" + strings.Repeat("a", 64),
 		ZeroStateFileHash: "sha256:" + strings.Repeat("b", 64), WorkchainID: 0}
@@ -36,11 +24,11 @@ func TestCustodyEffectAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 		Destination: "0:" + strings.Repeat("7", 64), AmountNanoTOS: 100_000_000,
 		BodyHash: "tvm-cell-sha256:" + strings.Repeat("8", 64), StateInitHashOrZero: custodyNoStateInit,
 		ExpiresAtUnix: uint64(now.Add(time.Minute).Unix())}
-	signed, err := SignCustodyEffectAuthorization(value, key)
+	signed, err := key.signEffect(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := custodyEffectResolver{key: key.Public().(ed25519.PublicKey)}
+	resolver := key.pinnedForAny()
 	if err := VerifyRelayCustodyEffectAuthorization(signed, resolver, now); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +51,7 @@ func TestCustodyEffectAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	legacy := signed
 	legacy.SchemaVersion = 1
 	legacy.NetworkDomain = nil
-	legacy, err = SignCustodyEffectAuthorization(legacy, key)
+	legacy, err = key.signEffect(legacy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +62,7 @@ func TestCustodyEffectAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 
 func TestCustodyEffectAuthorizationBindsExactTVMEffect(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
-	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x71}, ed25519.SeedSize))
+	key := newTestCustodyKey("custody-71")
 	value := CustodyEffectAuthorization{SchemaVersion: 1, AuthorityID: "authority:one", OwnerID: "owner:one", AgentID: "agent:buyer",
 		SourceAccount: "0:" + strings.Repeat("1", 64), NetworkID: "tos:test", NetworkGlobalID: -3,
 		ActionKind: "payment.direct", StableActionID: "sha256:" + strings.Repeat("2", 64), ExactRequestDigest: "sha256:" + strings.Repeat("3", 64),
@@ -84,11 +72,11 @@ func TestCustodyEffectAuthorizationBindsExactTVMEffect(t *testing.T) {
 		Destination: "0:" + strings.Repeat("7", 64), AmountNanoTOS: 100_000_000,
 		BodyHash: "tvm-cell-sha256:" + strings.Repeat("8", 64), StateInitHashOrZero: custodyNoStateInit,
 		ExpiresAtUnix: uint64(now.Add(time.Minute).Unix())}
-	signed, err := SignCustodyEffectAuthorization(value, key)
+	signed, err := key.signEffect(value)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := custodyEffectResolver{key: key.Public().(ed25519.PublicKey)}
+	resolver := key.pinnedForAny()
 	if err := VerifyCustodyEffectAuthorization(signed, resolver, now); err != nil {
 		t.Fatal(err)
 	}

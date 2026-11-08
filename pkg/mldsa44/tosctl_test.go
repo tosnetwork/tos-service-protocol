@@ -427,6 +427,52 @@ func TestActionAuthorityUseIsSeparateAndExactlyThirtyTwoBytes(t *testing.T) {
 	}
 }
 
+// A custody-authorization signature covers exactly a 32-byte digest under
+// TOS-CUSTODY-AUTHORIZATION-V1: it verifies only as custody-authorization, in
+// particular never as action-authority, and no other use's signature over the
+// same bytes verifies as custody-authorization.
+func TestCustodyAuthorizationUseIsSeparateAndExactlyThirtyTwoBytes(t *testing.T) {
+	if context, err := mldsa44.UseCustodyAuthorization.Context(); err != nil || context != "TOS-CUSTODY-AUTHORIZATION-V1" {
+		t.Fatalf("custody-authorization context = %q, %v", context, err)
+	}
+	custody := mldsa44test.NewCustody(t, "custody")
+	helper := mldsa44test.RequireTosctl(t)
+	ctx := context.Background()
+	digest := sha256.Sum256([]byte("custody authorization preimage"))
+	signed, err := custody.Signer.Sign(ctx, "custody", mldsa44.UseCustodyAuthorization, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := helper.Verify(ctx, mldsa44.UseCustodyAuthorization, digest[:], signed.PublicKey, signed.Signature); err != nil {
+		t.Fatalf("custody-authorization signature refused: %v", err)
+	}
+	for _, other := range []mldsa44.Use{mldsa44.UseAgentPacket, mldsa44.UseAgentContact, mldsa44.UseAgentGuarantor,
+		mldsa44.UseActionAuthority} {
+		if err := helper.Verify(ctx, other, digest[:], signed.PublicKey, signed.Signature); !errors.Is(err, mldsa44.ErrInvalidSignature) {
+			t.Fatalf("custody-authorization signature verified as %s: %v", other, err)
+		}
+		foreign, err := custody.Signer.Sign(ctx, "custody", other, digest[:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := helper.Verify(ctx, mldsa44.UseCustodyAuthorization, digest[:], foreign.PublicKey, foreign.Signature); !errors.Is(err, mldsa44.ErrInvalidSignature) {
+			t.Fatalf("%s signature verified as custody-authorization: %v", other, err)
+		}
+	}
+	for _, size := range []int{0, 31, 33} {
+		message := make([]byte, size)
+		if _, err := custody.Signer.Sign(ctx, "custody", mldsa44.UseCustodyAuthorization, message); !errors.Is(err, mldsa44.ErrMalformed) {
+			t.Fatalf("%d-byte custody-authorization message signed: %v", size, err)
+		}
+		if err := helper.Verify(ctx, mldsa44.UseCustodyAuthorization, message, signed.PublicKey, signed.Signature); !errors.Is(err, mldsa44.ErrMalformed) {
+			t.Fatalf("%d-byte custody-authorization message verified: %v", size, err)
+		}
+	}
+	if err := mldsa44.CheckMessage(mldsa44.UseCustodyAuthorization, digest[:]); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The signature text form is exactly mldsa44: and the canonical unpadded
 // URL-safe Base64 of 2,420 bytes.
 func TestSignatureTextIsCanonical(t *testing.T) {

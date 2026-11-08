@@ -2,10 +2,9 @@ package agentcommerce
 
 import (
 	"bytes"
-	"crypto/ed25519"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tosutils-go/address"
 )
 
@@ -77,7 +77,7 @@ type PredictionCustodyEffectAuthorizationV1 struct {
 	AmountNanoTOS    uint64 `json:"amount_nanotos"`
 	BodyHash         string `json:"body_hash"`
 	ExpiresAtUnix    uint64 `json:"expires_at_unix"`
-	PublicKey        string `json:"public_key"`
+	KeyID            string `json:"key_id"`
 	Proof            string `json:"proof"`
 }
 
@@ -86,22 +86,25 @@ func IsPredictionCustodyEffectKind(kind string) bool {
 	return ok
 }
 
+// SignPredictionCustodyEffectAuthorizationV1 signs the Prediction effect with
+// the custody authorization controller that key custody holds under
+// `controller` and fills its key ID and proof.
 func SignPredictionCustodyEffectAuthorizationV1(
+	ctx context.Context,
 	body PredictionCustodyEffectAuthorizationV1,
-	privateKey ed25519.PrivateKey,
+	signer mldsa44.Signer,
+	controller string,
 ) (PredictionCustodyEffectAuthorizationV1, error) {
-	if len(privateKey) != ed25519.PrivateKeySize {
-		return PredictionCustodyEffectAuthorizationV1{}, errors.New("prediction custody signing key is invalid")
-	}
-	body.PublicKey, body.Proof = "", ""
+	body.KeyID, body.Proof = "", ""
 	preimage, err := predictionCustodyEffectPreimageV1(body)
 	if err != nil {
 		return PredictionCustodyEffectAuthorizationV1{}, err
 	}
-	digest := sha256.Sum256(preimage)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-	body.PublicKey = "ed25519:" + hex.EncodeToString(publicKey)
-	body.Proof = "ed25519:" + hex.EncodeToString(ed25519.Sign(privateKey, digest[:]))
+	keyID, proof, err := signCustodyDigest(ctx, signer, controller, sha256.Sum256(preimage))
+	if err != nil {
+		return PredictionCustodyEffectAuthorizationV1{}, err
+	}
+	body.KeyID, body.Proof = keyID, proof
 	return body, nil
 }
 
@@ -113,26 +116,15 @@ func VerifyPredictionCustodyEffectAuthorizationV1(
 	if resolver == nil || now.Unix() < 0 || uint64(now.Unix()) >= value.ExpiresAtUnix {
 		return errors.New("prediction custody effect is expired or has no authority resolver")
 	}
-	publicKey, err := parseEd25519PublicKey(value.PublicKey)
-	if err != nil {
-		return err
-	}
-	if err := resolver.AuthorizeCustodyKey(value.AuthorityID, value.OwnerID, value.AgentID, publicKey, now); err != nil {
-		return err
-	}
-	proof, err := parseHexEd25519Signature(value.Proof)
-	if err != nil {
-		return err
-	}
 	body := value
-	body.PublicKey, body.Proof = "", ""
+	body.KeyID, body.Proof = "", ""
 	preimage, err := predictionCustodyEffectPreimageV1(body)
 	if err != nil {
 		return err
 	}
-	digest := sha256.Sum256(preimage)
-	if !ed25519.Verify(publicKey, digest[:], proof) {
-		return errors.New("prediction custody effect proof is invalid")
+	if err := verifyCustodyDigest(resolver, value.AuthorityID, value.OwnerID, value.AgentID, value.KeyID, value.Proof,
+		sha256.Sum256(preimage), now); err != nil {
+		return fmt.Errorf("prediction custody effect proof is invalid: %w", err)
 	}
 	return nil
 }
@@ -140,7 +132,7 @@ func VerifyPredictionCustodyEffectAuthorizationV1(
 func PredictionCustodyEffectAuthorizationPreimageV1(
 	value PredictionCustodyEffectAuthorizationV1,
 ) ([]byte, error) {
-	value.PublicKey, value.Proof = "", ""
+	value.KeyID, value.Proof = "", ""
 	return predictionCustodyEffectPreimageV1(value)
 }
 
@@ -162,10 +154,10 @@ func DecodePredictionCustodyEffectAuthorizationV1JSON(
 	if _, err := predictionCustodyEffectPreimageV1(value); err != nil {
 		return PredictionCustodyEffectAuthorizationV1{}, err
 	}
-	if _, err := parseEd25519PublicKey(value.PublicKey); err != nil {
+	if _, err := ParseCustodyAuthorizationKeyID(value.KeyID); err != nil {
 		return PredictionCustodyEffectAuthorizationV1{}, err
 	}
-	if _, err := parseHexEd25519Signature(value.Proof); err != nil {
+	if _, err := ParseCustodyAuthorizationSignature(value.Proof); err != nil {
 		return PredictionCustodyEffectAuthorizationV1{}, err
 	}
 	return value, nil

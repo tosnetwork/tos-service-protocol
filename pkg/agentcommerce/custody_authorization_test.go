@@ -1,28 +1,15 @@
 package agentcommerce
 
 import (
-	"bytes"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"testing"
 	"time"
 )
 
-type pinnedCustodyKey struct{ key ed25519.PublicKey }
-
-func (p pinnedCustodyKey) AuthorizeCustodyKey(authorityID, ownerID, agentID string, key ed25519.PublicKey, _ time.Time) error {
-	if authorityID != "authority:owner" || ownerID != "owner:1" || agentID != "agent:buyer" || !bytes.Equal(key, p.key) {
-		return errors.New("custody key is not pinned")
-	}
-	return nil
-}
-
 func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
-	seed := bytes.Repeat([]byte{0x63}, ed25519.SeedSize)
-	privateKey := ed25519.NewKeyFromSeed(seed)
+	privateKey := newTestCustodyKey("custody-63")
 	now := time.Unix(1_800_000_000, 0).UTC()
 	domain := &CustodyNetworkDomain{NetworkID: "tos:testnet", GlobalID: 42,
 		ZeroStateRootHash: "sha256:" + strings.Repeat("a", 64),
@@ -34,18 +21,18 @@ func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 		MandateDigest: "sha256:" + strings.Repeat("4", 64), ApprovalDigestOrZero: "sha256:" + strings.Repeat("0", 64),
 		AgreementBodyDigest: "sha256:" + strings.Repeat("5", 64), ObligationInstanceID: "sha256:" + strings.Repeat("6", 64),
 		Destination: "0:destination", AmountAtomic: 50, ExpiresAtUnix: uint64(now.Unix() + 60)}
-	signed, err := SignCustodyActionAuthorization(body, privateKey)
+	signed, err := privateKey.signPayment(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := pinnedCustodyKey{privateKey.Public().(ed25519.PublicKey)}
+	resolver := privateKey.pinnedFor("authority:owner", "owner:1", "agent:buyer")
 	if err := VerifyRelayCustodyActionAuthorization(signed, resolver, now); err != nil {
 		t.Fatal(err)
 	}
 	uppercaseProof := signed
-	uppercaseProof.Proof = "ed25519:" + strings.ToUpper(strings.TrimPrefix(signed.Proof, "ed25519:"))
+	uppercaseProof.Proof = signed.Proof + "="
 	if err := VerifyRelayCustodyActionAuthorization(uppercaseProof, resolver, now); err == nil {
-		t.Fatal("custody authorization accepted a non-canonical uppercase Ed25519 proof")
+		t.Fatal("custody authorization accepted a padded, non-canonical proof")
 	}
 	preimage, err := CustodyActionAuthorizationPreimage(signed)
 	if err != nil {
@@ -58,7 +45,7 @@ func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	v3 := body
 	v3.SchemaVersion = 3
 	v3.AgreementPaymentRequestDigest = "sha256:" + strings.Repeat("7", 64)
-	signedV3, err := SignCustodyActionAuthorization(v3, privateKey)
+	signedV3, err := privateKey.signPayment(v3)
 	if err != nil {
 		t.Fatalf("schema-v3 payment-request binding was rejected: %v", err)
 	}
@@ -77,7 +64,7 @@ func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	sponsorshipV3.SponsorshipFinalityProfileCBORDigest = "sha256:" + strings.Repeat("8", 64)
 	sponsorshipV3.SponsorshipReleaseProfileDigest = "sha256:" + strings.Repeat("9", 64)
 	sponsorshipV3.SponsorshipCorroborationSnapshotIdentity = "sha256:" + strings.Repeat("a", 64)
-	signedSponsorshipV3, err := SignCustodyActionAuthorization(sponsorshipV3, privateKey)
+	signedSponsorshipV3, err := privateKey.signPayment(sponsorshipV3)
 	if err != nil {
 		t.Fatalf("schema-v3 sponsorship binding was rejected: %v", err)
 	}
@@ -96,7 +83,7 @@ func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	}
 	partialSponsorship := v3
 	partialSponsorship.SponsorshipFinalityProfileCBORDigest = "sha256:" + strings.Repeat("8", 64)
-	if _, err := SignCustodyActionAuthorization(partialSponsorship, privateKey); err == nil {
+	if _, err := privateKey.signPayment(partialSponsorship); err == nil {
 		t.Fatal("partial sponsorship custody binding was accepted")
 	}
 	mutatedPayment := signedV3
@@ -106,7 +93,7 @@ func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	}
 	missingPayment := body
 	missingPayment.SchemaVersion = 3
-	if _, err := SignCustodyActionAuthorization(missingPayment, privateKey); err == nil {
+	if _, err := privateKey.signPayment(missingPayment); err == nil {
 		t.Fatal("schema-v3 custody authorization omitted its payment-request digest")
 	}
 
@@ -145,7 +132,7 @@ func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	legacy := signed
 	legacy.SchemaVersion = 1
 	legacy.NetworkDomain = nil
-	legacy, err = SignCustodyActionAuthorization(legacy, privateKey)
+	legacy, err = privateKey.signPayment(legacy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,14 +148,13 @@ func TestCustodyActionAuthorizationV2BindsFullNetworkDomain(t *testing.T) {
 	zeroDomain.GlobalID = 0
 	zeroGlobal.NetworkGlobalID = 0
 	zeroGlobal.NetworkDomain = &zeroDomain
-	if _, err := SignCustodyActionAuthorization(zeroGlobal, privateKey); err == nil {
+	if _, err := privateKey.signPayment(zeroGlobal); err == nil {
 		t.Fatal("zero global ID entered a domain-bound custody authorization")
 	}
 }
 
 func TestCustodyAuthorizationBindsWriterAgreementAndTransfer(t *testing.T) {
-	seed := bytes.Repeat([]byte{0x63}, ed25519.SeedSize)
-	privateKey := ed25519.NewKeyFromSeed(seed)
+	privateKey := newTestCustodyKey("custody-63")
 	now := time.Unix(1_800_000_000, 0)
 	body := CustodyActionAuthorization{SchemaVersion: 1, AuthorityID: "authority:owner", OwnerID: "owner:1", AgentID: "agent:buyer",
 		SourceAccount: "-1:source", NetworkID: "tos:testnet", NetworkGlobalID: 42,
@@ -177,21 +163,21 @@ func TestCustodyAuthorizationBindsWriterAgreementAndTransfer(t *testing.T) {
 		MandateDigest: "sha256:" + strings.Repeat("4", 64), ApprovalDigestOrZero: "sha256:" + strings.Repeat("0", 64),
 		AgreementBodyDigest: "sha256:" + strings.Repeat("5", 64), ObligationInstanceID: "sha256:" + strings.Repeat("6", 64),
 		Destination: "0:destination", AmountAtomic: 50, ExpiresAtUnix: uint64(now.Unix() + 60)}
-	signed, err := SignCustodyActionAuthorization(body, privateKey)
+	signed, err := privateKey.signPayment(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyCustodyActionAuthorization(signed, pinnedCustodyKey{privateKey.Public().(ed25519.PublicKey)}, now); err != nil {
+	if err := VerifyCustodyActionAuthorization(signed, privateKey.pinnedFor("authority:owner", "owner:1", "agent:buyer"), now); err != nil {
 		t.Fatal(err)
 	}
 	mutated := signed
 	mutated.AmountAtomic++
-	if err := VerifyCustodyActionAuthorization(mutated, pinnedCustodyKey{privateKey.Public().(ed25519.PublicKey)}, now); err == nil {
+	if err := VerifyCustodyActionAuthorization(mutated, privateKey.pinnedFor("authority:owner", "owner:1", "agent:buyer"), now); err == nil {
 		t.Fatal("changed transfer retained custody authorization")
 	}
 	mutated = signed
 	mutated.WriterGeneration++
-	if err := VerifyCustodyActionAuthorization(mutated, pinnedCustodyKey{privateKey.Public().(ed25519.PublicKey)}, now); err == nil {
+	if err := VerifyCustodyActionAuthorization(mutated, privateKey.pinnedFor("authority:owner", "owner:1", "agent:buyer"), now); err == nil {
 		t.Fatal("changed writer generation retained custody authorization")
 	}
 }

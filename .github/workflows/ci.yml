@@ -13,7 +13,7 @@ env:
   # check real ML-DSA-44 bytes fail, rather than skip, without it. Repin when
   # the helper lands on the tos main branch.
   TOS_HELPER_REPOSITORY: tosnetwork/tos
-  TOS_HELPER_COMMIT: aae43390a5e4b8ae8223581a51e7864664d74f2a
+  TOS_HELPER_COMMIT: 03b55553822c562f3f5f43050b1fb7d86bb351d2
 
 jobs:
   test:
