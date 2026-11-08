@@ -14,6 +14,14 @@ the rail to name exactly the actor, code hash and attestor of manifest key 21,
 and proves the proposal can be encoded by the canonical Accepted Quote
 builder.
 
+The transport binding has three security modes: `0` Connect RPC over
+loopback HTTP, `1` Connect RPC over HTTPS, and `2` Agent Packet V1 carried by
+the Messenger to the Capability owner Agent. A mode-2 base URL is exactly
+`agent-packet:agent_<64 lowercase hex>` and must name the proposal's provider
+Agent; its `max_request_bytes` is the inline work input a buyer may deliver
+and is at most 1 MiB. `pkg/nativecore/testdata/transport-binding-v1-vectors.json`
+holds the frozen encodings of every mode and refused shapes.
+
 The `terms_hash` preimage is the actor's finalized policy, not package data:
 a Gateway cannot make a proposal canonical. The buyer verifies every rail
 field against finalized state before calling, and only the finalized Service

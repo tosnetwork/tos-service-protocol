@@ -5,19 +5,51 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
 
 const (
-	transportBindingMagic  = 0x4e544231 // NTB1
-	quotePreimageSchema    = 1
-	TransportLoopbackHTTP  = 0
-	TransportHTTPS         = 1
+	transportBindingMagic = 0x4e544231 // NTB1
+	quotePreimageSchema   = 1
+	TransportLoopbackHTTP = 0
+	TransportHTTPS        = 1
+	// TransportAgentPacket is Agent Packet V1 carried by the Messenger to the
+	// Capability owner Agent. Its base URL names that Agent and nothing else;
+	// there is no HTTP endpoint or Connect service.
+	TransportAgentPacket   = 2
 	maxTransportURLBytes   = 120
 	maxTransportRequestLen = 16 << 20
+	// MaxAgentPacketTransportRequestBytes bounds the inline work input a
+	// buyer may deliver over Agent Packets: the Agent Packet payload bound.
+	MaxAgentPacketTransportRequestBytes = 1 << 20
+	// AgentPacketTransportPrefix starts a mode-2 base URL.
+	AgentPacketTransportPrefix = "agent-packet:"
 )
+
+var agentPacketTransportPattern = regexp.MustCompile(`^agent-packet:agent_[0-9a-f]{64}$`)
+
+// AgentPacketTransportBinding returns the mode-2 binding that delivers work
+// to providerAgentID as Agent Packets, admitting at most maxRequestBytes of
+// inline input.
+func AgentPacketTransportBinding(providerAgentID string, maxRequestBytes uint32) (TransportBindingV1, error) {
+	value := TransportBindingV1{SecurityMode: TransportAgentPacket, MaxRequestBytes: maxRequestBytes,
+		BaseURL: AgentPacketTransportPrefix + providerAgentID}
+	if err := validateTransportBinding(value); err != nil {
+		return TransportBindingV1{}, err
+	}
+	return value, nil
+}
+
+// AgentPacketRecipient returns the provider Agent a mode-2 binding names.
+func (value TransportBindingV1) AgentPacketRecipient() (string, error) {
+	if value.SecurityMode != TransportAgentPacket || validateTransportBinding(value) != nil {
+		return "", errors.New("transport binding is not a valid Agent Packet binding")
+	}
+	return strings.TrimPrefix(value.BaseURL, AgentPacketTransportPrefix), nil
+}
 
 type TransportBindingV1 struct {
 	SecurityMode    uint8
@@ -37,6 +69,15 @@ func validateTransportBinding(value TransportBindingV1) error {
 	if value.MaxRequestBytes == 0 || value.MaxRequestBytes > maxTransportRequestLen ||
 		!validProtocolText(value.BaseURL, maxTransportURLBytes) || strings.HasSuffix(value.BaseURL, "/") {
 		return errors.New("invalid transport binding bounds")
+	}
+	if value.SecurityMode == TransportAgentPacket {
+		if value.MaxRequestBytes > MaxAgentPacketTransportRequestBytes {
+			return errors.New("Agent Packet transport admits at most 1 MiB of inline input")
+		}
+		if !agentPacketTransportPattern.MatchString(value.BaseURL) {
+			return errors.New("Agent Packet transport must name exactly agent-packet:agent_<64 lowercase hex>")
+		}
+		return nil
 	}
 	parsed, err := url.Parse(value.BaseURL)
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" ||
