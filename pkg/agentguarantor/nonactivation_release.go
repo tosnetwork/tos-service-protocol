@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const NonActivationExposureReleaseDomainV1 = "tos.service.agent-guarantor-non-activation-exposure-release-envelope.v1"
@@ -50,7 +49,7 @@ func NonActivationExposureReleaseReceiptDigestV1(value AuthorizedNonActivationEx
 	if value.Body.SchemaVersion != 1 || value.Body.State != "released" || len(value.Authorizations) == 0 {
 		return "", errors.New("non-activation exposure release receipt is invalid")
 	}
-	return codec.Digest(NonActivationExposureReleaseDomainV1, value)
+	return guarantorCodec.Digest(NonActivationExposureReleaseDomainV1, value)
 }
 
 func VerifyNonActivationExposureReleaseReceiptV1(value AuthorizedNonActivationExposureReleaseReceiptV1,
@@ -100,7 +99,7 @@ func VerifyNonActivationExposureReleaseReceiptV1(value AuthorizedNonActivationEx
 		authorityResolver, fenceResolver, now); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-non-activation-exposure-release-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-non-activation-exposure-release-body.v1", body)
 	return ValidateAuthorizationSet(value.Authorizations, "non-activation-exposure-release-receipt", bodyDigest,
 		"tos.service.agent-guarantor-non-activation-exposure-release-signature.v1",
 		[]string{offer.Body.GuarantorAgentID}, authorityResolver, now)

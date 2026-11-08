@@ -109,6 +109,21 @@ func main() {
 		{Name: "guarantor-domain-bound-payout", ActionKind: actionKind, Fields: semanticFields,
 			StableActionID: stableActionID, PreimageHex: hex.EncodeToString(semanticPreimage)},
 	}
+	sizeVectors, err := guarantor.ReleasedSizeVectorsV1()
+	if err != nil {
+		fatal(err)
+	}
+	sizeLimits := struct {
+		CanonicalBytes        int                      `json:"canonical_bytes"`
+		StringBytes           int                      `json:"string_bytes"`
+		JSONBytes             int                      `json:"json_bytes"`
+		DefaultCanonicalBytes int                      `json:"default_canonical_bytes"`
+		DefaultStringBytes    int                      `json:"default_string_bytes"`
+		Domain                string                   `json:"domain"`
+		Vectors               []guarantor.SizeVectorV1 `json:"vectors"`
+	}{guarantor.GuarantorCodecLimitsV1.CanonicalBytes, guarantor.GuarantorCodecLimitsV1.StringBytes,
+		guarantor.GuarantorCodecLimitsV1.JSONBytes, codec.MaxCanonicalBytes, codec.MaxStringBytes,
+		guarantor.SizeVectorDomainV1, sizeVectors}
 	document := struct {
 		Schema                        string                               `json:"schema"`
 		ProfileURI                    string                               `json:"profile_uri"`
@@ -123,10 +138,11 @@ func main() {
 		CoverageStateVectors          interface{}                          `json:"coverage_state_vectors"`
 		SemanticActionVectors         interface{}                          `json:"semantic_action_vectors"`
 		NativeAuthorizationVectors    interface{}                          `json:"native_authorization_vectors"`
+		GuarantorSizeLimits           interface{}                          `json:"guarantor_size_limits"`
 	}{"tos.service.agent-guarantor-conformance-fixture.v1", guarantor.ProfileURI,
 		commerce.CommerceProfileEventContentType, guarantor.ReleasedCommerceCarriageObjectsV1(), objects,
 		hex.EncodeToString(objectCanonical), objectDigest, mutations, hex.EncodeToString(mutationCanonical), mutationDigest,
-		stateVectors, actionVectors, nativeVectors}
+		stateVectors, actionVectors, nativeVectors, sizeLimits}
 	var writer io.Writer = os.Stdout
 	var file *os.File
 	if *output != "" {

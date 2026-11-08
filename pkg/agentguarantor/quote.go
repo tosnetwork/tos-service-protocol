@@ -6,14 +6,13 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 func RequestedCoverageTermsDigest(terms RequestedCoverageTermsV1) (string, error) {
 	if err := ValidateRequestedCoverageTerms(terms); err != nil {
 		return "", err
 	}
-	return codec.Digest(RequestedTermsDomain, terms)
+	return guarantorCodec.Digest(RequestedTermsDomain, terms)
 }
 
 func ValidateRequestedCoverageTerms(terms RequestedCoverageTermsV1) error {
@@ -134,7 +133,7 @@ func QuoteRequestDigest(request AuthorizedCoverageQuoteRequestV1) (string, error
 	if err := validateQuoteRequestShape(request); err != nil {
 		return "", err
 	}
-	return codec.Digest(QuoteRequestDomain, request)
+	return guarantorCodec.Digest(QuoteRequestDomain, request)
 }
 
 func VerifyQuoteRequest(request AuthorizedCoverageQuoteRequestV1, profile ServiceProfileV1, resolver AuthorityKeyResolver,
@@ -158,7 +157,7 @@ func VerifyQuoteRequest(request AuthorizedCoverageQuoteRequestV1, profile Servic
 		body.CoveredObligationIDs, now); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-quote-request-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-quote-request-body.v1", body)
 	return ValidateAuthorizationSet(request.Authorizations, "coverage-quote-request", bodyDigest,
 		"tos.service.agent-guarantor-quote-request-signature.v1", []string{body.RequesterAgentID}, resolver, now)
 }
@@ -205,7 +204,7 @@ func profileSupportsRequest(profile ServiceProfileV1, terms RequestedCoverageTer
 	}
 	claimFound := false
 	for _, claim := range profile.ClaimProfiles {
-		digest, _ := codec.Digest("tos.service.agent-guarantor-claim-profile.v1", claim)
+		digest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-claim-profile.v1", claim)
 		if digest == terms.SelectedClaimProfileDigest && claim.TriggerProfile == terms.ClaimTriggerProfile &&
 			claim.EvidenceProfile == terms.ClaimEvidenceProfile && claim.DecisionProfile == decisionProfile &&
 			terms.MaximumClaims <= claim.MaximumClaims &&
@@ -228,7 +227,7 @@ func profileSupportsRequest(profile ServiceProfileV1, terms RequestedCoverageTer
 	if terms.SelectedAssuranceLevel != AssuranceUnsecuredSigned {
 		found := false
 		for _, collateral := range profile.CollateralProfiles {
-			digest, _ := codec.Digest("tos.service.agent-guarantor-collateral-profile.v1", collateral)
+			digest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-collateral-profile.v1", collateral)
 			if digest == terms.SelectedCollateralProfileDigest && collateral.AssuranceLevel == terms.SelectedAssuranceLevel &&
 				collateral.Asset == terms.CoverageAsset {
 				found = true
@@ -296,7 +295,7 @@ func CoverageID(guarantorAgentID, quoteRequestDigest string) (string, error) {
 	if !validID(guarantorAgentID) || !validDigest(quoteRequestDigest) {
 		return "", errors.New("coverage identity input is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-coverage-id.v1", struct {
+	return guarantorCodec.Digest("tos.service.agent-guarantor-coverage-id.v1", struct {
 		GuarantorAgentID   string `json:"guarantor_agent_id"`
 		QuoteRequestDigest string `json:"quote_request_digest"`
 	}{guarantorAgentID, quoteRequestDigest})
@@ -306,7 +305,7 @@ func CoverageTermsDigest(terms CoverageTermsV1) (string, error) {
 	if err := ValidateCoverageTerms(terms); err != nil {
 		return "", err
 	}
-	return codec.Digest(CoverageTermsDomain, terms)
+	return guarantorCodec.Digest(CoverageTermsDomain, terms)
 }
 
 func ValidateCoverageTerms(terms CoverageTermsV1) error {
@@ -400,7 +399,7 @@ func ValidateCoverageTermsAgainstServiceProfile(terms CoverageTermsV1, profile S
 		return errors.New("Guarantor terms are invalid")
 	}
 	for _, claimProfile := range profile.ClaimProfiles {
-		digest, _ := codec.Digest("tos.service.agent-guarantor-claim-profile.v1", claimProfile)
+		digest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-claim-profile.v1", claimProfile)
 		if digest == terms.SelectedClaimProfileDigest {
 			if terms.ClaimTriggerProfile != claimProfile.TriggerProfile || terms.ClaimEvidenceProfile != claimProfile.EvidenceProfile ||
 				!equalProfileRefs(terms.ClaimantAuthorizationProfiles, claimProfile.ClaimantAuthorizationProfiles) ||
@@ -428,7 +427,7 @@ func ValidateCoverageTermsAgainstServiceProfile(terms CoverageTermsV1, profile S
 				return nil
 			}
 			for _, collateralProfile := range profile.CollateralProfiles {
-				collateralDigest, _ := codec.Digest("tos.service.agent-guarantor-collateral-profile.v1", collateralProfile)
+				collateralDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-collateral-profile.v1", collateralProfile)
 				if collateralDigest == terms.SelectedCollateralProfileDigest &&
 					containsString(collateralProfile.CompatibleClaimProfileDigests, digest) && terms.CollateralTerms != nil &&
 					terms.CollateralTerms.CustodyAdapterProfile == collateralProfile.CustodyAdapterProfile &&
@@ -516,7 +515,7 @@ func FirmOfferDigest(offer AuthorizedFirmCoverageOfferV1) (string, error) {
 	if err := validateFirmOfferShape(offer); err != nil {
 		return "", err
 	}
-	return codec.Digest(FirmOfferDomain, offer)
+	return guarantorCodec.Digest(FirmOfferDomain, offer)
 }
 
 func VerifyFirmOffer(offer AuthorizedFirmCoverageOfferV1, request AuthorizedCoverageQuoteRequestV1,
@@ -610,7 +609,7 @@ func VerifyFirmOffer(offer AuthorizedFirmCoverageOfferV1, request AuthorizedCove
 		descriptor.ReservedExposure != offer.CoverageTerms.MaximumAggregatePayout {
 		return errors.New("firm Guarantor offer exposure receipt is not bound to the offer")
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-firm-offer-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-firm-offer-body.v1", body)
 	return ValidateAuthorizationSet(offer.Authorizations, "firm-coverage-offer", bodyDigest,
 		"tos.service.agent-guarantor-firm-offer-signature.v1", []string{body.GuarantorAgentID}, resolver, now)
 }
@@ -646,7 +645,7 @@ func validateFirmOfferShape(offer AuthorizedFirmCoverageOfferV1) error {
 		if !validToken(target.PredicateID, 128) || !validDigest(target.TargetProjectionDigest) {
 			return errors.New("firm Guarantor predicate target is invalid")
 		}
-		encoded, encodeErr := codec.Marshal(target)
+		encoded, encodeErr := guarantorCodec.Marshal(target)
 		if encodeErr != nil || prior != nil && string(prior) >= string(encoded) {
 			return errors.New("firm Guarantor predicate targets are unsorted or duplicated")
 		}

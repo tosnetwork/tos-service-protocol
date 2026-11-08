@@ -46,7 +46,7 @@ type CommerceObjectVerifier interface {
 
 func ValidateCommerceObjectDescriptorV1(descriptor CommerceObjectDescriptorV1) error {
 	if !boundedMediaType(descriptor.ContentType) || !canonicalDigestPattern.MatchString(descriptor.ContentDigest) ||
-		descriptor.ContentSize == 0 || descriptor.ContentSize > MaxProfileEventBytes ||
+		descriptor.ContentSize == 0 || descriptor.ContentSize > MaxProfileEventObjectBytes ||
 		len(descriptor.RetrievalHints) > MaxProfileRetrievalHints {
 		return errors.New("commerce object descriptor is invalid")
 	}
@@ -63,7 +63,7 @@ func ValidateCommerceProfileEventV1(event CommerceProfileEventV1, now time.Time)
 	if event.SchemaVersion != 1 || !boundedIdentifier(event.ProfileURI, 256) || event.ProfileVersion == 0 ||
 		!boundedIdentifier(event.ObjectKind, 128) || !boundedMediaType(event.ObjectContentType) ||
 		!canonicalDigestPattern.MatchString(event.ObjectDigest) || event.ObjectSizeBytes == 0 ||
-		event.ObjectSizeBytes > MaxProfileEventBytes || event.CreatedAtUnix == 0 || event.ExpiresAtUnix <= event.CreatedAtUnix ||
+		event.ObjectSizeBytes > MaxProfileEventObjectBytes || event.CreatedAtUnix == 0 || event.ExpiresAtUnix <= event.CreatedAtUnix ||
 		event.CreatedAtUnix > math.MaxInt64 || event.ExpiresAtUnix > math.MaxInt64 ||
 		event.ExpiresAtUnix-event.CreatedAtUnix > uint64((30*24*time.Hour)/time.Second) ||
 		event.CreatedAtUnix > uint64(now.UTC().Add(5*time.Minute).Unix()) || uint64(now.UTC().Unix()) >= event.ExpiresAtUnix ||

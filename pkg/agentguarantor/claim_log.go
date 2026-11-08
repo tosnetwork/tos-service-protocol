@@ -2,8 +2,6 @@ package agentguarantor
 
 import (
 	"errors"
-
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -46,7 +44,7 @@ func ClaimIngressStateDomainDigestV1(agreementDigest, obligationID string) (stri
 	if err := validateClaimCoverageKeyV1(agreementDigest, obligationID); err != nil {
 		return "", err
 	}
-	return codec.Digest(ClaimIngressStateDomainV1, claimCoverageKeyV1{agreementDigest, obligationID})
+	return guarantorCodec.Digest(ClaimIngressStateDomainV1, claimCoverageKeyV1{agreementDigest, obligationID})
 }
 
 // ClaimIngressLogIDV1 returns the Agreement-wide initial-claim log when
@@ -55,7 +53,7 @@ func ClaimIngressLogIDV1(agreementDigest, obligationID, claimID string) (string,
 	if err := validateClaimCoverageKeyV1(agreementDigest, obligationID); err != nil || claimID != "" && !validDigest(claimID) {
 		return "", errors.New("claim ingress log identity is invalid")
 	}
-	return codec.Digest(ClaimIngressLogIDDomainV1, struct {
+	return guarantorCodec.Digest(ClaimIngressLogIDDomainV1, struct {
 		CoverageAgreementBodyDigest string `json:"coverage_agreement_body_digest"`
 		CoverageObligationID        string `json:"coverage_obligation_id"`
 		ClaimID                     string `json:"claim_id,omitempty"`
@@ -66,14 +64,14 @@ func ClaimAdmissionLogIDV1(agreementDigest, obligationID string) (string, error)
 	if err := validateClaimCoverageKeyV1(agreementDigest, obligationID); err != nil {
 		return "", err
 	}
-	return codec.Digest(ClaimAdmissionLogIDDomainV1, claimCoverageKeyV1{agreementDigest, obligationID})
+	return guarantorCodec.Digest(ClaimAdmissionLogIDDomainV1, claimCoverageKeyV1{agreementDigest, obligationID})
 }
 
 func ClaimRevisionLogIDV1(agreementDigest, obligationID, claimID string) (string, error) {
 	if err := validateClaimCoverageKeyV1(agreementDigest, obligationID); err != nil || !validDigest(claimID) {
 		return "", errors.New("claim revision log identity is invalid")
 	}
-	return codec.Digest(ClaimRevisionLogIDDomainV1, struct {
+	return guarantorCodec.Digest(ClaimRevisionLogIDDomainV1, struct {
 		CoverageAgreementBodyDigest string `json:"coverage_agreement_body_digest"`
 		CoverageObligationID        string `json:"coverage_obligation_id"`
 		ClaimID                     string `json:"claim_id"`
@@ -84,7 +82,7 @@ func InitialClaimLogRootV1(domain, logID string) (string, error) {
 	if !validDigest(logID) || (domain != ClaimIngressLogRootDomainV1 && domain != ClaimAdmissionLogRootDomainV1 && domain != ClaimRevisionLogRootDomainV1) {
 		return "", errors.New("claim log root identity is invalid")
 	}
-	return codec.Digest(domain, struct {
+	return guarantorCodec.Digest(domain, struct {
 		LogID    string `json:"log_id"`
 		Sequence uint64 `json:"sequence"`
 	}{logID, 0})
@@ -95,11 +93,11 @@ func AdvanceClaimLogRootV1(domain, logID, priorRoot string, sequence uint64, lea
 		(domain != ClaimIngressLogRootDomainV1 && domain != ClaimAdmissionLogRootDomainV1 && domain != ClaimRevisionLogRootDomainV1) {
 		return "", errors.New("claim log successor is invalid")
 	}
-	leafDigest, err := codec.Digest(domain+".leaf", leaf)
+	leafDigest, err := guarantorCodec.Digest(domain+".leaf", leaf)
 	if err != nil {
 		return "", err
 	}
-	return codec.Digest(domain, struct {
+	return guarantorCodec.Digest(domain, struct {
 		LogID, PriorRoot, LeafDigest string
 		Sequence                     uint64
 	}{logID, priorRoot, leafDigest, sequence})
@@ -110,7 +108,7 @@ func ClaimIngressReceiptDigestV1(value AuthorizedClaimSubmissionIngressReceiptV1
 		value.Body.State != "received" || len(value.Authorizations) == 0 {
 		return "", errors.New("claim ingress receipt is invalid")
 	}
-	return codec.Digest(ClaimIngressReceiptEnvelopeDomain, value)
+	return guarantorCodec.Digest(ClaimIngressReceiptEnvelopeDomain, value)
 }
 
 func ClaimAdmissionReceiptDigestV1(value AuthorizedClaimAdmissionReceiptV1) (string, error) {
@@ -118,5 +116,5 @@ func ClaimAdmissionReceiptDigestV1(value AuthorizedClaimAdmissionReceiptV1) (str
 		!validDigest(value.Body.ClaimSubmissionIngressReceiptDigest) || len(value.Authorizations) == 0 {
 		return "", errors.New("claim admission receipt is invalid")
 	}
-	return codec.Digest(ClaimAdmissionReceiptEnvelopeDomain, value)
+	return guarantorCodec.Digest(ClaimAdmissionReceiptEnvelopeDomain, value)
 }

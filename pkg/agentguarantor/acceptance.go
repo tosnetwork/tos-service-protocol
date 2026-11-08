@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -18,7 +17,7 @@ func CoverageAcceptanceAdmissionDomainIDV1(boundDomainDigest, offerID string) (s
 	if !validDigest(boundDomainDigest) || !validDigest(offerID) {
 		return "", errors.New("acceptance admission domain input is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-acceptance-admission-domain.v1", struct {
+	return guarantorCodec.Digest("tos.service.agent-guarantor-acceptance-admission-domain.v1", struct {
 		BoundDomainDigest string `json:"bound_domain_digest"`
 		OfferID           string `json:"offer_id"`
 	}{boundDomainDigest, offerID})
@@ -28,7 +27,7 @@ func CoverageAcceptanceRequestDigestV1(request AuthorizedCoverageAcceptanceReque
 	if err := validateAcceptanceRequestShape(request); err != nil {
 		return "", err
 	}
-	return codec.Digest(AcceptanceRequestDomain, request)
+	return guarantorCodec.Digest(AcceptanceRequestDomain, request)
 }
 
 func VerifyCoverageAcceptanceRequestV1(request AuthorizedCoverageAcceptanceRequestV1,
@@ -85,7 +84,7 @@ func VerifyCoverageAcceptanceRequestV1(request AuthorizedCoverageAcceptanceReque
 			return errors.New("Guarantor acceptance authorization uses a substituted profile")
 		}
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-acceptance-request-body.v1", request.Body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-acceptance-request-body.v1", request.Body)
 	return ValidateAuthorizationSet(request.Authorizations, "coverage-acceptance-request", bodyDigest,
 		"tos.service.agent-guarantor-acceptance-request-signature.v1", []string{request.Body.AcceptingSubject}, authorityResolver, now)
 }
@@ -94,7 +93,7 @@ func CoverageAcceptanceReceiptDigestV1(receipt AuthorizedCoverageAcceptanceRecei
 	if err := validateAcceptanceReceiptShape(receipt); err != nil {
 		return "", err
 	}
-	return codec.Digest(AcceptanceReceiptDomain, receipt)
+	return guarantorCodec.Digest(AcceptanceReceiptDomain, receipt)
 }
 
 func VerifyCoverageAcceptanceReceiptV1(receipt AuthorizedCoverageAcceptanceReceiptV1,
@@ -132,7 +131,7 @@ func VerifyCoverageAcceptanceReceiptV1(receipt AuthorizedCoverageAcceptanceRecei
 		ExpectedClaimFilingState: body.PriorClaimFilingState, TargetClaimFilingState: body.AcceptedClaimFilingState,
 		ExpectedClaimFilingStateRevision: body.PriorClaimFilingStateRevision,
 		TargetClaimFilingStateRevision:   body.AcceptedClaimFilingStateRevision}
-	requestBytes, err := codec.Marshal(request)
+	requestBytes, err := guarantorCodec.Marshal(request)
 	if err != nil || !bytes.Equal(requestBytes, receipt.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("Guarantor acceptance admission request is noncanonical")
 	}
@@ -161,7 +160,7 @@ func VerifyCoverageAcceptanceReceiptV1(receipt AuthorizedCoverageAcceptanceRecei
 		receipt.AuthorityAdmissionEligibilityProofSet.AdmissionTimeUnix != body.AcceptedAtUnix {
 		return errors.New("Guarantor acceptance admission authority or CAS proof is substituted")
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-acceptance-receipt-body.v1", receipt.Body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-acceptance-receipt-body.v1", receipt.Body)
 	return ValidateAuthorizationSet(receipt.Authorizations, "coverage-acceptance-receipt", bodyDigest,
 		"tos.service.agent-guarantor-acceptance-receipt-signature.v1", []string{offer.Body.GuarantorAgentID}, authorityResolver, now)
 }

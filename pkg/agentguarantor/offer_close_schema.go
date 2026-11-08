@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -126,7 +125,7 @@ func OfferNonAcceptanceDigestV1(value AuthorizedOfferNonAcceptanceEvidenceV1) (s
 		value.IssuanceActionResolution.State != agentcommerce.ActionTerminal {
 		return "", errors.New("Guarantor offer non-acceptance evidence does not bind the issued offer")
 	}
-	return codec.Digest(OfferNonAcceptanceDomain, value)
+	return guarantorCodec.Digest(OfferNonAcceptanceDomain, value)
 }
 
 func VerifyOfferNonAcceptanceV1(value AuthorizedOfferNonAcceptanceEvidenceV1, resolver AuthorityKeyResolver,
@@ -135,7 +134,7 @@ func VerifyOfferNonAcceptanceV1(value AuthorizedOfferNonAcceptanceEvidenceV1, re
 	if err != nil || uint64(now.UTC().Unix()) < value.Body.ResolvedAtUnix {
 		return errors.New("Guarantor offer non-acceptance evidence is invalid at verification time")
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-offer-non-acceptance-body.v1", value.Body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-offer-non-acceptance-body.v1", value.Body)
 	if err := ValidateAuthorizationSet(value.Authorizations, "offer-non-acceptance", bodyDigest,
 		"tos.service.agent-guarantor-offer-non-acceptance-signature.v1",
 		[]string{value.AuthorizedFirmOffer.Body.GuarantorAgentID}, resolver, now); err != nil {
@@ -152,7 +151,7 @@ func PreAcceptanceExposureReleaseReceiptDigestV1(value AuthorizedPreAcceptanceEx
 		return "", errors.New("Guarantor pre-acceptance release receipt is invalid")
 	}
 	nonAcceptanceDigest, err := OfferNonAcceptanceDigestV1(value.AuthorizedNonAcceptanceEvidence)
-	projectionDigest, projectionErr := codec.Digest("tos.service.agent-guarantor-pre-acceptance-release-evidence-projection.v1",
+	projectionDigest, projectionErr := guarantorCodec.Digest("tos.service.agent-guarantor-pre-acceptance-release-evidence-projection.v1",
 		value.ReleaseEvidenceProjection)
 	if err != nil || projectionErr != nil || nonAcceptanceDigest != value.Body.NonAcceptanceEvidenceDigest ||
 		projectionDigest != value.Body.ReleaseEvidenceProjectionDigest || value.Body.AuthorityInstanceID != value.ReleaseEvidenceProjection.AuthorityInstanceID ||
@@ -161,5 +160,5 @@ func PreAcceptanceExposureReleaseReceiptDigestV1(value AuthorizedPreAcceptanceEx
 		value.Body.AuthorizedFirmOfferEnvelopeDigest != value.ReleaseEvidenceProjection.AuthorizedFirmOfferEnvelopeDigest {
 		return "", errors.New("Guarantor pre-acceptance release receipt binding is invalid")
 	}
-	return codec.Digest(PreAcceptanceReleaseDomain, value)
+	return guarantorCodec.Digest(PreAcceptanceReleaseDomain, value)
 }

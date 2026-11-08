@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -71,7 +70,7 @@ func GuarantorPayoutExecutionEvidenceDigestV1(value AuthorizedGuarantorPayoutExe
 	if value.SchemaVersion != 1 || !validDigest(value.ObligationInstanceID) {
 		return "", errors.New("Guarantor payout execution evidence is invalid")
 	}
-	return codec.Digest(GuarantorPayoutExecutionEvidenceDomainV1, value)
+	return guarantorCodec.Digest(GuarantorPayoutExecutionEvidenceDomainV1, value)
 }
 
 func TerminalPayoutEvidenceSetDigestV1(value TerminalPayoutEvidenceSetV1) (string, error) {
@@ -106,7 +105,7 @@ func TerminalPayoutEvidenceSetDigestV1(value TerminalPayoutEvidenceSetV1) (strin
 		}
 		seen[execution.ObligationInstanceID] = struct{}{}
 	}
-	return codec.Digest(TerminalPayoutEvidenceSetDomainV1, value)
+	return guarantorCodec.Digest(TerminalPayoutEvidenceSetDomainV1, value)
 }
 
 func VerifyGuarantorPayoutExecutionEvidenceV1(value AuthorizedGuarantorPayoutExecutionEvidenceV1,
@@ -139,7 +138,7 @@ func VerifyGuarantorPayoutExecutionEvidenceV1(value AuthorizedGuarantorPayoutExe
 	}
 	actionBody := GuarantorAgreementPaymentActionBodyV1{SchemaVersion: 1, PaymentRequest: request,
 		SettlementObligation: obligation, MaterializedPayoutObligationSet: materialized}
-	canonical, err := codec.Marshal(actionBody)
+	canonical, err := guarantorCodec.Marshal(actionBody)
 	if err != nil || !bytes.Equal(canonical, value.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("Guarantor payout stage request is substituted")
 	}
@@ -177,7 +176,7 @@ func VerifyTerminalPayoutEvidenceSetV1(value TerminalPayoutEvidenceSetV1,
 	if _, err := TerminalPayoutEvidenceSetDigestV1(value); err != nil {
 		return err
 	}
-	materializedDigest, err := codec.Digest(PayoutSetDomain, materialized)
+	materializedDigest, err := guarantorCodec.Digest(PayoutSetDomain, materialized)
 	if err != nil || value.MaterializedPayoutObligationSetDigest != materializedDigest ||
 		value.CoverageAgreementBodyDigest != materialized.CoverageAgreementBodyDigest ||
 		value.AuthorizedClaimDecisionDigest != materialized.AuthorizedClaimDecisionDigest {
@@ -191,13 +190,14 @@ func VerifyTerminalPayoutEvidenceSetV1(value TerminalPayoutEvidenceSetV1,
 			CoverageAgreementBodyDigest: value.CoverageAgreementBodyDigest, ClaimID: value.ClaimID,
 			AuthorizedClaimDecisionDigest:         value.AuthorizedClaimDecisionDigest,
 			MaterializedPayoutObligationSetDigest: value.MaterializedPayoutObligationSetDigest}
-		markerBytes, _ := codec.Marshal(marker)
-		markerDigest, _ := codec.Digest("tos.service.agent-guarantor-no-payout-marker.v1", marker)
+		markerBytes, _ := guarantorCodec.Marshal(marker)
+		markerDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-no-payout-marker.v1", marker)
 		item := value.TerminalSettlementEvidenceSet.Items[0]
-		if item.ContentType != "application/vnd.tos.service.agent-guarantor-no-payout.v1+cbor" ||
+		if item.ContentType != GuarantorNoPayoutMarkerContentTypeV1 ||
 			item.EvidenceProfileDigest != terms.SelectedPayoutAdapterProfile.ProfileDigest ||
-			item.EvidenceEnvelopeDigest != markerDigest || item.Representation != "inline" ||
-			!bytes.Equal(item.CanonicalEnvelopeBytes, markerBytes) || item.ImmutableDescriptor != nil {
+			item.EvidenceEnvelopeDigest != markerDigest ||
+			!descriptorNamesCarriedObjectV1(item, GuarantorNoPayoutMarkerContentTypeV1, markerBytes,
+				terms.SelectedPayoutAdapterProfile.ProfileDigest) {
 			return errors.New("no-payout terminal marker is substituted")
 		}
 		return nil
@@ -209,27 +209,46 @@ func VerifyTerminalPayoutEvidenceSetV1(value TerminalPayoutEvidenceSetV1,
 	for index, execution := range value.PayoutExecutionEvidence {
 		obligation := materialized.Obligations[index]
 		var actionBody GuarantorAgreementPaymentActionBodyV1
-		if codec.Unmarshal(execution.StageActionAdmissionEvidence.CanonicalRequest, &actionBody) != nil ||
+		if guarantorCodec.Unmarshal(execution.StageActionAdmissionEvidence.CanonicalRequest, &actionBody) != nil ||
 			!equalCanonical(actionBody.SettlementObligation, obligation) ||
 			!equalCanonical(actionBody.MaterializedPayoutObligationSet, materialized) ||
 			VerifyGuarantorPayoutExecutionEvidenceV1(execution, actionBody.PaymentRequest, obligation,
 				materialized, terms, authorityResolver, fenceResolver, paymentVerifier, now) != nil {
 			return errors.New("terminal payout execution is invalid")
 		}
-		executionBytes, _ := codec.Marshal(execution)
+		executionBytes, _ := guarantorCodec.Marshal(execution)
 		executionDigest, _ := GuarantorPayoutExecutionEvidenceDigestV1(execution)
 		found := false
 		for _, item := range value.TerminalSettlementEvidenceSet.Items {
 			if item.EvidenceEnvelopeDigest != executionDigest {
 				continue
 			}
-			found = item.ContentType == "application/vnd.tos.service.agent-guarantor-payout-execution-evidence.v1+cbor" &&
+			found = item.ContentType == GuarantorPayoutExecutionContentTypeV1 &&
 				item.EvidenceProfileDigest == terms.SelectedPayoutAdapterProfile.ProfileDigest &&
-				item.Representation == "inline" && bytes.Equal(item.CanonicalEnvelopeBytes, executionBytes) && item.ImmutableDescriptor == nil
+				descriptorNamesCarriedObjectV1(item, GuarantorPayoutExecutionContentTypeV1, executionBytes,
+					terms.SelectedPayoutAdapterProfile.ProfileDigest)
 		}
 		if !found {
 			return errors.New("terminal settlement evidence omits an exact payout execution")
 		}
 	}
 	return nil
+}
+
+const (
+	GuarantorNoPayoutMarkerContentTypeV1  = "application/vnd.tos.service.agent-guarantor-no-payout.v1+cbor"
+	GuarantorPayoutExecutionContentTypeV1 = "application/vnd.tos.service.agent-guarantor-payout-execution-evidence.v1+cbor"
+)
+
+// descriptorNamesCarriedObjectV1 reports whether a descriptor-only evidence
+// item names exactly the object whose canonical bytes the verifier already
+// holds: same media type, the item's envelope digest, the exact length and the
+// set's retrieval policy. No retrieval is needed because the bytes are
+// carried elsewhere in the same envelope or recomputed.
+func descriptorNamesCarriedObjectV1(item CanonicalGuarantorEvidenceItemV1, contentType string, canonical []byte,
+	retrievalPolicyDigest string) bool {
+	descriptor := item.ImmutableDescriptor
+	return item.Representation == "content_addressed" && descriptor != nil && len(item.CanonicalEnvelopeBytes) == 0 &&
+		len(canonical) != 0 && descriptor.ContentType == contentType && descriptor.ContentDigest == item.EvidenceEnvelopeDigest &&
+		descriptor.ContentSize == uint64(len(canonical)) && descriptor.RetrievalPolicyDigest == retrievalPolicyDigest
 }

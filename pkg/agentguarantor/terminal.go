@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -310,25 +309,25 @@ func ClaimFilingCloseReceiptDigestV1(value AuthorizedClaimFilingCloseReceiptV1) 
 	if value.Body.SchemaVersion != 1 || !validDigest(value.Body.CoverageAgreementBodyDigest) || !validDigest(value.Body.FrozenClaimAdmissionLogRoot) || len(value.Authorizations) == 0 {
 		return "", errors.New("claim filing close receipt is invalid")
 	}
-	return codec.Digest(ClaimFilingCloseDomain, value)
+	return guarantorCodec.Digest(ClaimFilingCloseDomain, value)
 }
 func TerminalClaimSetDigestV1(value AuthorizedTerminalClaimSetEvidenceV1) (string, error) {
 	if err := ValidateTerminalClaimSetV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest(TerminalClaimSetDomain, value)
+	return guarantorCodec.Digest(TerminalClaimSetDomain, value)
 }
 func ExposureReleaseReceiptDigestV1(value AuthorizedExposureReleaseReceiptV1) (string, error) {
 	if value.Body.SchemaVersion != 1 || value.Body.State != "released" || !validDigest(value.Body.TerminalClaimSetEvidenceDigest) || len(value.Authorizations) == 0 {
 		return "", errors.New("exposure release receipt is invalid")
 	}
-	return codec.Digest(ExposureReleaseDomain, value)
+	return guarantorCodec.Digest(ExposureReleaseDomain, value)
 }
 func CoverageResolutionDigestV1(value AuthorizedCoverageResolutionV1) (string, error) {
 	if value.Body.SchemaVersion != 1 || value.Body.TerminalState == "" || !validDigest(value.Body.ExposureReleaseReceiptDigest) || len(value.Authorizations) == 0 {
 		return "", errors.New("coverage resolution is invalid")
 	}
-	return codec.Digest(CoverageResolutionDomain, value)
+	return guarantorCodec.Digest(CoverageResolutionDomain, value)
 }
 
 func ExposureDispositionComputationDigestV1(value ExposureDispositionComputationV1) (string, error) {
@@ -337,7 +336,7 @@ func ExposureDispositionComputationDigestV1(value ExposureDispositionComputation
 		!validDigest(value.ExposureAdmissionReceiptDigest) || !validDigest(value.ReservationScopeDigest) {
 		return "", errors.New("exposure disposition computation is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-exposure-disposition.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-exposure-disposition.v1", value)
 }
 
 // ComputeExposureDispositionV1 derives the only permitted underwriting split
@@ -498,7 +497,7 @@ func VerifyClaimFilingCloseReceiptV1(value AuthorizedClaimFilingCloseReceiptV1,
 		authorityResolver, fenceResolver, now); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-claim-filing-close-receipt-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-claim-filing-close-receipt-body.v1", body)
 	return ValidateAuthorizationSet(value.Authorizations, "claim-filing-close-receipt", bodyDigest,
 		"tos.service.agent-guarantor-claim-filing-close-signature.v1", []string{offer.Body.GuarantorAgentID}, authorityResolver, now)
 }
@@ -572,7 +571,7 @@ func VerifyTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1, offer 
 		}
 		payouts := bundle.MaterializedPayoutObligationSet
 		decisionDigest, _ := ClaimDecisionDigestV1(bundle.TerminalAuthorizedDecision)
-		payoutDigest, _ := codec.Digest(PayoutSetDomain, payouts)
+		payoutDigest, _ := guarantorCodec.Digest(PayoutSetDomain, payouts)
 		application := bundle.DecisionApplicationReceiptProof
 		if application.Body.CoverageAgreementBodyDigest != body.CoverageAgreementBodyDigest ||
 			application.Body.CoverageObligationID != body.CoverageObligationID || application.Body.ClaimID != claim.Body.ClaimID ||
@@ -593,7 +592,7 @@ func VerifyTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1, offer 
 		for index, execution := range terminalPayout.PayoutExecutionEvidence {
 			obligation := payouts.Obligations[index]
 			var actionBody GuarantorAgreementPaymentActionBodyV1
-			if codec.Unmarshal(execution.StageActionAdmissionEvidence.CanonicalRequest, &actionBody) != nil ||
+			if guarantorCodec.Unmarshal(execution.StageActionAdmissionEvidence.CanonicalRequest, &actionBody) != nil ||
 				!equalCanonical(actionBody.SettlementObligation, obligation) ||
 				!equalCanonical(actionBody.MaterializedPayoutObligationSet, payouts) {
 				return errors.New("terminal payout execution request cannot be reconstructed")
@@ -635,7 +634,7 @@ func VerifyTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1, offer 
 		authorityResolver, fenceResolver, now); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-terminal-claim-set-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-terminal-claim-set-body.v1", body)
 	return ValidateAuthorizationSet(value.Authorizations, "terminal-claim-set", bodyDigest,
 		"tos.service.agent-guarantor-terminal-claim-set-signature.v1", []string{offer.Body.GuarantorAgentID}, authorityResolver, now)
 }
@@ -733,7 +732,7 @@ func VerifyExposureReleaseReceiptV1(value AuthorizedExposureReleaseReceiptV1, of
 		authorityResolver, fenceResolver, now); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-exposure-release-receipt-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-exposure-release-receipt-body.v1", body)
 	return ValidateAuthorizationSet(value.Authorizations, "exposure-release-receipt", bodyDigest,
 		"tos.service.agent-guarantor-exposure-release-receipt-signature.v1", []string{offer.Body.GuarantorAgentID}, authorityResolver, now)
 }
@@ -780,7 +779,7 @@ func VerifyCoverageResolutionV1(value AuthorizedCoverageResolutionV1, offer Auth
 		authorityResolver, fenceResolver, now); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-resolution-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-resolution-body.v1", body)
 	return ValidateAuthorizationSet(value.Authorizations, "coverage-resolution", bodyDigest,
 		"tos.service.agent-guarantor-resolution-signature.v1", []string{offer.Body.GuarantorAgentID}, authorityResolver, now)
 }
@@ -788,7 +787,7 @@ func VerifyCoverageResolutionV1(value AuthorizedCoverageResolutionV1, offer Auth
 func verifyPortableStage(stage PortableStageActionAdmissionEvidenceV1, bound *GuarantorStageActionAuthorityV1, request interface{}, fields map[string]agentcommerce.SemanticValue,
 	expectedStage, actionDigest, stableID, exactRequestDigest string, generation uint64, fenceDigest string,
 	authorityResolver AuthorityKeyResolver, fenceResolver agentcommerce.FenceAuthorityResolver, now time.Time) error {
-	canonical, err := codec.Marshal(request)
+	canonical, err := guarantorCodec.Marshal(request)
 	if bound != nil {
 		if bound.Stage != expectedStage || VerifyPortableStageActionAdmissionEvidenceV1(stage, *bound, canonical, fields,
 			authorityResolver, fenceResolver, now) != nil {
@@ -813,7 +812,7 @@ func verifyPortableStage(stage PortableStageActionAdmissionEvidenceV1, bound *Gu
 		stage.ActionAdmissionAuthorization.ValidationTimeUnix != stage.Body.AdmittedAtUnix {
 		return errors.New("portable Guarantor stage admission is signed by the wrong authority or at the wrong time")
 	}
-	stageBodyDigest, _ := codec.Digest("tos.service.agent-guarantor-stage-action-admission.v1", stage.Body)
+	stageBodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-stage-action-admission.v1", stage.Body)
 	return verifyStageActionAdmissionAuthorizationV1(stage.ActionAdmissionAuthorization, stage.AuthorizedAction,
 		stageBodyDigest, authorityResolver, fenceResolver, now)
 }
@@ -875,7 +874,7 @@ func ValidateTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1) erro
 		contentType string
 		wire        []byte
 	}, len(value.ClaimResolutionBundles)+1)
-	filingWire, filingWireErr := codec.Marshal(value.AuthorizedClaimFilingCloseReceipt)
+	filingWire, filingWireErr := guarantorCodec.Marshal(value.AuthorizedClaimFilingCloseReceipt)
 	filingEnvelopeDigest, filingEnvelopeErr := ClaimFilingCloseReceiptDigestV1(value.AuthorizedClaimFilingCloseReceipt)
 	if filingWireErr != nil || filingEnvelopeErr != nil {
 		return errors.New("terminal filing-close evidence cannot be encoded")
@@ -885,8 +884,8 @@ func ValidateTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1) erro
 		wire        []byte
 	}{"application/vnd.tos.service.agent-guarantor-claim-filing-close-envelope.v1+cbor", filingWire}
 	for _, bundle := range value.ClaimResolutionBundles {
-		wire, wireErr := codec.Marshal(bundle)
-		digest, digestErr := codec.Digest("tos.service.agent-guarantor-claim-terminal-resolution-bundle.v1", bundle)
+		wire, wireErr := guarantorCodec.Marshal(bundle)
+		digest, digestErr := guarantorCodec.Digest("tos.service.agent-guarantor-claim-terminal-resolution-bundle.v1", bundle)
 		if wireErr != nil || digestErr != nil {
 			return errors.New("terminal claim-resolution bundle cannot be encoded")
 		}
@@ -904,11 +903,7 @@ func ValidateTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1) erro
 			item.EvidenceProfileDigest != body.ClaimAdmissionProfileDigest {
 			return errors.New("terminal closure evidence contains a substituted object")
 		}
-		if item.Representation == "inline" {
-			if item.ImmutableDescriptor != nil || !bytes.Equal(item.CanonicalEnvelopeBytes, expected.wire) {
-				return errors.New("terminal inline closure evidence differs from its carried object")
-			}
-		} else if item.ImmutableDescriptor == nil || len(item.CanonicalEnvelopeBytes) != 0 ||
+		if item.Representation != "content_addressed" || item.ImmutableDescriptor == nil || len(item.CanonicalEnvelopeBytes) != 0 ||
 			item.ImmutableDescriptor.ContentType != expected.contentType ||
 			item.ImmutableDescriptor.ContentDigest != item.EvidenceEnvelopeDigest ||
 			item.ImmutableDescriptor.ContentSize != uint64(len(expected.wire)) ||
@@ -939,7 +934,7 @@ func ValidateTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1) erro
 		}
 		claimDigest, _ := ClaimEnvelopeDigest(claim)
 		decisionDigest, _ := ClaimDecisionDigestV1(decision)
-		payoutDigest, _ := codec.Digest(PayoutSetDomain, payouts)
+		payoutDigest, _ := guarantorCodec.Digest(PayoutSetDomain, payouts)
 		paymentDigest, _ := TerminalPayoutEvidenceSetDigestV1(bundle.TerminalPayoutEvidenceSet)
 		initialDigest := initial.ReceiptEnvelopeDigest
 		finalAdmissionDigest := finalAdmission.ReceiptEnvelopeDigest
@@ -1021,8 +1016,8 @@ func ValidateTerminalClaimSetV1(value AuthorizedTerminalClaimSetEvidenceV1) erro
 
 func sortTerminalBundles(bundles []ClaimTerminalResolutionBundleV1) bool {
 	for index := 1; index < len(bundles); index++ {
-		left, _ := codec.Marshal(bundles[index-1].ResolutionRef)
-		right, _ := codec.Marshal(bundles[index].ResolutionRef)
+		left, _ := guarantorCodec.Marshal(bundles[index-1].ResolutionRef)
+		right, _ := guarantorCodec.Marshal(bundles[index].ResolutionRef)
 		if bytes.Compare(left, right) >= 0 {
 			return false
 		}

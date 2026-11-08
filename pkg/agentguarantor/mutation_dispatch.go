@@ -3,8 +3,6 @@ package agentguarantor
 import (
 	"errors"
 	"reflect"
-
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 type MutationDispatchKeyV1 struct {
@@ -21,7 +19,7 @@ func DecodeMutationRequestV1(actionKind, operationPurpose string, canonical []by
 		return nil, errors.New("unsupported Guarantor V1 mutation")
 	}
 	value := factory()
-	if err := codec.Unmarshal(canonical, value); err != nil {
+	if err := registeredObjectCodecV1(value).Unmarshal(canonical, value); err != nil {
 		return nil, err
 	}
 	if err := requireSchemaVersionOneWhenPresent(value); err != nil {

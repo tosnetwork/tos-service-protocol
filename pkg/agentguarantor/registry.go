@@ -5,7 +5,6 @@ import (
 	"sort"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 type MutationResultComponentV1 struct {
@@ -157,8 +156,8 @@ func VerifyObjectVerifierRegistryV1(registry ObjectVerifierRegistryV1) error {
 	if registry.SchemaVersion != 1 || registry.RegistryVersion != 1 || len(registry.Entries) != len(released.Entries) {
 		return errors.New("Guarantor object registry header or size is invalid")
 	}
-	want, wantErr := codec.Marshal(released)
-	got, gotErr := codec.Marshal(registry)
+	want, wantErr := guarantorCodec.Marshal(released)
+	got, gotErr := guarantorCodec.Marshal(registry)
 	if wantErr != nil || gotErr != nil || string(want) != string(got) {
 		return errors.New("Guarantor object registry differs from the released registry")
 	}
@@ -190,7 +189,7 @@ func ObjectVerifierRegistryDigestV1() (string, error) {
 	if err := VerifyObjectVerifierRegistryV1(registry); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-object-verifier-registry.v1", registry)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-object-verifier-registry.v1", registry)
 }
 
 func ReleasedMutationVerifierRegistryV1() MutationVerifierRegistryV1 {
@@ -240,11 +239,11 @@ func VerifyMutationVerifierRegistryV1(registry MutationVerifierRegistryV1) error
 	if registry.SchemaVersion != 1 || registry.RegistryVersion != 1 || len(registry.Entries) != len(released.Entries) {
 		return errors.New("Guarantor mutation registry header or size is invalid")
 	}
-	releasedBytes, err := codec.Marshal(released)
+	releasedBytes, err := guarantorCodec.Marshal(released)
 	if err != nil {
 		return err
 	}
-	candidateBytes, err := codec.Marshal(registry)
+	candidateBytes, err := guarantorCodec.Marshal(registry)
 	if err != nil || string(candidateBytes) != string(releasedBytes) {
 		return errors.New("Guarantor mutation registry differs from the released registry")
 	}
@@ -264,5 +263,5 @@ func MutationVerifierRegistryDigestV1() (string, error) {
 	if err := VerifyMutationVerifierRegistryV1(registry); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-mutation-verifier-registry.v1", registry)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-mutation-verifier-registry.v1", registry)
 }

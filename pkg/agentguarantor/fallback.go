@@ -6,7 +6,6 @@ import (
 	"math"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -40,7 +39,7 @@ func DeterministicClaimTerminalFallbackDigestV1(value DeterministicClaimTerminal
 	if err := ValidateDeterministicClaimTerminalFallbackV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-terminal-fallback.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-terminal-fallback.v1", value)
 }
 
 func ValidateDeterministicClaimTerminalFallbackV1(value DeterministicClaimTerminalFallbackV1) error {

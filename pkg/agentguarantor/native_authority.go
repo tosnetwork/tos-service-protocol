@@ -9,7 +9,6 @@ import (
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/nativecore"
 )
@@ -74,7 +73,7 @@ func EncodeNativeAgentHistoricalAuthorityProofV1(proof NativeAgentHistoricalAuth
 	if err := validateNativeAgentHistoricalAuthorityProofV1(proof); err != nil {
 		return nil, err
 	}
-	encoded, err := codec.Marshal(proof)
+	encoded, err := guarantorCodec.Marshal(proof)
 	if err != nil {
 		return nil, err
 	}
@@ -92,10 +91,10 @@ func DecodeNativeAgentHistoricalAuthorityProofV1(raw []byte) (NativeAgentHistori
 	if len(raw) == 0 || len(raw) > MaxHistoricalAuthorityProofBytes {
 		return proof, errors.New("native historical authority proof has an invalid size")
 	}
-	if err := codec.Unmarshal(raw, &proof); err != nil {
+	if err := guarantorCodec.Unmarshal(raw, &proof); err != nil {
 		return NativeAgentHistoricalAuthorityProofV1{}, fmt.Errorf("native historical authority proof: %w", err)
 	}
-	reencoded, err := codec.Marshal(proof)
+	reencoded, err := guarantorCodec.Marshal(proof)
 	if err != nil || !bytes.Equal(reencoded, raw) {
 		return NativeAgentHistoricalAuthorityProofV1{}, errors.New("native historical authority proof is not exact")
 	}

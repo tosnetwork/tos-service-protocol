@@ -8,23 +8,25 @@ import (
 )
 
 const (
-	SchemaVersionV1         uint16 = 1
-	RegistryVersionV1       uint16 = 1
-	MaxCanonicalObjectBytes        = 1 << 20
-	MaxProfileArtifactBytes        = 512 << 10
-	MaxProfileRevisions            = 64
-	MaxCoverageCapabilities        = 64
-	MaxClaimProfiles               = 64
-	MaxCollateralProfiles          = 64
-	MaxPayoutAdapters              = 32
-	MaxClaims                      = 1024
-	MaxClaimRevisions              = 64
-	MaxEvidenceItems               = 256
-	MaxPayoutLines                 = 256
-	MaxAuthorizations              = 512
-	MaxExtensions                  = 64
-	MaxObjectIDBytes               = 256
-	MaxPolicyBytes                 = 64 << 10
+	SchemaVersionV1   uint16 = 1
+	RegistryVersionV1 uint16 = 1
+	// MaxCanonicalObjectBytes is the Guarantor complete-object ceiling
+	// (decimal by owner decision; see GuarantorCodecLimitsV1).
+	MaxCanonicalObjectBytes = 2_000_000
+	MaxProfileArtifactBytes = 512 << 10
+	MaxProfileRevisions     = 64
+	MaxCoverageCapabilities = 64
+	MaxClaimProfiles        = 64
+	MaxCollateralProfiles   = 64
+	MaxPayoutAdapters       = 32
+	MaxClaims               = 1024
+	MaxClaimRevisions       = 64
+	MaxEvidenceItems        = 256
+	MaxPayoutLines          = 256
+	MaxAuthorizations       = 512
+	MaxExtensions           = 64
+	MaxObjectIDBytes        = 256
+	MaxPolicyBytes          = 64 << 10
 )
 
 const (

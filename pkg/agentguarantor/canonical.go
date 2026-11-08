@@ -22,8 +22,8 @@ import (
 )
 
 func equalCanonical(left, right any) bool {
-	leftBytes, leftErr := codec.Marshal(left)
-	rightBytes, rightErr := codec.Marshal(right)
+	leftBytes, leftErr := guarantorCodec.Marshal(left)
+	rightBytes, rightErr := guarantorCodec.Marshal(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftBytes, rightBytes)
 }
 
@@ -68,15 +68,43 @@ type AuthorityResolutionScopeV1 struct {
 	SignatureDomain  string
 }
 
-func Digest(domain string, value interface{}) (string, error) { return codec.Digest(domain, value) }
+// GuarantorCodecLimitsV1 are the canonical-encoding limits of every Guarantor
+// V1 object. Only this profile uses them; the package-level codec limits of
+// every other profile stay at codec.DefaultLimits.
+//
+//   - CanonicalBytes is the complete-object ceiling, MaxCanonicalObjectBytes.
+//   - StringBytes equals the object ceiling: a nested string (a base64
+//     canonical request inside a stage result) is part of the object that
+//     carries it, so a lower string bound would be a second, arbitrary ceiling
+//     that a valid history reaches first. The worst-case authorized-decision
+//     receipt carries a 1,165,360-character request string.
+//   - JSONBytes keeps the codec's JSON-to-CBOR ratio of 2.
+var GuarantorCodecLimitsV1 = codec.Limits{CanonicalBytes: MaxCanonicalObjectBytes,
+	JSONBytes: 2 * MaxCanonicalObjectBytes, StringBytes: MaxCanonicalObjectBytes}
 
-func Canonical(value interface{}) ([]byte, error) { return codec.Marshal(value) }
+var guarantorCodec = codec.Bounded{Limits: GuarantorCodecLimitsV1}
+
+// Digest is codec.Digest under the Guarantor limits.
+func Digest(domain string, value interface{}) (string, error) {
+	return guarantorCodec.Digest(domain, value)
+}
+
+// Unmarshal is codec.Unmarshal under the Guarantor limits.
+func Unmarshal(data []byte, output interface{}) error { return guarantorCodec.Unmarshal(data, output) }
+
+// DigestCanonical is codec.DigestCanonical under the Guarantor limits.
+func DigestCanonical(domain string, encoded []byte) (string, error) {
+	return guarantorCodec.DigestCanonical(domain, encoded)
+}
+
+// Canonical is codec.Marshal under the Guarantor limits.
+func Canonical(value interface{}) ([]byte, error) { return guarantorCodec.Marshal(value) }
 
 func enforceCanonicalSize(value interface{}, maximum uint64, label string) error {
 	if maximum == 0 || maximum > MaxCanonicalObjectBytes {
 		return fmt.Errorf("%s has an invalid negotiated byte ceiling", label)
 	}
-	encoded, err := codec.Marshal(value)
+	encoded, err := guarantorCodec.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("encode %s: %w", label, err)
 	}
@@ -90,7 +118,7 @@ func authorizationMessage(signatureDomain string, statement AuthorizationStateme
 	if err := validateAuthorizationStatement(statement); err != nil {
 		return nil, err
 	}
-	canonical, err := codec.Marshal(statement)
+	canonical, err := guarantorCodec.Marshal(statement)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +305,7 @@ func ValidateAuthorizationSet(authorizations []ProfileQualifiedObjectAuthorizati
 	seen := make(map[string]struct{}, len(authorizations))
 	previous := []byte(nil)
 	for _, authorization := range authorizations {
-		canonical, err := codec.Marshal(authorization)
+		canonical, err := guarantorCodec.Marshal(authorization)
 		if err != nil || previous != nil && bytes.Compare(previous, canonical) >= 0 {
 			return errors.New("Guarantor authorizations are unsorted or duplicated")
 		}
@@ -350,7 +378,7 @@ func ValidateAuthorizationQuorumSet(authorizations []ProfileQualifiedObjectAutho
 	seen := make(map[string]struct{}, len(authorizations))
 	previous := []byte(nil)
 	for _, authorization := range authorizations {
-		canonical, marshalErr := codec.Marshal(authorization)
+		canonical, marshalErr := guarantorCodec.Marshal(authorization)
 		if marshalErr != nil || previous != nil && bytes.Compare(previous, canonical) >= 0 {
 			return errors.New("Guarantor authorizations are unsorted or duplicated")
 		}

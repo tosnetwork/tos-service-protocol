@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -38,7 +37,7 @@ func ServiceProfileArtifactDigestV1(artifact GuarantorServiceProfileArtifactV1) 
 	if err := validateServiceProfileArtifactShapeV1(artifact); err != nil {
 		return "", err
 	}
-	return codec.Digest(ServiceProfileArtifactDomain, artifact)
+	return guarantorCodec.Digest(ServiceProfileArtifactDomain, artifact)
 }
 
 func VerifyServiceProfileArtifactV1(artifact GuarantorServiceProfileArtifactV1,
@@ -48,7 +47,7 @@ func VerifyServiceProfileArtifactV1(artifact GuarantorServiceProfileArtifactV1,
 	}
 	var priorOperationDigest, priorProfileDigest, profileID, providerAgentID, authorityDomain string
 	for index, revision := range artifact.Revisions {
-		payloadBytes, err := codec.Marshal(revision.IntentPayload)
+		payloadBytes, err := guarantorCodec.Marshal(revision.IntentPayload)
 		if err != nil || agentcommerce.VerifyAgentOperationV1(revision.ServiceIntentOperation, payloadBytes, resolver, now) != nil {
 			return errors.New("Guarantor service profile publication operation does not verify")
 		}
@@ -65,7 +64,7 @@ func VerifyServiceProfileArtifactV1(artifact GuarantorServiceProfileArtifactV1,
 			operation.ObjectID != profile.ProfileID || operation.Sequence != profile.Revision {
 			return errors.New("Guarantor service profile differs from its publication")
 		}
-		profileBytes, err := codec.Marshal(profile)
+		profileBytes, err := guarantorCodec.Marshal(profile)
 		profileDigest, digestErr := ServiceProfileDigest(profile)
 		contentHash := sha256.Sum256(profileBytes)
 		detail := revision.IntentPayload.DetailDescriptor
@@ -118,7 +117,7 @@ func validateServiceProfileArtifactShapeV1(artifact GuarantorServiceProfileArtif
 			return errors.New("Guarantor service profile revision artifact shape is invalid")
 		}
 	}
-	canonical, err := codec.Marshal(artifact)
+	canonical, err := guarantorCodec.Marshal(artifact)
 	if err != nil || len(canonical) > MaxProfileArtifactBytes {
 		return errors.New("Guarantor service profile artifact exceeds its canonical bound")
 	}

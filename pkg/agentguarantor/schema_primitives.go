@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 type ImmutableEvidenceDescriptorV1 struct {
@@ -222,7 +221,7 @@ func AuthorityAdmissionEligibilityProofSetDigestV1(set AuthorityAdmissionEligibi
 	if err := ValidateAuthorityAdmissionEligibilityProofSetV1(set); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-authority-admission-eligibility-proof-set.v1", set)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-authority-admission-eligibility-proof-set.v1", set)
 }
 
 func ValidateAuthorityAdmissionEligibilityProofSetV1(set AuthorityAdmissionEligibilityProofSetV1) error {
@@ -242,7 +241,7 @@ func ValidateAuthorityAdmissionEligibilityProofSetV1(set AuthorityAdmissionEligi
 			proof.AdmissionTimeUnix != set.AdmissionTimeUnix || proof.EligibilityState != "eligible" {
 			return errors.New("Guarantor authority-admission eligibility proof is invalid")
 		}
-		encoded, err := codec.Marshal(proof)
+		encoded, err := guarantorCodec.Marshal(proof)
 		if err != nil || prior != nil && bytes.Compare(prior, encoded) >= 0 {
 			return errors.New("Guarantor authority-admission eligibility proofs are unsorted or duplicated")
 		}

@@ -7,14 +7,13 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 func ServiceProfileDigest(profile ServiceProfileV1) (string, error) {
 	if err := ValidateServiceProfile(profile, time.Unix(int64(profile.CreatedAtUnix), 0).UTC()); err != nil {
 		return "", err
 	}
-	return codec.Digest(ServiceProfileDomain, profile)
+	return guarantorCodec.Digest(ServiceProfileDomain, profile)
 }
 
 func ValidateServiceProfile(profile ServiceProfileV1, now time.Time) error {
@@ -88,7 +87,7 @@ func validateCoverageCapability(capability CoverageCapabilityV1) error {
 func validateClaimProfiles(profiles []ClaimProfileV1) error {
 	previous := ""
 	for _, profile := range profiles {
-		digest, err := codec.Digest("tos.service.agent-guarantor-claim-profile.v1", profile)
+		digest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-profile.v1", profile)
 		if err != nil || digest <= previous || !validID(profile.ProfileID) || profile.ProfileVersion == 0 ||
 			profile.ProfileVersion == 1 && profile.PredecessorProfileDigest != "" ||
 			profile.ProfileVersion > 1 && !validDigest(profile.PredecessorProfileDigest) ||
@@ -138,12 +137,12 @@ func validateClaimProfiles(profiles []ClaimProfileV1) error {
 func validateCollateralProfiles(profiles []CollateralProfileV1, claims []ClaimProfileV1) error {
 	claimDigests := make(map[string]struct{}, len(claims))
 	for _, claim := range claims {
-		digest, _ := codec.Digest("tos.service.agent-guarantor-claim-profile.v1", claim)
+		digest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-claim-profile.v1", claim)
 		claimDigests[digest] = struct{}{}
 	}
 	previous := ""
 	for _, profile := range profiles {
-		digest, err := codec.Digest("tos.service.agent-guarantor-collateral-profile.v1", profile)
+		digest, err := guarantorCodec.Digest("tos.service.agent-guarantor-collateral-profile.v1", profile)
 		if err != nil || digest <= previous || !validID(profile.ProfileID) || profile.ProfileVersion == 0 ||
 			(profile.AssuranceLevel != AssuranceCollateralAttested && profile.AssuranceLevel != AssuranceIndependentlyEnforced) ||
 			agentcommerce.ValidateAssetIdentityV1(profile.Asset) != nil || agentcommerce.ValidateProfileRefV1(profile.CustodyAdapterProfile) != nil ||
@@ -216,7 +215,7 @@ func sortedProfileRefs(refs []ProfileRefV1, maximum int) bool {
 		if agentcommerce.ValidateProfileRefV1(ref) != nil {
 			return false
 		}
-		canonical, err := codec.Marshal(ref)
+		canonical, err := guarantorCodec.Marshal(ref)
 		if err != nil {
 			return false
 		}
@@ -227,8 +226,8 @@ func sortedProfileRefs(refs []ProfileRefV1, maximum int) bool {
 		previous = key
 	}
 	return sort.SliceIsSorted(refs, func(i, j int) bool {
-		left, _ := codec.Marshal(refs[i])
-		right, _ := codec.Marshal(refs[j])
+		left, _ := guarantorCodec.Marshal(refs[i])
+		right, _ := guarantorCodec.Marshal(refs[j])
 		return string(left) < string(right)
 	})
 }

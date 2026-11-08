@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const ClaimAdmissionReceiptSealDomainV1 = "tos.service.agent-guarantor-claim-admission-receipt-seal.v1"
@@ -44,14 +43,14 @@ type ClaimAdmissionReceiptProofV1 struct {
 
 func NewClaimAdmissionReceiptSealBodyV1(receipt AuthorizedClaimAdmissionReceiptV1,
 	terms CoverageTermsV1, sealedAt time.Time) (ClaimAdmissionReceiptSealBodyV1, ImmutableEvidenceDescriptorV1, error) {
-	wire, wireErr := codec.Marshal(receipt)
+	wire, wireErr := guarantorCodec.Marshal(receipt)
 	receiptDigest, receiptErr := ClaimAdmissionReceiptDigestV1(receipt)
-	bodyDigest, bodyErr := codec.Digest("tos.service.agent-guarantor-claim-admission-receipt-body.v1", receipt.Body)
+	bodyDigest, bodyErr := guarantorCodec.Digest("tos.service.agent-guarantor-claim-admission-receipt-body.v1", receipt.Body)
 	actionDigest, actionErr := agentcommerce.AuthorizedActionDigest(receipt.StageActionAdmissionEvidence.AuthorizedAction)
 	claimDigest, claimErr := ClaimEnvelopeDigest(receipt.AuthorizedClaimIngressReceipt.AuthorizedClaim)
 	ingressDigest, ingressErr := ClaimIngressReceiptDigestV1(receipt.AuthorizedClaimIngressReceipt)
 	endDigest, endErr := CoverageEndCommitmentDigestV1(receipt.CoverageEndCommitment)
-	instanceDigest, instanceErr := codec.Digest("tos.service.authority-instance-record.v1", receipt.AuthorityInstanceRecord)
+	instanceDigest, instanceErr := guarantorCodec.Digest("tos.service.authority-instance-record.v1", receipt.AuthorityInstanceRecord)
 	eligibilityDigest, eligibilityErr := AuthorityAdmissionEligibilityProofSetDigestV1(receipt.AuthorityAdmissionEligibilityProofSet)
 	termsDigest, termsErr := CoverageTermsDigest(terms)
 	if wireErr != nil || receiptErr != nil || bodyErr != nil || actionErr != nil || claimErr != nil || ingressErr != nil ||
@@ -99,7 +98,7 @@ func ClaimAdmissionReceiptProofDigestV1(proof ClaimAdmissionReceiptProofV1) (str
 		proof.ReceiptDescriptor.ContentDigest != proof.ReceiptEnvelopeDigest {
 		return "", errors.New("claim admission receipt proof is malformed")
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-admission-receipt-proof.v1", proof)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-admission-receipt-proof.v1", proof)
 }
 
 func ValidateClaimAdmissionReceiptProofV1(proof ClaimAdmissionReceiptProofV1, terms CoverageTermsV1,
@@ -114,11 +113,11 @@ func ValidateClaimAdmissionReceiptProofV1(proof ClaimAdmissionReceiptProofV1, te
 		stage = "initial_claim_admission"
 	}
 	bound, boundErr := FindStageActionAuthorityV1(terms.StageActionAuthorityBinding, stage)
-	bodyDigest, bodyErr := codec.Digest("tos.service.agent-guarantor-claim-admission-receipt-body.v1", body)
+	bodyDigest, bodyErr := guarantorCodec.Digest("tos.service.agent-guarantor-claim-admission-receipt-body.v1", body)
 	claimDigest, claimErr := ClaimEnvelopeDigest(claim)
 	ingressDigest, ingressErr := ClaimIngressReceiptDigestV1(proof.AuthorizedClaimIngressReceipt)
 	endDigest, endErr := CoverageEndCommitmentDigestV1(proof.CoverageEndCommitment)
-	instanceDigest, instanceErr := codec.Digest("tos.service.authority-instance-record.v1", proof.AuthorityInstanceRecord)
+	instanceDigest, instanceErr := guarantorCodec.Digest("tos.service.authority-instance-record.v1", proof.AuthorityInstanceRecord)
 	eligibilityDigest, eligibilityErr := AuthorityAdmissionEligibilityProofSetDigestV1(proof.AuthorityAdmissionEligibilityProofSet)
 	termsDigest, termsErr := CoverageTermsDigest(terms)
 	seal := proof.SealBody
@@ -159,7 +158,7 @@ func ValidateClaimAdmissionReceiptProofV1(proof ClaimAdmissionReceiptProofV1, te
 	}
 	if len(wire) != 0 {
 		var complete AuthorizedClaimAdmissionReceiptV1
-		if codec.Unmarshal(wire, &complete) != nil {
+		if guarantorCodec.Unmarshal(wire, &complete) != nil {
 			return errors.New("claim admission compact proof complete receipt is undecodable")
 		}
 		completeDigest, digestErr := ClaimAdmissionReceiptDigestV1(complete)
@@ -170,7 +169,7 @@ func ValidateClaimAdmissionReceiptProofV1(proof ClaimAdmissionReceiptProofV1, te
 			return errors.New("claim admission compact proof differs from its immutable complete receipt")
 		}
 	}
-	sealDigest, _ := codec.Digest(ClaimAdmissionReceiptSealDomainV1, seal)
+	sealDigest, _ := guarantorCodec.Digest(ClaimAdmissionReceiptSealDomainV1, seal)
 	return VerifyObjectAuthorization(proof.SealAuthorization, "claim-admission-receipt-seal", sealDigest,
 		"tos.service.agent-guarantor-claim-admission-receipt-seal-signature.v1", resolver, now)
 }

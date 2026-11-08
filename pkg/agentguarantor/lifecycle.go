@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -137,7 +136,7 @@ func CoverageEndCommitmentDigestV1(commitment CoverageEndCommitmentV1) (string, 
 	if err := ValidateCoverageEndCommitmentV1(commitment); err != nil {
 		return "", err
 	}
-	return codec.Digest(CoverageEndCommitmentDomain, commitment)
+	return guarantorCodec.Digest(CoverageEndCommitmentDomain, commitment)
 }
 
 func ValidateCoverageEndCommitmentV1(commitment CoverageEndCommitmentV1) error {
@@ -168,7 +167,7 @@ func TransitionEvidenceProjectionDigestV1(projection TransitionEvidenceProjectio
 	if err := ValidateTransitionEvidenceProjectionV1(projection); err != nil {
 		return "", err
 	}
-	return codec.Digest(TransitionProjectionDomain, projection)
+	return guarantorCodec.Digest(TransitionProjectionDomain, projection)
 }
 
 func ValidateTransitionEvidenceProjectionV1(projection TransitionEvidenceProjectionV1) error {
@@ -182,7 +181,7 @@ func ValidateTransitionEvidenceProjectionV1(projection TransitionEvidenceProject
 		if !validToken(ref.EvidenceRole, 128) || (ref.DigestKind != "authorized_envelope" && ref.DigestKind != "canonical_set" && ref.DigestKind != "canonical_object") || !validDigest(ref.ObjectDigest) {
 			return errors.New("transition evidence reference is invalid")
 		}
-		encoded, err := codec.Marshal(ref)
+		encoded, err := guarantorCodec.Marshal(ref)
 		if err != nil || prior != nil && bytes.Compare(prior, encoded) >= 0 {
 			return errors.New("transition evidence references are unsorted or duplicated")
 		}
@@ -195,7 +194,7 @@ func CoverageActivationEvidenceDigestV1(evidence AuthorizedCoverageActivationEvi
 	if err := validateActivationEvidenceShape(evidence); err != nil {
 		return "", err
 	}
-	return codec.Digest(ActivationEvidenceDomain, evidence)
+	return guarantorCodec.Digest(ActivationEvidenceDomain, evidence)
 }
 
 func VerifyCoverageActivationEvidenceV1(evidence AuthorizedCoverageActivationEvidenceV1, offer AuthorizedFirmCoverageOfferV1,
@@ -246,7 +245,7 @@ func VerifyCoverageActivationEvidenceV1(evidence AuthorizedCoverageActivationEvi
 	if err != nil {
 		return err
 	}
-	requestBytes, err := codec.Marshal(CoverageActivationActionBodyV1{SchemaVersion: 1, UnderlyingAgreementBody: evidence.UnderlyingAgreementBody,
+	requestBytes, err := guarantorCodec.Marshal(CoverageActivationActionBodyV1{SchemaVersion: 1, UnderlyingAgreementBody: evidence.UnderlyingAgreementBody,
 		UnderlyingAuthorizationEvidenceSet: evidence.UnderlyingAuthorizationEvidenceSet, AuthorizedAcceptanceReceipt: acceptance,
 		PrerequisiteEvidenceSet: evidence.PrerequisiteEvidenceSet, TargetCoverageEndCommitment: evidence.CoverageEndCommitment,
 		TransitionEvidenceProjection: evidence.TransitionEvidenceProjection, ExpectedCoverageRevision: body.PriorCoverageRevision,
@@ -278,7 +277,7 @@ func VerifyCoverageActivationEvidenceV1(evidence AuthorizedCoverageActivationEvi
 			return err
 		}
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-activation-evidence-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-activation-evidence-body.v1", body)
 	return ValidateAuthorizationSet(evidence.Authorizations, "activation-evidence", bodyDigest,
 		"tos.service.agent-guarantor-activation-evidence-signature.v1", []string{offer.Body.GuarantorAgentID}, authorityResolver, now)
 }
@@ -321,15 +320,16 @@ func verifyActivationCollateralPrerequisiteV1(evidence AuthorizedCoverageActivat
 	collateralFound := false
 	controlFound := false
 	independenceFound := terms.SelectedAssuranceLevel != AssuranceIndependentlyEnforced
-	for _, item := range set.Items {
-		if item.Representation != "inline" || len(item.CanonicalEnvelopeBytes) == 0 {
-			continue
-		}
+	prerequisites, err := resolveActivationPrerequisitesV1(set, terms, authorityResolver)
+	if err != nil {
+		return err
+	}
+	for _, item := range prerequisites {
 		var collateral AuthorizedCollateralEvidenceV1
-		if codec.Unmarshal(item.CanonicalEnvelopeBytes, &collateral) == nil {
+		if item.contentType == CollateralEvidenceContentTypeV1 && guarantorCodec.Unmarshal(item.canonical, &collateral) == nil {
 			digest, err := CollateralEvidenceDigestV1(collateral)
-			if err == nil && digest == item.EvidenceEnvelopeDigest &&
-				VerifyCollateralEvidenceV1(collateral, terms, authorityResolver, fenceResolver, now, finalityVerifier, false) == nil &&
+			if err == nil && digest == item.envelopeDigest &&
+				activationPrerequisiteVerifiersV1.collateral(collateral, terms, authorityResolver, fenceResolver, now, finalityVerifier, false) == nil &&
 				collateral.Body.CoverageAgreementBodyDigest == evidence.Body.CoverageAgreementBodyDigest &&
 				collateral.Body.CollateralObligationID == terms.CollateralObligationID &&
 				(collateral.Body.TransitionKind == "lock" || collateral.Body.TransitionKind == "encumber") &&
@@ -351,10 +351,10 @@ func verifyActivationCollateralPrerequisiteV1(evidence AuthorizedCoverageActivat
 			}
 		}
 		var control AuthorizedCollateralControlEvidenceV1
-		if codec.Unmarshal(item.CanonicalEnvelopeBytes, &control) == nil {
+		if item.contentType == CollateralControlEvidenceContentTypeV1 && guarantorCodec.Unmarshal(item.canonical, &control) == nil {
 			digest, err := CollateralControlEvidenceDigestV1(control)
-			if err == nil && digest == item.EvidenceEnvelopeDigest &&
-				VerifyCollateralControlEvidenceV1(control, evidence.Body.CoverageAgreementBodyDigest,
+			if err == nil && digest == item.envelopeDigest &&
+				activationPrerequisiteVerifiersV1.control(control, evidence.Body.CoverageAgreementBodyDigest,
 					terms.CollateralObligationID, terms.SelectedCollateralProfileDigest,
 					terms.CollateralTerms.CollateralControlDisclosure, terms.LifecycleAuthorizationProfile,
 					[]string{terms.GuarantorAgentID}, "all", authorityResolver, now) == nil {
@@ -363,10 +363,11 @@ func verifyActivationCollateralPrerequisiteV1(evidence AuthorizedCoverageActivat
 		}
 		if terms.SelectedAssuranceLevel == AssuranceIndependentlyEnforced {
 			var independent AuthorizedGuarantorOperationalIndependenceEvidenceV1
-			if codec.Unmarshal(item.CanonicalEnvelopeBytes, &independent) == nil {
+			if item.contentType == OperationalIndependenceEvidenceContentTypeV1 &&
+				guarantorCodec.Unmarshal(item.canonical, &independent) == nil {
 				digest, err := OperationalIndependenceEvidenceDigestV1(independent)
-				if err == nil && digest == item.EvidenceEnvelopeDigest &&
-					VerifyOperationalIndependenceEvidenceV1(independent, terms,
+				if err == nil && digest == item.envelopeDigest &&
+					activationPrerequisiteVerifiersV1.independence(independent, terms,
 						evidence.Body.CoverageAgreementBodyDigest, authorityResolver, now) == nil {
 					independenceFound = true
 				}
@@ -377,4 +378,76 @@ func verifyActivationCollateralPrerequisiteV1(evidence AuthorizedCoverageActivat
 		return errors.New("collateral activation lacks exact allocation, control, or operational-independence proof")
 	}
 	return nil
+}
+
+const (
+	CollateralEvidenceContentTypeV1              = "application/vnd.tos.service.agent-guarantor-collateral-evidence.v1+cbor"
+	CollateralControlEvidenceContentTypeV1       = "application/vnd.tos.service.agent-guarantor-collateral-control-evidence.v1+cbor"
+	OperationalIndependenceEvidenceContentTypeV1 = "application/vnd.tos.service.agent-guarantor-operational-independence-evidence.v1+cbor"
+)
+
+// activationPrerequisiteVerifiersV1 are the signed-object verifiers the
+// activation prerequisite check applies to each resolved object. They are a
+// variable only so a test can isolate the descriptor path from the signed
+// fixtures; production never reassigns them, which a test asserts.
+var activationPrerequisiteVerifiersV1 = struct {
+	collateral   func(AuthorizedCollateralEvidenceV1, CoverageTermsV1, AuthorityKeyResolver, agentcommerce.FenceAuthorityResolver, time.Time, CollateralAdapterFinalityVerifier, bool) error
+	control      func(AuthorizedCollateralControlEvidenceV1, string, string, string, CollateralControlDisclosureV1, ProfileRefV1, []string, string, AuthorityKeyResolver, time.Time) error
+	independence func(AuthorizedGuarantorOperationalIndependenceEvidenceV1, CoverageTermsV1, string, AuthorityKeyResolver, time.Time) error
+}{VerifyCollateralEvidenceV1, VerifyCollateralControlEvidenceV1, VerifyOperationalIndependenceEvidenceV1}
+
+// activationPrerequisiteV1 is one descriptor-named prerequisite object with the
+// exact canonical bytes the descriptor commits to.
+type activationPrerequisiteV1 struct {
+	contentType    string
+	envelopeDigest string
+	canonical      []byte
+}
+
+// resolveActivationPrerequisitesV1 obtains the exact bytes of every
+// recognised activation prerequisite. Guarantor evidence is descriptor-only,
+// so each item must be content addressed; its descriptor must name the
+// item's media type and envelope digest; its evidence profile and retrieval
+// policy must both be the one the Agreement selects for that prerequisite;
+// and the resolved bytes must have the declared length. The caller decodes
+// and verifies the bytes exactly as it did for inline copies. Items of other
+// media types are not prerequisites and are skipped, as before.
+func resolveActivationPrerequisitesV1(set CanonicalGuarantorEvidenceSetV1, terms CoverageTermsV1,
+	resolver AuthorityKeyResolver) ([]activationPrerequisiteV1, error) {
+	if err := ValidateCanonicalGuarantorEvidenceSetV1(set); err != nil {
+		return nil, err
+	}
+	independenceDigest := ""
+	if terms.OperationalIndependenceTerms != nil {
+		digest, err := OperationalIndependenceTermsDigestV1(*terms.OperationalIndependenceTerms)
+		if err != nil {
+			return nil, err
+		}
+		independenceDigest = digest
+	}
+	resolved := make([]activationPrerequisiteV1, 0, len(set.Items))
+	for _, item := range set.Items {
+		wantPolicy := ""
+		switch item.ContentType {
+		case CollateralEvidenceContentTypeV1, CollateralControlEvidenceContentTypeV1:
+			wantPolicy = terms.SelectedCollateralProfileDigest
+		case OperationalIndependenceEvidenceContentTypeV1:
+			wantPolicy = independenceDigest
+		default:
+			continue
+		}
+		descriptor := item.ImmutableDescriptor
+		if wantPolicy == "" || item.Representation != "content_addressed" || descriptor == nil ||
+			descriptor.ContentType != item.ContentType || descriptor.ContentDigest != item.EvidenceEnvelopeDigest ||
+			item.EvidenceProfileDigest != wantPolicy || descriptor.RetrievalPolicyDigest != wantPolicy {
+			return nil, errors.New("collateral activation prerequisite descriptor is not bound to its Agreement policy")
+		}
+		wire, err := resolveImmutableEvidenceV1(resolver, *descriptor, true)
+		if err != nil {
+			return nil, err
+		}
+		resolved = append(resolved, activationPrerequisiteV1{contentType: item.ContentType,
+			envelopeDigest: item.EvidenceEnvelopeDigest, canonical: wire})
+	}
+	return resolved, nil
 }

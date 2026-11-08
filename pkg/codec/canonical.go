@@ -31,6 +31,42 @@ const (
 	MaxStringBytes = 1 << 20
 )
 
+// Limits are the byte bounds one canonical encoding profile enforces. The
+// package-level functions use DefaultLimits; a profile whose objects are
+// specified to be larger (the Agent Guarantor) uses Bounded with its own
+// limits, so no other profile's bound moves. Nesting depth and item counts
+// stay global.
+type Limits struct {
+	CanonicalBytes int
+	JSONBytes      int
+	StringBytes    int
+}
+
+// DefaultLimits returns the limits of every profile that does not declare its
+// own.
+func DefaultLimits() Limits {
+	return Limits{CanonicalBytes: MaxCanonicalBytes, JSONBytes: MaxJSONBytes, StringBytes: MaxStringBytes}
+}
+
+// MaxProfileCanonicalBytes is the largest canonical limit any profile may
+// declare.
+const MaxProfileCanonicalBytes = 64 << 20
+
+func (limits Limits) validate() error {
+	if limits.CanonicalBytes <= 0 || limits.CanonicalBytes > MaxProfileCanonicalBytes ||
+		limits.StringBytes <= 0 || limits.StringBytes > limits.CanonicalBytes ||
+		limits.JSONBytes < limits.CanonicalBytes || limits.JSONBytes > 2*MaxProfileCanonicalBytes {
+		return errors.New("canonical codec limits are invalid")
+	}
+	return nil
+}
+
+// Bounded is the canonical codec under explicit limits. Its encoding is
+// byte-identical to the package-level functions; only the size bounds differ.
+type Bounded struct {
+	Limits Limits
+}
+
 var (
 	encodingMode cbor.EncMode
 	decodingMode cbor.DecMode
@@ -63,14 +99,23 @@ func init() {
 // Marshal converts value through its JSON representation and emits
 // deterministic CBOR. Floating-point values are deliberately outside v0.1.
 func Marshal(value interface{}) ([]byte, error) {
+	return Bounded{Limits: DefaultLimits()}.Marshal(value)
+}
+
+// Marshal is the package-level Marshal under the receiver's limits.
+func (codec Bounded) Marshal(value interface{}) ([]byte, error) {
+	limits := codec.Limits
+	if err := limits.validate(); err != nil {
+		return nil, err
+	}
 	jsonValue, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("marshal protocol JSON model: %w", err)
 	}
-	if len(jsonValue) > MaxJSONBytes {
+	if len(jsonValue) > limits.JSONBytes {
 		return nil, errors.New("protocol value exceeds JSON byte limit")
 	}
-	normalized, err := decodeJSONModel(jsonValue)
+	normalized, err := decodeJSONModel(jsonValue, limits)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +123,7 @@ func Marshal(value interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode deterministic CBOR: %w", err)
 	}
-	if len(encoded) > MaxCanonicalBytes {
+	if len(encoded) > limits.CanonicalBytes {
 		return nil, errors.New("canonical value exceeds byte limit")
 	}
 	return encoded, nil
@@ -87,7 +132,16 @@ func Marshal(value interface{}) ([]byte, error) {
 // Unmarshal accepts only the exact deterministic representation. A
 // semantically equivalent but non-canonical CBOR value is rejected.
 func Unmarshal(data []byte, output interface{}) error {
-	if len(data) == 0 || len(data) > MaxCanonicalBytes {
+	return Bounded{Limits: DefaultLimits()}.Unmarshal(data, output)
+}
+
+// Unmarshal is the package-level Unmarshal under the receiver's limits.
+func (codec Bounded) Unmarshal(data []byte, output interface{}) error {
+	limits := codec.Limits
+	if err := limits.validate(); err != nil {
+		return err
+	}
+	if len(data) == 0 || len(data) > limits.CanonicalBytes {
 		return errors.New("canonical value has invalid size")
 	}
 	var normalized interface{}
@@ -95,7 +149,7 @@ func Unmarshal(data []byte, output interface{}) error {
 		return fmt.Errorf("decode deterministic CBOR: %w", err)
 	}
 	counter := 0
-	if err := validateDecoded(normalized, 0, &counter); err != nil {
+	if err := validateDecoded(normalized, 0, &counter, limits); err != nil {
 		return err
 	}
 	reencoded, err := encodingMode.Marshal(normalized)
@@ -124,10 +178,15 @@ func Unmarshal(data []byte, output interface{}) error {
 // Digest binds a canonical value to a protocol domain. The domain is included
 // with an explicit length to prevent concatenation ambiguity.
 func Digest(domain string, value interface{}) (string, error) {
+	return Bounded{Limits: DefaultLimits()}.Digest(domain, value)
+}
+
+// Digest is the package-level Digest under the receiver's limits.
+func (codec Bounded) Digest(domain string, value interface{}) (string, error) {
 	if err := validateDomain(domain); err != nil {
 		return "", err
 	}
-	encoded, err := Marshal(value)
+	encoded, err := codec.Marshal(value)
 	if err != nil {
 		return "", err
 	}
@@ -145,11 +204,17 @@ func Digest(domain string, value interface{}) (string, error) {
 // DigestCanonical hashes already encoded canonical CBOR under domain after
 // independently checking its canonical representation.
 func DigestCanonical(domain string, encoded []byte) (string, error) {
+	return Bounded{Limits: DefaultLimits()}.DigestCanonical(domain, encoded)
+}
+
+// DigestCanonical is the package-level DigestCanonical under the receiver's
+// limits.
+func (codec Bounded) DigestCanonical(domain string, encoded []byte) (string, error) {
 	if err := validateDomain(domain); err != nil {
 		return "", err
 	}
 	var value interface{}
-	if err := Unmarshal(encoded, &value); err != nil {
+	if err := codec.Unmarshal(encoded, &value); err != nil {
 		return "", err
 	}
 	hasher := sha256.New()
@@ -163,7 +228,7 @@ func DigestCanonical(domain string, encoded []byte) (string, error) {
 	return "sha256:" + hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func decodeJSONModel(data []byte) (interface{}, error) {
+func decodeJSONModel(data []byte, limits Limits) (interface{}, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	counter := 0
@@ -175,7 +240,7 @@ func decodeJSONModel(data []byte) (interface{}, error) {
 		return nil, errors.New("protocol JSON model contains trailing data")
 	}
 	counter = 0
-	return normalizeJSON(value, 0, &counter)
+	return normalizeJSON(value, 0, &counter, limits)
 }
 
 func parseJSONValue(decoder *json.Decoder, depth int, counter *int) (interface{}, error) {
@@ -245,7 +310,7 @@ func parseJSONValue(decoder *json.Decoder, depth int, counter *int) (interface{}
 	}
 }
 
-func normalizeJSON(value interface{}, depth int, counter *int) (interface{}, error) {
+func normalizeJSON(value interface{}, depth int, counter *int, limits Limits) (interface{}, error) {
 	if depth > MaxNestedLevels {
 		return nil, errors.New("protocol value exceeds nesting limit")
 	}
@@ -257,7 +322,7 @@ func normalizeJSON(value interface{}, depth int, counter *int) (interface{}, err
 	case nil, bool:
 		return typed, nil
 	case string:
-		if !utf8.ValidString(typed) || len(typed) > MaxStringBytes {
+		if !utf8.ValidString(typed) || len(typed) > limits.StringBytes {
 			return nil, errors.New("protocol string is invalid or too large")
 		}
 		return typed, nil
@@ -284,7 +349,7 @@ func normalizeJSON(value interface{}, depth int, counter *int) (interface{}, err
 		}
 		output := make([]interface{}, len(typed))
 		for index := range typed {
-			normalized, err := normalizeJSON(typed[index], depth+1, counter)
+			normalized, err := normalizeJSON(typed[index], depth+1, counter, limits)
 			if err != nil {
 				return nil, err
 			}
@@ -297,10 +362,10 @@ func normalizeJSON(value interface{}, depth int, counter *int) (interface{}, err
 		}
 		output := make(map[string]interface{}, len(typed))
 		for key, item := range typed {
-			if !utf8.ValidString(key) || len(key) > MaxStringBytes {
+			if !utf8.ValidString(key) || len(key) > limits.StringBytes {
 				return nil, errors.New("protocol map key is invalid or too large")
 			}
-			normalized, err := normalizeJSON(item, depth+1, counter)
+			normalized, err := normalizeJSON(item, depth+1, counter, limits)
 			if err != nil {
 				return nil, err
 			}
@@ -312,7 +377,7 @@ func normalizeJSON(value interface{}, depth int, counter *int) (interface{}, err
 	}
 }
 
-func validateDecoded(value interface{}, depth int, counter *int) error {
+func validateDecoded(value interface{}, depth int, counter *int, limits Limits) error {
 	if depth > MaxNestedLevels {
 		return errors.New("canonical value exceeds nesting limit")
 	}
@@ -324,7 +389,7 @@ func validateDecoded(value interface{}, depth int, counter *int) error {
 	case nil, bool, int64, uint64:
 		return nil
 	case string:
-		if !utf8.ValidString(typed) || len(typed) > MaxStringBytes {
+		if !utf8.ValidString(typed) || len(typed) > limits.StringBytes {
 			return errors.New("canonical string is invalid or too large")
 		}
 		return nil
@@ -333,7 +398,7 @@ func validateDecoded(value interface{}, depth int, counter *int) error {
 			return errors.New("canonical array exceeds item limit")
 		}
 		for _, item := range typed {
-			if err := validateDecoded(item, depth+1, counter); err != nil {
+			if err := validateDecoded(item, depth+1, counter, limits); err != nil {
 				return err
 			}
 		}
@@ -343,10 +408,10 @@ func validateDecoded(value interface{}, depth int, counter *int) error {
 			return errors.New("canonical map exceeds pair limit")
 		}
 		for key, item := range typed {
-			if !utf8.ValidString(key) || len(key) > MaxStringBytes {
+			if !utf8.ValidString(key) || len(key) > limits.StringBytes {
 				return errors.New("canonical map key is invalid or too large")
 			}
-			if err := validateDecoded(item, depth+1, counter); err != nil {
+			if err := validateDecoded(item, depth+1, counter, limits); err != nil {
 				return err
 			}
 		}

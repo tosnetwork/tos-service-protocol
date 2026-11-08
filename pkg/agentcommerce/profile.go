@@ -12,7 +12,14 @@ import (
 const (
 	MaxProfileURIBytes     = 256
 	MaxProfilePayloadBytes = 64 << 10
-	MaxProfileEventBytes   = 1 << 20
+	// MaxProfileEventBytes bounds one encoded CommerceProfileEventV1.
+	MaxProfileEventBytes = 1 << 20
+	// MaxProfileEventObjectBytes bounds the complete object an event names
+	// (object_size_bytes and the descriptor content_size). It is the largest
+	// complete-object ceiling of a profile that uses commerce profile events:
+	// Agent Guarantor V1, 2,000,000 bytes. A profile's own verifier enforces
+	// its own ceiling; the event itself stays within MaxProfileEventBytes.
+	MaxProfileEventObjectBytes = 2_000_000
 	// Inline profile objects must leave room for the signed Messenger envelope,
 	// event metadata and canonical wrapper under Messenger's 128 KiB body cap.
 	// Larger objects use the content-addressed descriptor form.

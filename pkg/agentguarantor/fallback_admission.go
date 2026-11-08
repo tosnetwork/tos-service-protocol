@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 func DeterministicFallbackAdmissionSourceIdentityV1(variant DeterministicFallbackAdmissionVariantV1) (string, string, error) {
@@ -34,14 +33,14 @@ func DeterministicFallbackAdmissionSourceIdentityV1(variant DeterministicFallbac
 		CurrentDecisionAdmissionReceiptDigest:    currentDecisionDigest,
 		CurrentClaimStateTransitionReceiptDigest: currentTransitionDigest,
 		LateFilingCloseReceiptDigest:             lateCloseDigest, ClaimRevisionEpochExpectationDigest: epochDigest}
-	headDigest, err := codec.Digest("tos.service.agent-guarantor-claim-decision-source-head.v1", head)
+	headDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-source-head.v1", head)
 	if err != nil {
 		return "", "", err
 	}
 	identity := DeterministicFallbackAdmissionIdentityV1{SchemaVersion: 1,
 		FallbackProfileDigest: variant.FallbackProfileDigest, TriggerCutoffUnix: variant.TriggerCutoffUnix,
 		ClaimRevisionEpochExpectationDigest: epochDigest}
-	identityDigest, err := codec.Digest("tos.service.agent-guarantor-fallback-admission-identity.v1", identity)
+	identityDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-fallback-admission-identity.v1", identity)
 	return headDigest, identityDigest, err
 }
 
@@ -57,13 +56,13 @@ func verifyDeterministicFallbackAdmissionReceiptV1(receipt AuthorizedClaimDecisi
 	}
 	var actionBody ClaimDecisionAdmissionActionBodyV1
 	request := receipt.StageActionAdmissionEvidence.CanonicalRequest
-	if codec.Unmarshal(request, &actionBody) != nil || actionBody.SchemaVersion != 1 ||
+	if guarantorCodec.Unmarshal(request, &actionBody) != nil || actionBody.SchemaVersion != 1 ||
 		actionBody.AdmissionMode != "deterministic_fallback" || actionBody.AuthorizedDecisionVariant != nil ||
 		actionBody.DeterministicFallbackVariant == nil {
 		return errors.New("claim decision fallback request is not the closed tagged variant")
 	}
 	variant := *actionBody.DeterministicFallbackVariant
-	reencoded, err := codec.Marshal(actionBody)
+	reencoded, err := guarantorCodec.Marshal(actionBody)
 	if err != nil || !bytes.Equal(request, reencoded) {
 		return errors.New("claim decision fallback request is noncanonical")
 	}
@@ -303,7 +302,7 @@ func verifyDeterministicFallbackAdmissionReceiptV1(receipt AuthorizedClaimDecisi
 		body.DecisionSequence, body.AdmittedAtUnix); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-claim-decision-admission-receipt-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-admission-receipt-body.v1", body)
 	return verifyReceiptAuthorizationSetV1(receipt.Authorizations, "claim-decision-admission-receipt", bodyDigest,
 		"tos.service.agent-guarantor-claim-decision-admission-signature.v1", terms.DecisionAdmissionProfile,
 		terms.DecisionAdmissionAuthoritySubjects, terms.DecisionAdmissionQuorumRule, authorityResolver, now)
