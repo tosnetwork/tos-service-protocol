@@ -589,7 +589,7 @@ func validateRelayExecutionRequestCoreShape(request RelayExecutionRequest) error
 // substitute a body after transport validation.
 func VerifyRelayExecutionRequest(ctx context.Context, request RelayExecutionRequest, profile RelayServiceProfile, agentResolver AgentKeyResolver,
 	fenceResolver agentcommerce.CurrentWriterFenceResolver, inspector TransactionInspector, now time.Time) error {
-	if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request, now); err != nil {
+	if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request, fenceResolver, now); err != nil {
 		return err
 	}
 	authorityAt := time.Unix(int64(request.AdmissionReceipt.Body.IssuedAtUnix), 0).UTC()

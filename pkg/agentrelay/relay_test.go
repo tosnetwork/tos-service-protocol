@@ -12,12 +12,64 @@ import (
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 )
+
+// relayAuthorityFake signs and verifies every Action Authority signature of
+// the pure-logic relay tests. It is not ML-DSA-44; tests of real bytes use the
+// shared vector and the tosctl helper.
+var relayAuthorityFake = &mldsa44test.Fake{}
+
+// relayAuthorityKey names an Action Authority controller of relayAuthorityFake.
+type relayAuthorityKey string
+
+func (key relayAuthorityKey) publicKey() []byte { return relayAuthorityFake.PublicKey(string(key)) }
+
+func (key relayAuthorityKey) keyID() string { return relayAuthorityFake.KeyID(string(key)) }
+
+func signTestFence(body agentcommerce.WriterFenceBody, key relayAuthorityKey) (agentcommerce.WriterFence, error) {
+	return agentcommerce.SignWriterFence(context.Background(), body, relayAuthorityFake, string(key))
+}
+
+func signTestAction(action agentcommerce.AuthorizedAction, key relayAuthorityKey) (agentcommerce.AuthorizedAction, error) {
+	return agentcommerce.SignAuthorizedAction(context.Background(), action, key.keyID(), relayAuthorityFake, string(key))
+}
+
+func signTestReceipt(body RelaySideEffectAdmissionReceiptBody, key relayAuthorityKey) (SignedRelaySideEffectAdmissionReceipt, error) {
+	return SignRelaySideEffectAdmissionReceipt(context.Background(), body, relayAuthorityFake, string(key))
+}
+
+// testVerified is the Action Authority check of a request's receipt, or the
+// zero value (which every journal refuses) when it does not verify.
+func testVerified(request RelayExecutionRequest, resolver agentcommerce.FenceAuthorityResolver) VerifiedRelayAdmissionReceipt {
+	verified, err := VerifyRelaySideEffectAdmissionReceiptAuthority(request.AdmissionReceipt, resolver)
+	if err != nil {
+		return VerifiedRelayAdmissionReceipt{}
+	}
+	return verified
+}
+
+// verifiedTestReceipt is the Action Authority check a Service performs before
+// a journal admission.
+func verifiedTestReceipt(t *testing.T, request RelayExecutionRequest, resolver agentcommerce.FenceAuthorityResolver) VerifiedRelayAdmissionReceipt {
+	t.Helper()
+	verified, err := VerifyRelaySideEffectAdmissionReceiptAuthority(request.AdmissionReceipt, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return verified
+}
 
 type relayResolver struct {
 	agents    map[string]ed25519.PublicKey
-	authority ed25519.PublicKey
+	authority []byte
 	current   *relayCurrentFenceState
+}
+
+// Verify implements mldsa44.Verifier for the Action Authority signatures.
+func (resolver relayResolver) Verify(ctx context.Context, use mldsa44.Use, payload, publicKey, signature []byte) error {
+	return relayAuthorityFake.Verify(ctx, use, payload, publicKey, signature)
 }
 
 type relayDomainResolver struct {
@@ -60,15 +112,19 @@ type relayCurrentFenceState struct {
 
 type rotatingFenceResolver struct {
 	base      relayResolver
-	oldKey    ed25519.PublicKey
-	newKey    ed25519.PublicKey
+	oldKey    []byte
+	newKey    []byte
 	rotatesAt time.Time
 	mu        sync.Mutex
 	observed  []time.Time
 }
 
-func (resolver *rotatingFenceResolver) AuthorizeFenceKey(authorityID string,
-	key ed25519.PublicKey, at time.Time) error {
+func (resolver *rotatingFenceResolver) Verify(ctx context.Context, use mldsa44.Use, payload, publicKey, signature []byte) error {
+	return relayAuthorityFake.Verify(ctx, use, payload, publicKey, signature)
+}
+
+func (resolver *rotatingFenceResolver) ResolveActionAuthorityKey(authorityID string,
+	keyID [mldsa44.KeyIDSize]byte, at time.Time) ([]byte, error) {
 	resolver.mu.Lock()
 	resolver.observed = append(resolver.observed, at.UTC())
 	resolver.mu.Unlock()
@@ -76,10 +132,11 @@ func (resolver *rotatingFenceResolver) AuthorizeFenceKey(authorityID string,
 	if !at.UTC().Before(resolver.rotatesAt) {
 		wanted = resolver.newKey
 	}
-	if authorityID != "authority:client" || wanted == nil || !wanted.Equal(key) {
-		return errors.New("authority key is not valid at the requested historical instant")
+	id, err := mldsa44.KeyID(wanted)
+	if authorityID != "authority:client" || err != nil || id != keyID {
+		return nil, errors.New("authority key is not valid at the requested historical instant")
 	}
-	return nil
+	return append([]byte(nil), wanted...), nil
 }
 
 func (resolver *rotatingFenceResolver) ConfirmCurrentWriterFence(fence agentcommerce.WriterFence,
@@ -105,11 +162,13 @@ func (resolver relayResolver) AuthorizeIntentKey(agentID string, key ed25519.Pub
 	return resolver.AuthorizeRelayKey(NetworkDomain{}, agentID, key, at)
 }
 
-func (resolver relayResolver) AuthorizeFenceKey(authorityID string, key ed25519.PublicKey, _ time.Time) error {
-	if authorityID != "authority:client" || resolver.authority == nil || !resolver.authority.Equal(key) {
-		return errors.New("unknown authority key")
+func (resolver relayResolver) ResolveActionAuthorityKey(authorityID string, keyID [mldsa44.KeyIDSize]byte,
+	_ time.Time) ([]byte, error) {
+	id, err := mldsa44.KeyID(resolver.authority)
+	if authorityID != "authority:client" || err != nil || id != keyID {
+		return nil, errors.New("unknown authority key")
 	}
-	return nil
+	return append([]byte(nil), resolver.authority...), nil
 }
 
 func (resolver relayResolver) ConfirmCurrentWriterFence(fence agentcommerce.WriterFence, now time.Time) error {
@@ -564,20 +623,20 @@ func TestRelayAssuranceLevelIsSignedAndCannotChangeAcrossLifecycle(t *testing.T)
 	execution.QuoteRequest = request
 	execution.ProviderQuote = quote
 	execution = fixture.withAdmission(t, execution)
-	if err := VerifyRelaySideEffectAdmissionReceipt(execution.AdmissionReceipt, execution, fixture.now); err != nil {
+	if err := VerifyRelaySideEffectAdmissionReceipt(execution.AdmissionReceipt, execution, fixture.resolver, fixture.now); err != nil {
 		t.Fatalf("matching assurance admission receipt was rejected: %v", err)
 	}
 	mutatedReceiptBody := execution.AdmissionReceipt.Body
 	mutatedReceiptBody.AssuranceLevel = AssuranceAuthorizedSingleProvider
-	mutatedReceipt, err := SignRelaySideEffectAdmissionReceipt(mutatedReceiptBody, fixture.authorityKey)
+	mutatedReceipt, err := signTestReceipt(mutatedReceiptBody, fixture.authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyRelaySideEffectAdmissionReceipt(mutatedReceipt, execution, fixture.now); err == nil {
+	if err := VerifyRelaySideEffectAdmissionReceipt(mutatedReceipt, execution, fixture.resolver, fixture.now); err == nil {
 		t.Fatal("admission receipt changed the signed request assurance level")
 	}
 	if _, err := BuildRelaySideEffectAdmissionSuccessorDescriptor(execution,
-		"principal:openfox-client", execution.AdmissionReceipt); err == nil {
+		"principal:openfox-client", execution.AdmissionReceipt, fixture.resolver); err == nil {
 		t.Fatal("trusted-local assurance unexpectedly allowed decentralized Provider failover")
 	}
 
@@ -970,11 +1029,11 @@ func TestRelayJournalRejectsMutationAndCredentialReplacement(t *testing.T) {
 	if _, created, err := journal.ReserveQuote(fixture.profile, fixture.request, quote, fixture.now); err != nil || !created {
 		t.Fatalf("quote reservation failed: created=%v err=%v", created, err)
 	}
-	first, created, err := journal.Admit(fixture.execution, fixture.now)
+	first, created, err := journal.Admit(fixture.execution, testVerified(fixture.execution, fixture.resolver), fixture.now)
 	if err != nil || !created || first.State != agentcommerce.ActionPrepared {
 		t.Fatalf("first admission failed: created=%v state=%s err=%v", created, first.State, err)
 	}
-	retry, created, err := journal.Admit(fixture.execution, fixture.now)
+	retry, created, err := journal.Admit(fixture.execution, testVerified(fixture.execution, fixture.resolver), fixture.now)
 	if err != nil || created || retry.RelayExecutionDigest != first.RelayExecutionDigest {
 		t.Fatalf("exact retry changed admission: created=%v err=%v", created, err)
 	}
@@ -990,16 +1049,16 @@ func TestRelayJournalRejectsMutationAndCredentialReplacement(t *testing.T) {
 	if beforeDigest != afterDigest {
 		t.Fatal("credential-only writer takeover changed the semantic relay execution digest")
 	}
-	if _, created, err := journal.Admit(takeover, fixture.now); !errors.Is(err, ErrRelayConflict) || created {
+	if _, created, err := journal.Admit(takeover, testVerified(takeover, fixture.resolver), fixture.now); !errors.Is(err, ErrRelayConflict) || created {
 		t.Fatalf("takeover replaced an already-consumed admission receipt: created=%v err=%v", created, err)
 	}
-	if exact, created, err := journal.Admit(fixture.execution, fixture.now); err != nil || created ||
+	if exact, created, err := journal.Admit(fixture.execution, testVerified(fixture.execution, fixture.resolver), fixture.now); err != nil || created ||
 		exact.AdmissionReceiptDigest != first.AdmissionReceiptDigest {
 		t.Fatalf("exact receipt retry did not return the frozen record: created=%v err=%v", created, err)
 	}
 	mutated := takeover
 	mutated.AgreementBodyDigest = digest("9")
-	if _, _, err := journal.Admit(mutated, fixture.now); !errors.Is(err, ErrRelayConflict) {
+	if _, _, err := journal.Admit(mutated, testVerified(mutated, fixture.resolver), fixture.now); !errors.Is(err, ErrRelayConflict) {
 		t.Fatalf("same action with a changed execution envelope was not conflict: %v", err)
 	}
 }
@@ -1023,7 +1082,7 @@ func TestRelayJournalConcurrentAdmissionHasOneWinner(t *testing.T) {
 	for index := 0; index < callers; index++ {
 		go func() {
 			defer wait.Done()
-			_, created, admitErr := journal.Admit(fixture.execution, fixture.now)
+			_, created, admitErr := journal.Admit(fixture.execution, testVerified(fixture.execution, fixture.resolver), fixture.now)
 			results <- created
 			errorsSeen <- admitErr
 		}()
@@ -1201,13 +1260,13 @@ func TestRelayQuoteAndExecutionAdmissionLimitsAreAtomic(t *testing.T) {
 		journal.records["existing"] = Record{State: agentcommerce.ActionPrepared,
 			request: RelayExecutionRequest{QuoteRequest: SignedRelayQuoteRequest{Body: RelayQuoteRequestBody{
 				RequesterAgentID: request.Body.RequesterAgentID}}}}
-		if _, _, err := journal.Admit(execution, fixture.now); !errors.Is(err, ErrRelayAdmissionLimit) {
+		if _, _, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now); !errors.Is(err, ErrRelayAdmissionLimit) {
 			t.Fatalf("active execution limit was not enforced: %v", err)
 		}
 		existing := journal.records["existing"]
 		existing.State = agentcommerce.ActionTerminal
 		journal.records["existing"] = existing
-		if _, created, err := journal.Admit(execution, fixture.now); err != nil || !created {
+		if _, created, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now); err != nil || !created {
 			t.Fatalf("terminal work slot was not released: created=%v err=%v", created, err)
 		}
 	})
@@ -1223,14 +1282,14 @@ func TestRelayAdmissionRetainsFinalizedSponsorshipUntilExplicitAccountingRelease
 	execution := sponsorshipExecution(fixture.execution, requestA, quoteA)
 	execution = fixture.withAdmission(t, execution)
 	unreserved := NewMemoryJournal()
-	if _, _, err := unreserved.Admit(execution, fixture.now); !errors.Is(err, ErrRelayQuoteUnreserved) {
+	if _, _, err := unreserved.Admit(execution, testVerified(execution, fixture.resolver), fixture.now); !errors.Is(err, ErrRelayQuoteUnreserved) {
 		t.Fatalf("execution without a quote reservation was admitted: %v", err)
 	}
 	journal := NewMemoryJournal()
 	if _, created, err := journal.ReserveQuote(profile, requestA, quoteA, fixture.now); err != nil || !created {
 		t.Fatalf("first sponsorship quote reservation failed: created=%v err=%v", created, err)
 	}
-	record, created, err := journal.Admit(execution, fixture.now)
+	record, created, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now)
 	if err != nil || !created || record.State != agentcommerce.ActionPrepared {
 		t.Fatalf("reserved sponsorship quote was not consumed: created=%v state=%s err=%v", created, record.State, err)
 	}
@@ -1300,7 +1359,7 @@ func TestSponsorshipAttemptCheckpointRequiresExactProtectedTokenAndCannotTransit
 	if _, _, err := journal.ReserveQuote(profile, request, quote, fixture.now); err != nil {
 		t.Fatal(err)
 	}
-	record, _, err := journal.Admit(execution, fixture.now)
+	record, _, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1349,7 +1408,7 @@ func TestRelayRejectedAndConflictRecordsReleaseExposure(t *testing.T) {
 				t.Fatal(err)
 			}
 			execution := fixture.withAdmission(t, sponsorshipExecution(fixture.execution, requestA, quoteA))
-			record, _, err := journal.Admit(execution, fixture.now)
+			record, _, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1549,7 +1608,7 @@ func TestProviderFirstAdmissionRequiresCurrentAuthoritativeReceiptAndStoredRetry
 		lookupDigest, _ := RelaySideEffectAdmissionLookupDigest(descriptor.Lookup())
 		olderBody := fixture.execution.AdmissionReceipt.Body
 		olderBody.IssuedAtUnix--
-		older, err := SignRelaySideEffectAdmissionReceipt(olderBody, fixture.authorityKey)
+		older, err := signTestReceipt(olderBody, fixture.authorityKey)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1623,10 +1682,10 @@ func TestProviderResolvesActionAuthorityAtReceiptIssuanceAfterKeyRotationAndTake
 	fixture.execution.AgreementBodyDigest, _ = agentcommerce.AgreementBodyDigest(agreement.Body)
 	fixture.execution.AgreementExpiresAtUnix = agreement.Body.ExpiresAtUnix
 	fixture.execution = fixture.withAdmission(t, fixture.execution)
-	newAuthorityKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x77}, ed25519.SeedSize))
+	newAuthorityKey := relayAuthorityKey("rotated-authority")
 	rotating := &rotatingFenceResolver{base: fixture.resolver,
-		oldKey: fixture.authorityKey.Public().(ed25519.PublicKey),
-		newKey: newAuthorityKey.Public().(ed25519.PublicKey), rotatesAt: fixture.now.Add(time.Second)}
+		oldKey: fixture.authorityKey.publicKey(),
+		newKey: newAuthorityKey.publicKey(), rotatesAt: fixture.now.Add(time.Second)}
 	fixture.service.FenceResolver = rotating
 	fixture.service.Now = func() time.Time { return fixture.now.Add(2 * time.Second) }
 	fixture.service.Broadcaster = &recordingBroadcaster{result: BroadcastResult{Status: BroadcastAccepted,
@@ -2260,7 +2319,7 @@ func TestCombinedJournalRestoresAllFourTerminalQuadrants(t *testing.T) {
 		if _, _, err := journal.ReserveQuote(profile, request, quote, fixture.now); err != nil {
 			t.Fatal(err)
 		}
-		record, _, err := journal.Admit(executionCopy, fixture.now)
+		record, _, err := journal.Admit(executionCopy, testVerified(executionCopy, fixture.resolver), fixture.now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2384,7 +2443,7 @@ func TestObservedUnprovenCrashBeforeRelayBroadcastDoesNotReresolveTopUp(t *testi
 	if _, _, err := journal.ReserveQuote(profile, request, quote, fixture.now); err != nil {
 		t.Fatal(err)
 	}
-	record, _, err := journal.Admit(execution, fixture.now)
+	record, _, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2698,7 +2757,7 @@ func TestRelayEvidenceCannotSubstituteSubmittedTransactionReference(t *testing.T
 	}
 	fixture.execution.ProviderQuote = quote
 	journal := fixture.service.Journal
-	record, _, err := journal.Admit(fixture.execution, fixture.now)
+	record, _, err := journal.Admit(fixture.execution, testVerified(fixture.execution, fixture.resolver), fixture.now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2742,7 +2801,7 @@ func TestExpiredAmbiguousSponsorshipUsesReadOnlyRecoveryToken(t *testing.T) {
 	if _, _, err := journal.ReserveQuote(profile, request, quote, fixture.now); err != nil {
 		t.Fatal(err)
 	}
-	record, _, err := journal.Admit(execution, fixture.now)
+	record, _, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2779,7 +2838,7 @@ func TestSponsorOnlyAbsenceProvesOnlyTheSponsorshipActionAndReleasesExposure(t *
 	if _, _, err := journal.ReserveQuote(profile, requestA, quoteA, fixture.now); err != nil {
 		t.Fatal(err)
 	}
-	record, _, err := journal.Admit(execution, fixture.now)
+	record, _, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2906,7 +2965,7 @@ func TestExpiredPreparedRelayReleasesOnlyProvablyUnspentExposure(t *testing.T) {
 				t.Fatal(err)
 			}
 			execution := fixture.withAdmission(t, sponsorshipExecution(fixture.execution, requestA, quoteA))
-			record, _, err := journal.Admit(execution, fixture.now)
+			record, _, err := journal.Admit(execution, testVerified(execution, fixture.resolver), fixture.now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2968,7 +3027,7 @@ func TestRelayExecutionCannotOutliveActionAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture.execution.AuthorizedAction, err = agentcommerce.SignAuthorizedAction(action, fixture.authorityKey)
+	fixture.execution.AuthorizedAction, err = signTestAction(action, fixture.authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3050,7 +3109,7 @@ type relayFixture struct {
 	now                time.Time
 	clientKey          ed25519.PrivateKey
 	providerKey        ed25519.PrivateKey
-	authorityKey       ed25519.PrivateKey
+	authorityKey       relayAuthorityKey
 	resolver           relayResolver
 	admissionAuthority *testRelayAdmissionAuthority
 	profile            RelayServiceProfile
@@ -3115,10 +3174,10 @@ func newRelayFixture(t *testing.T) *relayFixture {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	clientKey := ed25519.NewKeyFromSeed([]byte(strings.Repeat("1", ed25519.SeedSize)))
 	providerKey := ed25519.NewKeyFromSeed([]byte(strings.Repeat("2", ed25519.SeedSize)))
-	authorityKey := ed25519.NewKeyFromSeed([]byte(strings.Repeat("3", ed25519.SeedSize)))
+	authorityKey := relayAuthorityKey("authority")
 	resolver := relayResolver{agents: map[string]ed25519.PublicKey{
 		"agent:client": clientKey.Public().(ed25519.PublicKey), "agent:provider": providerKey.Public().(ed25519.PublicKey)},
-		authority: authorityKey.Public().(ed25519.PublicKey), current: &relayCurrentFenceState{}}
+		authority: authorityKey.publicKey(), current: &relayCurrentFenceState{}}
 	admissionAuthority := newTestRelayAdmissionAuthority()
 	network := NetworkDomain{NetworkID: "tos:testnet", GlobalID: 42, ZeroStateRootHash: digest("1"),
 		ZeroStateFileHash: digest("2"), WorkchainID: 0}
@@ -3150,7 +3209,7 @@ func newRelayFixture(t *testing.T) *relayFixture {
 		"asset_digest": agentcommerce.Digest32(digest("a")), "amount_atomic": agentcommerce.ID("25"), "destination_digest": agentcommerce.Digest32(digest("b"))}
 	stableID, _, _ := agentcommerce.DeriveStableActionID("payment.direct", fields)
 	wireFields, _ := agentcommerce.ExportSemanticFields("payment.direct", fields)
-	fence, err := agentcommerce.SignWriterFence(agentcommerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:client", AgentID: "agent:client",
+	fence, err := signTestFence(agentcommerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:client", AgentID: "agent:client",
 		InstanceID: "instance:client", LeaseID: "lease:client", WriterGeneration: 1, IssuedAtUnix: uint64(now.Add(-time.Minute).Unix()),
 		ExpiresAtUnix: uint64(now.Add(10 * time.Minute).Unix()), AuthorityID: "authority:client", Scope: []string{"payment.direct"}}, authorityKey)
 	if err != nil {
@@ -3162,7 +3221,7 @@ func newRelayFixture(t *testing.T) *relayFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err = agentcommerce.SignAuthorizedAction(action, authorityKey)
+	action, err = signTestAction(action, authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3225,7 +3284,7 @@ func finalityPointer(profile FinalityProfile) *FinalityProfile { return &profile
 
 func relayBoolPointer(value bool) *bool { return &value }
 
-func attachRelayTestAdmission(t *testing.T, request RelayExecutionRequest, authorityKey ed25519.PrivateKey,
+func attachRelayTestAdmission(t *testing.T, request RelayExecutionRequest, authorityKey relayAuthorityKey,
 	issuedAt time.Time, sequence uint64) RelayExecutionRequest {
 	t.Helper()
 	descriptor, err := BuildRelaySideEffectAdmissionDescriptorForPrincipal(request, "principal:openfox-client")
@@ -3241,7 +3300,7 @@ func attachRelayTestAdmission(t *testing.T, request RelayExecutionRequest, autho
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, err := SignRelaySideEffectAdmissionReceipt(body, authorityKey)
+	receipt, err := signTestReceipt(body, authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3340,7 +3399,7 @@ func (fixture *relayFixture) takeoverFence(t *testing.T) agentcommerce.WriterFen
 	body.LeaseID = "lease:takeover"
 	body.WriterGeneration++
 	body.IssuedAtUnix = uint64(fixture.now.Unix())
-	fence, err := agentcommerce.SignWriterFence(body, fixture.authorityKey)
+	fence, err := signTestFence(body, fixture.authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3349,7 +3408,7 @@ func (fixture *relayFixture) takeoverFence(t *testing.T) agentcommerce.WriterFen
 
 func (fixture *relayFixture) takeover(t *testing.T, generation uint64) RelayExecutionRequest {
 	t.Helper()
-	fence, err := agentcommerce.SignWriterFence(agentcommerce.WriterFenceBody{SchemaVersion: 1,
+	fence, err := signTestFence(agentcommerce.WriterFenceBody{SchemaVersion: 1,
 		OwnerID: "owner:client", AgentID: "agent:client", InstanceID: "instance:takeover", LeaseID: "lease:takeover",
 		WriterGeneration: generation, IssuedAtUnix: uint64(fixture.now.Add(-time.Minute).Unix()),
 		ExpiresAtUnix: uint64(fixture.now.Add(10 * time.Minute).Unix()), AuthorityID: "authority:client",
@@ -3367,7 +3426,7 @@ func (fixture *relayFixture) takeover(t *testing.T, generation uint64) RelayExec
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err = agentcommerce.SignAuthorizedAction(action, fixture.authorityKey)
+	action, err = signTestAction(action, fixture.authorityKey)
 	if err != nil {
 		t.Fatal(err)
 	}

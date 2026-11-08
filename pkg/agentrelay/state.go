@@ -391,11 +391,19 @@ func RestoreRecord(snapshot RecordSnapshot, request RelayExecutionRequest, prote
 }
 
 // NewPreparedRecord constructs the exact first durable state for external
-// Journal implementations before they atomically publish it.
-func NewPreparedRecord(request RelayExecutionRequest, now time.Time) (Record, error) {
-	if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request, now); err != nil {
+// Journal implementations before they atomically publish it. now must be the
+// journal's clock at the insertion transaction: the receipt's exclusive start
+// boundary is checked against it.
+func NewPreparedRecord(request RelayExecutionRequest, verified VerifiedRelayAdmissionReceipt, now time.Time) (Record, error) {
+	if err := CheckRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, verified, request, now); err != nil {
 		return Record{}, err
 	}
+	return newPreparedRecordChecked(request, now)
+}
+
+// newPreparedRecordChecked builds the prepared record of a request whose
+// receipt the caller has just checked at now.
+func newPreparedRecordChecked(request RelayExecutionRequest, now time.Time) (Record, error) {
 	executionDigest, err := RelayExecutionRequestDigest(request)
 	if err != nil {
 		return Record{}, err
@@ -436,8 +444,13 @@ type Journal interface {
 	ReserveQuote(RelayServiceProfile, SignedRelayQuoteRequest, SignedProviderRelayQuote, time.Time) (SignedProviderRelayQuote, bool, error)
 	// Admit atomically consumes the matching quote reservation while creating
 	// the first PREPARED record. No execution can be admitted from a quote that
-	// was not reserved by ReserveQuote.
-	Admit(RelayExecutionRequest, time.Time) (Record, bool, error)
+	// was not reserved by ReserveQuote. The receipt's Action Authority was
+	// verified before the call (VerifiedRelayAdmissionReceipt); Admit performs
+	// no resolver, helper or network work. It must check the receipt's
+	// exclusive start boundary inside the insertion transaction with its
+	// current time, measured after any lock wait and never earlier than the
+	// supplied time.
+	Admit(RelayExecutionRequest, VerifiedRelayAdmissionReceipt, time.Time) (Record, bool, error)
 	// BeginSponsorship durably marks that the exact Agreement-bound payment may
 	// have been attempted. An expired PREPARED record with this marker cannot be
 	// treated as side-effect-free; Submit recovery must query the same payment
@@ -583,15 +596,15 @@ func (journal *MemoryJournal) ReserveQuote(profile RelayServiceProfile, request 
 	return cloneSignedProviderQuote(proposal), true, nil
 }
 
-func (journal *MemoryJournal) Admit(request RelayExecutionRequest, now time.Time) (Record, bool, error) {
+func (journal *MemoryJournal) Admit(request RelayExecutionRequest, verified VerifiedRelayAdmissionReceipt,
+	now time.Time) (Record, bool, error) {
+	entered := time.Now()
 	if journal == nil {
 		return Record{}, false, errors.New("relay journal is unavailable")
 	}
-	nowSeconds := now.UTC().Unix()
-	if nowSeconds < 0 {
+	if now.UTC().Unix() < 0 {
 		return Record{}, false, ErrRelayInvalidState
 	}
-	nowUnix := uint64(nowSeconds)
 	executionDigest, err := RelayExecutionRequestDigest(request)
 	if err != nil {
 		return Record{}, false, err
@@ -613,6 +626,10 @@ func (journal *MemoryJournal) Admit(request RelayExecutionRequest, now time.Time
 	reservationKey := relayQuoteReservationKey(request.ProviderQuote.Body.ProviderAgentID, requestDigest)
 	journal.mu.Lock()
 	defer journal.mu.Unlock()
+	// The start boundary is judged at the insertion instant: the caller's time
+	// advanced by everything spent since entry, including the lock wait.
+	now = now.Add(time.Since(entered))
+	nowUnix := uint64(now.UTC().Unix())
 	if err := journal.bindProviderLocked(request.ProviderQuote.Body.ProviderAgentID); err != nil {
 		return Record{}, false, err
 	}
@@ -628,7 +645,7 @@ func (journal *MemoryJournal) Admit(request RelayExecutionRequest, now time.Time
 	// implementations must enforce its exclusive start boundary in the same
 	// transaction that creates the durable record, not rely on an earlier
 	// coordinator check that may race with inspection or Agreement validation.
-	if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request, now); err != nil {
+	if err := CheckRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, verified, request, now); err != nil {
 		return Record{}, false, err
 	}
 	reservation, found := journal.quoteReservations[reservationKey]
@@ -655,7 +672,7 @@ func (journal *MemoryJournal) Admit(request RelayExecutionRequest, now time.Time
 			uint64(limits.MaximumActivePerRequester) {
 		return Record{}, false, ErrRelayAdmissionLimit
 	}
-	record, err := NewPreparedRecord(request, now)
+	record, err := newPreparedRecordChecked(request, now)
 	if err != nil {
 		return Record{}, false, err
 	}

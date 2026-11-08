@@ -26,7 +26,30 @@ import (
 
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 )
+
+// authorityCustody names the ML-DSA-44 Action Authority controller that the
+// pinned tosctl helper holds in its vault. The campaign never sees its key.
+type authorityCustody struct {
+	binary, sha256, configPath, vaultURLPath, controller string
+}
+
+func (custody authorityCustody) signer() (*mldsa44.Tosctl, error) {
+	if custody.controller == "" {
+		return nil, errors.New("the Action Authority controller is not configured")
+	}
+	vaultURL, err := readText(custody.vaultURLPath, 4096)
+	if err != nil {
+		return nil, fmt.Errorf("Action Authority vault URL: %w", err)
+	}
+	signer, err := mldsa44.NewTosctl(mldsa44.TosctlConfig{Binary: custody.binary, SHA256: custody.sha256,
+		ConfigPath: custody.configPath, VaultURL: strings.TrimSpace(vaultURL)})
+	if err != nil {
+		return nil, err
+	}
+	return signer, nil
+}
 
 type carriersFlag []carrierConfig
 type carrierConfig struct{ id, endpoint, readTokenPath, writeTokenPath string }
@@ -43,7 +66,12 @@ func (values *carriersFlag) Set(value string) error {
 
 func main() {
 	initDir := flag.String("init-dir", "", "create campaign keys in an absolute private directory and exit")
-	authorityPath := flag.String("authority-key", "", "absolute campaign authority key path")
+	custody := authorityCustody{}
+	flag.StringVar(&custody.binary, "tosctl", "", "absolute path of the pinned tosctl helper that holds the Action Authority key")
+	flag.StringVar(&custody.sha256, "tosctl-sha256", "", "lowercase hex SHA-256 of the tosctl helper")
+	flag.StringVar(&custody.configPath, "tosctl-config", "", "absolute tosctl configuration path")
+	flag.StringVar(&custody.vaultURLPath, "vault-url-file", "", "absolute path of a file holding the tosctl vault URL")
+	flag.StringVar(&custody.controller, "authority-controller", "", "the vault controller name of the Action Authority")
 	issuerPath := flag.String("issuer-key", "", "absolute campaign issuer key path")
 	digestPath := flag.String("digest-file", "", "absolute expected Intent digest file")
 	verifyOnly := flag.Bool("verify-only", false, "only verify the retained digest on configured Carriers")
@@ -56,7 +84,7 @@ func main() {
 		}
 		return
 	}
-	if err := run(*authorityPath, *issuerPath, *digestPath, carriers, *verifyOnly); err != nil {
+	if err := run(custody, *issuerPath, *digestPath, carriers, *verifyOnly); err != nil {
 		fatal(err)
 	}
 }
@@ -76,15 +104,8 @@ func initialize(directory string) error {
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return err
 	}
-	_, authority, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return err
-	}
 	_, issuer, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return err
-	}
-	if err := writeExclusiveKey(filepath.Join(directory, "authority.key"), authority); err != nil {
 		return err
 	}
 	if err := writeExclusiveKey(filepath.Join(directory, "issuer.key"), issuer); err != nil {
@@ -104,9 +125,11 @@ func initialize(directory string) error {
 	if err := writeExclusiveText(filepath.Join(directory, "write.token"), hex.EncodeToString(writeToken)); err != nil {
 		return err
 	}
-	fmt.Printf("authority_id=authority:carrier-campaign authority_pin=ed25519:%s authority_key=%s issuer_key=%s read_token=%s write_token=%s\n",
-		hex.EncodeToString(authority.Public().(ed25519.PublicKey)), filepath.Join(directory, "authority.key"), filepath.Join(directory, "issuer.key"),
-		filepath.Join(directory, "read.token"), filepath.Join(directory, "write.token"))
+	// The Action Authority is an ML-DSA-44 controller in tosctl custody,
+	// created with `tosctl agent native-registry new-controller`; its key ID
+	// and key are published from there, never from this directory.
+	fmt.Printf("authority_id=authority:carrier-campaign issuer_key=%s read_token=%s write_token=%s\n",
+		filepath.Join(directory, "issuer.key"), filepath.Join(directory, "read.token"), filepath.Join(directory, "write.token"))
 	return nil
 }
 
@@ -124,7 +147,7 @@ func writeExclusiveText(path, value string) error {
 	return err
 }
 
-func run(authorityPath, issuerPath, digestPath string, carriers []carrierConfig, verifyOnly bool) error {
+func run(custody authorityCustody, issuerPath, digestPath string, carriers []carrierConfig, verifyOnly bool) error {
 	if len(carriers) == 0 || len(carriers) > 16 || !filepath.IsAbs(digestPath) {
 		return errors.New("campaign configuration is incomplete or unbounded")
 	}
@@ -142,7 +165,7 @@ func run(authorityPath, issuerPath, digestPath string, carriers []carrierConfig,
 		}
 		return verifyCarriers(carriers, digest)
 	}
-	authority, err := readPrivateKey(authorityPath)
+	authority, err := custody.signer()
 	if err != nil {
 		return err
 	}
@@ -159,15 +182,15 @@ func run(authorityPath, issuerPath, digestPath string, carriers []carrierConfig,
 	if err != nil {
 		return err
 	}
-	fence, err := commerce.SignWriterFence(commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:carrier-campaign",
+	fence, err := commerce.SignWriterFence(context.Background(), commerce.WriterFenceBody{SchemaVersion: 1, OwnerID: "owner:carrier-campaign",
 		AgentID: intent.Body.IssuerAgentID, InstanceID: "instance:carrier-campaign", LeaseID: "lease:carrier-campaign",
 		WriterGeneration: 1, IssuedAtUnix: uint64(now.Add(-time.Second).Unix()), ExpiresAtUnix: uint64(now.Add(time.Hour).Unix()),
-		AuthorityID: "authority:carrier-campaign", Scope: []string{"publication.publish"}}, authority)
+		AuthorityID: "authority:carrier-campaign", Scope: []string{"publication.publish"}}, authority, custody.controller)
 	if err != nil {
 		return err
 	}
 	for _, carrier := range carriers {
-		if err := publish(carrier, intent, fence, authority, now); err != nil {
+		if err := publish(carrier, intent, fence, authority, custody.controller, now); err != nil {
 			return fmt.Errorf("%s: %w", carrier.id, err)
 		}
 	}
@@ -182,7 +205,7 @@ func run(authorityPath, issuerPath, digestPath string, carriers []carrierConfig,
 }
 
 func publish(carrier carrierConfig, intent commerce.SignedAgentIntent, fence commerce.WriterFence,
-	authority ed25519.PrivateKey, now time.Time) error {
+	authority mldsa44.Signer, controller string, now time.Time) error {
 	exact, err := codec.Marshal(intent)
 	if err != nil {
 		return err
@@ -215,7 +238,7 @@ func publish(carrier carrierConfig, intent commerce.SignedAgentIntent, fence com
 	action, err := commerce.BuildAuthorizedAction("owner:carrier-campaign", intent.Body.IssuerAgentID, "publication.publish",
 		fields, exact, fence, 1, "sha256:"+strings.Repeat("1", 64), "", "not-published", uint64(now.Add(time.Hour).Unix()))
 	if err == nil {
-		action, err = commerce.SignAuthorizedAction(action, authority)
+		action, err = commerce.SignAuthorizedAction(context.Background(), action, fence.KeyID, authority, controller)
 	}
 	if err != nil {
 		return err

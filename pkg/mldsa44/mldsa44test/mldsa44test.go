@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
@@ -258,4 +259,32 @@ func expand(domain string, seed []byte, size int) []byte {
 		out = hash.Sum(out)
 	}
 	return out[:size]
+}
+
+// ActionAuthorityResolver is a test Action Authority resolver. It returns a
+// key only when that key is listed for the authority, and it verifies through
+// Verifier (Fake for logic tests, a real helper for byte checks).
+type ActionAuthorityResolver struct {
+	Verifier mldsa44.Verifier
+	Keys     map[string][][]byte
+}
+
+// Verify implements mldsa44.Verifier through the configured verifier.
+func (r ActionAuthorityResolver) Verify(ctx context.Context, use mldsa44.Use, payload, publicKey, signature []byte) error {
+	if r.Verifier == nil {
+		return mldsa44.ErrUnavailable
+	}
+	return r.Verifier.Verify(ctx, use, payload, publicKey, signature)
+}
+
+// ResolveActionAuthorityKey returns the listed key of authorityID whose key
+// ID is keyID.
+func (r ActionAuthorityResolver) ResolveActionAuthorityKey(authorityID string, keyID [mldsa44.KeyIDSize]byte,
+	_ time.Time) ([]byte, error) {
+	for _, key := range r.Keys[authorityID] {
+		if id, err := mldsa44.KeyID(key); err == nil && id == keyID {
+			return append([]byte(nil), key...), nil
+		}
+	}
+	return nil, errors.New("Action Authority key is not authorized for this authority")
 }

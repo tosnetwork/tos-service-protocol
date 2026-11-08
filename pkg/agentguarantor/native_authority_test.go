@@ -12,6 +12,7 @@ import (
 	"time"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
+	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44"
 	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
@@ -649,37 +650,55 @@ func TestNativeAgentAuthorityResolverPinsTheRegistryDerivation(t *testing.T) {
 // ML-DSA-44 evidence does not decode there, and an Ed25519 admission
 // authorization keeps verifying.
 func TestStageAdmissionIsNeverNativeEvidence(t *testing.T) {
+	// Both evidence shapes now carry key_id, signature and
+	// historical_authority_proof, so the content type and the signature
+	// context are what keep them apart: a native authorization decoded into
+	// the stage shape is refused by its content type, and a stage signature
+	// presented as native evidence is refused by its context.
 	native := testSignAuthorization(t, vectorStatement, vectorStatementDomain, "stage", []byte("proof"))
 	encoded, err := codec.Marshal(native)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stage StageActionAdmissionAuthorizationV1
-	if err := codec.Unmarshal(encoded, &stage); err == nil {
-		t.Fatal("native ML-DSA-44 evidence decoded as a stage admission authorization")
+	var decoded StageActionAdmissionAuthorizationV1
+	if err := codec.Unmarshal(encoded, &decoded); err == nil {
+		action := agentcommerce.AuthorizedAction{AuthorityID: decoded.AuthoritySubject, AuthorityKeyID: decoded.Evidence.KeyID}
+		fenceResolver := mldsa44test.ActionAuthorityResolver{Verifier: nativeTestFake,
+			Keys: map[string][][]byte{decoded.AuthoritySubject: {nativeTestFake.PublicKey("stage")}}}
+		if err := verifyStageActionAdmissionAuthorizationV1(decoded, action, decoded.AuthorizedBodyDigest,
+			allowAuthorityResolver{}, fenceResolver, time.Unix(int64(decoded.ValidationTimeUnix), 0)); err == nil {
+			t.Fatal("native ML-DSA-44 evidence verified as a stage admission authorization")
+		}
 	}
 	fixture := newStageAdmissionFixture(t)
 	admission := fixture.sign(t, fixture.statement, StageActionAdmissionSignatureDomain)
 	now := fixture.now()
 	if err := fixture.verify(admission); err != nil {
-		t.Fatalf("Ed25519 stage admission refused: %v", err)
+		t.Fatalf("ML-DSA-44 stage admission refused: %v", err)
 	}
+	// Register the stage key as a native key, so only the context and content
+	// type can refuse it.
+	key := nativeTestFake.PublicKey(stageAuthorityController)
+	id, err := mldsa44.KeyID(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeTestKeys.Store(id, key)
 	if err := VerifyObjectAuthorization(ProfileQualifiedObjectAuthorizationV1{AuthoritySubject: admission.AuthoritySubject,
 		ProfileURI: admission.ProfileURI, ProfileVersion: admission.ProfileVersion, ProfileDigest: admission.ProfileDigest,
 		AuthorizedObjectKind: admission.AuthorizedObjectKind, AuthorizedBodyDigest: admission.AuthorizedBodyDigest,
 		ValidationTimeUnix: admission.ValidationTimeUnix, EvidenceContentType: NativeAuthorizationContentType,
-		Evidence: NativeMLDSA44AgentAuthorizationEvidenceV1{KeyID: admission.Evidence.PublicKey,
+		Evidence: NativeMLDSA44AgentAuthorizationEvidenceV1{KeyID: admission.Evidence.KeyID,
 			Signature: admission.Evidence.Signature, HistoricalAuthorityProof: []byte("proof")}},
 		admission.AuthorizedObjectKind, admission.AuthorizedBodyDigest, StageActionAdmissionSignatureDomain,
 		allowAuthorityResolver{}, now); err == nil {
-		t.Fatal("an Ed25519 Action Authority signature verified as native evidence")
+		t.Fatal("an Action Authority signature verified as native evidence")
 	}
-	// The stage wire layout is unchanged: the same field names as before.
 	var fields map[string]any
 	if err := json.Unmarshal(mustJSON(t, admission.Evidence), &fields); err != nil {
 		t.Fatal(err)
 	}
-	if len(fields) != 3 || fields["public_key"] == nil || fields["signature"] == nil || fields["historical_authority_proof"] == nil {
+	if len(fields) != 3 || fields["key_id"] == nil || fields["signature"] == nil || fields["historical_authority_proof"] == nil {
 		t.Fatalf("stage evidence fields changed: %v", fields)
 	}
 }

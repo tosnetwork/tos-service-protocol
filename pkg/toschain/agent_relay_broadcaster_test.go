@@ -15,6 +15,7 @@ import (
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentrelay"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
 
@@ -411,7 +412,10 @@ func relayTestAdapter(t *testing.T, servers []*httptest.Server) *Adapter {
 func relayBroadcasterExecution(t *testing.T, network agentrelay.NetworkDomain, boc []byte) agentrelay.RelayExecutionRequest {
 	t.Helper()
 	now := time.Unix(1_900_000_000, 0).UTC()
-	authorityKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x31}, ed25519.SeedSize))
+	// The Action Authority signs through the in-process test Fake; these
+	// tests check relay bindings, not ML-DSA-44 bytes.
+	authoritySigner, authorityController := &mldsa44test.Fake{}, "authority"
+	authorityKeyID := authoritySigner.KeyID(authorityController)
 	clientKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x32}, ed25519.SeedSize))
 	providerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x33}, ed25519.SeedSize))
 	asset := agentrelay.AssetIdentity{AssetNamespace: "tos.native", AssetIdentifier: network.NetworkID, Unit: "nanotos"}
@@ -428,11 +432,11 @@ func relayBroadcasterExecution(t *testing.T, network agentrelay.NetworkDomain, b
 		"network_id": agentcommerce.ID(network.NetworkID), "asset_digest": agentcommerce.Digest32(shaDigest("7")),
 		"amount_atomic": agentcommerce.ID("25"), "destination_digest": agentcommerce.Digest32(shaDigest("8")),
 	}
-	fence, err := agentcommerce.SignWriterFence(agentcommerce.WriterFenceBody{SchemaVersion: 1,
+	fence, err := agentcommerce.SignWriterFence(context.Background(), agentcommerce.WriterFenceBody{SchemaVersion: 1,
 		OwnerID: "owner:buyer", AgentID: "agent:buyer", InstanceID: "instance:test", LeaseID: "lease:test",
 		WriterGeneration: 1, IssuedAtUnix: uint64(now.Add(-time.Minute).Unix()),
 		ExpiresAtUnix: uint64(now.Add(4 * time.Minute).Unix()), AuthorityID: "authority:test",
-		Scope: []string{"payment.direct"}}, authorityKey)
+		Scope: []string{"payment.direct"}}, authoritySigner, authorityController)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +445,7 @@ func relayBroadcasterExecution(t *testing.T, network agentrelay.NetworkDomain, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err = agentcommerce.SignAuthorizedAction(action, authorityKey)
+	action, err = agentcommerce.SignAuthorizedAction(context.Background(), action, authorityKeyID, authoritySigner, authorityController)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +512,7 @@ func relayBroadcasterExecution(t *testing.T, network agentrelay.NetworkDomain, b
 	if err != nil {
 		t.Fatal(err)
 	}
-	execution.AdmissionReceipt, err = agentrelay.SignRelaySideEffectAdmissionReceipt(body, authorityKey)
+	execution.AdmissionReceipt, err = agentrelay.SignRelaySideEffectAdmissionReceipt(context.Background(), body, authoritySigner, authorityController)
 	if err != nil {
 		t.Fatal(err)
 	}

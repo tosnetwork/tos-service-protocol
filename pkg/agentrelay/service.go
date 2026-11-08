@@ -440,12 +440,23 @@ func (service ProviderService) Submit(ctx context.Context, request RelayExecutio
 		existing.SponsorshipAttempted && relaySignedWindowExpired(existing.ExecutionRequest(), now) {
 		return service.resolveAttemptedSponsorship(ctx, existing, now)
 	}
+	var verified VerifiedRelayAdmissionReceipt
 	if alreadyAdmitted {
 		if err := VerifyRelaySideEffectAdmissionReceiptIntegrity(request.AdmissionReceipt, request); err != nil {
 			return existing, err
 		}
-	} else if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request, now); err != nil {
-		return Record{}, err
+	} else {
+		// The only resolver/helper work of a first admission. It reads no clock
+		// and runs before inspection, Agreement checks and any journal lock.
+		authorityVerified, err := VerifyRelaySideEffectAdmissionReceiptAuthority(request.AdmissionReceipt,
+			service.FenceResolver)
+		if err != nil {
+			return Record{}, err
+		}
+		verified = authorityVerified
+		if err := CheckRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, verified, request, now); err != nil {
+			return Record{}, err
+		}
 	}
 	actionAuthorityAt := time.Unix(int64(request.AdmissionReceipt.Body.IssuedAtUnix), 0).UTC()
 	if err := verifyRelayExecutionRequestCoreAtAuthorityTime(ctx, request, service.Profile, service.AgentResolver,
@@ -464,19 +475,6 @@ func (service ProviderService) Submit(ctx context.Context, request RelayExecutio
 	initialStage := SideEffectBroadcast
 	if request.QuoteRequest.Body.Mode != ModeRelayExact {
 		initialStage = SideEffectSponsorship
-	}
-	// Agreement and chain inspection may have consumed most of the short
-	// receipt window. The owner Action Authority already linearized the exact
-	// stage mask atomically with its current-writer high water; consuming that
-	// same receipt is therefore the admission boundary.
-	now = service.now()
-	if !alreadyAdmitted {
-		if err := VerifyRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, request, now); err != nil {
-			return Record{}, err
-		}
-	}
-	if err := VerifyRelayRemainingValidity(request, now, initialStage); err != nil {
-		return Record{}, err
 	}
 	if !alreadyAdmitted {
 		if service.AdmissionAuthority == nil {
@@ -498,7 +496,22 @@ func (service ProviderService) Submit(ctx context.Context, request RelayExecutio
 			return Record{}, errors.New("authoritative relay side-effect admission conflicts with the submitted receipt")
 		}
 	}
-	record, created, err := service.Journal.Admit(request, now)
+	// Agreement checks, chain inspection and the authoritative lookup may have
+	// consumed most of the short receipt window. The owner Action Authority
+	// already linearized the exact stage mask atomically with its
+	// current-writer high water; consuming that same receipt is therefore the
+	// admission boundary, judged at a fresh time with no blocking call between
+	// this check and the journal insertion.
+	now = service.now()
+	if !alreadyAdmitted {
+		if err := CheckRelaySideEffectAdmissionReceipt(request.AdmissionReceipt, verified, request, now); err != nil {
+			return Record{}, err
+		}
+	}
+	if err := VerifyRelayRemainingValidity(request, now, initialStage); err != nil {
+		return Record{}, err
+	}
+	record, created, err := service.Journal.Admit(request, verified, now)
 	if err != nil {
 		return record, err
 	}

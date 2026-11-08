@@ -18,6 +18,7 @@ import (
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentgift"
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentrelay"
 	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
+	"github.com/tosnetwork/tos-service-protocol/pkg/mldsa44/mldsa44test"
 	"github.com/tosnetwork/tosutils-go/tlb"
 	"github.com/tosnetwork/tosutils-go/tvm/cell"
 )
@@ -490,7 +491,7 @@ func TestCombinedRelayFreezeAndVerifyFromSnapshotReachesPinnedQuery(t *testing.T
 	execution.ProviderQuote.Body.RelayTerminalEvidenceClass = relayProfile.TerminalEvidenceClass
 	execution = attachRelayRuntimeAdmission(t, execution, execution.CreatedAtUnix,
 		execution.QuoteRequest.Body.MaximumTransactionValueAtomic)
-	prepared, err := agentrelay.NewPreparedRecord(execution, time.Unix(int64(execution.CreatedAtUnix), 0))
+	prepared, err := agentrelay.NewPreparedRecord(execution, runtimeVerified(t, execution), time.Unix(int64(execution.CreatedAtUnix), 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1107,7 +1108,7 @@ func relayRuntimeRecord(t *testing.T) agentrelay.Record {
 			ActionKind: "payment.direct", StableActionID: quoteRequest.StableActionID,
 			ExactRequestDigest: quoteRequest.ExactRequestDigest}, CreatedAtUnix: now, ExpiresAtUnix: now + 180}
 	request = attachRelayRuntimeAdmission(t, request, now, fixture.AmountAtomic)
-	record, err := agentrelay.NewPreparedRecord(request, time.Unix(int64(now), 0))
+	record, err := agentrelay.NewPreparedRecord(request, runtimeVerified(t, request), time.Unix(int64(now), 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1160,7 +1161,7 @@ func sponsorshipRuntimeRecord(t *testing.T, mode agentrelay.Mode) (agentrelay.Re
 		sort.Strings(request.FeeObligationIDs)
 	}
 	request = attachRelayRuntimeAdmission(t, request, now, request.QuoteRequest.Body.MaximumTransactionValueAtomic)
-	record, err := agentrelay.NewPreparedRecord(request, time.Unix(int64(now), 0))
+	record, err := agentrelay.NewPreparedRecord(request, runtimeVerified(t, request), time.Unix(int64(now), 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1232,7 +1233,10 @@ func sponsorshipRuntimeRecord(t *testing.T, mode agentrelay.Mode) (agentrelay.Re
 func attachRelayRuntimeAdmission(t *testing.T, request agentrelay.RelayExecutionRequest,
 	now uint64, amountAtomic string) agentrelay.RelayExecutionRequest {
 	t.Helper()
-	authorityKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x41}, ed25519.SeedSize))
+	// The Action Authority signs through the in-process test Fake; these
+	// tests check relay bindings, not ML-DSA-44 bytes.
+	authoritySigner, authorityController := &mldsa44test.Fake{}, "authority"
+	authorityKeyID := authoritySigner.KeyID(authorityController)
 	clientKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x42}, ed25519.SeedSize))
 	providerKey := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x43}, ed25519.SeedSize))
 	fields := map[string]agentcommerce.SemanticValue{
@@ -1247,11 +1251,11 @@ func attachRelayRuntimeAdmission(t *testing.T, request agentrelay.RelayExecution
 		"amount_atomic":          agentcommerce.ID(amountAtomic),
 		"destination_digest":     agentcommerce.Digest32(shaDigest("d")),
 	}
-	fence, err := agentcommerce.SignWriterFence(agentcommerce.WriterFenceBody{SchemaVersion: 1,
+	fence, err := agentcommerce.SignWriterFence(context.Background(), agentcommerce.WriterFenceBody{SchemaVersion: 1,
 		OwnerID: "owner:buyer", AgentID: request.QuoteRequest.Body.RequesterAgentID,
 		InstanceID: "instance:runtime-test", LeaseID: "lease:runtime-test", WriterGeneration: 1,
 		IssuedAtUnix: now - 60, ExpiresAtUnix: request.AgreementExpiresAtUnix,
-		AuthorityID: "authority:runtime-test", Scope: []string{request.QuoteRequest.Body.UnderlyingActionKind}}, authorityKey)
+		AuthorityID: "authority:runtime-test", Scope: []string{request.QuoteRequest.Body.UnderlyingActionKind}}, authoritySigner, authorityController)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1261,7 +1265,7 @@ func attachRelayRuntimeAdmission(t *testing.T, request agentrelay.RelayExecution
 	if err != nil {
 		t.Fatal(err)
 	}
-	action, err = agentcommerce.SignAuthorizedAction(action, authorityKey)
+	action, err = agentcommerce.SignAuthorizedAction(context.Background(), action, authorityKeyID, authoritySigner, authorityController)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1293,7 +1297,7 @@ func attachRelayRuntimeAdmission(t *testing.T, request agentrelay.RelayExecution
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.AdmissionReceipt, err = agentrelay.SignRelaySideEffectAdmissionReceipt(receiptBody, authorityKey)
+	request.AdmissionReceipt, err = agentrelay.SignRelaySideEffectAdmissionReceipt(context.Background(), receiptBody, authoritySigner, authorityController)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1307,4 +1311,18 @@ func fmtHex(value []byte) string {
 		result[index*2], result[index*2+1] = alphabet[item>>4], alphabet[item&15]
 	}
 	return string(result)
+}
+
+// runtimeVerified is the Action Authority check of a runtime test receipt,
+// signed by the test Fake controller "authority".
+func runtimeVerified(t *testing.T, request agentrelay.RelayExecutionRequest) agentrelay.VerifiedRelayAdmissionReceipt {
+	t.Helper()
+	fake := &mldsa44test.Fake{}
+	resolver := mldsa44test.ActionAuthorityResolver{Verifier: fake,
+		Keys: map[string][][]byte{request.AdmissionReceipt.Body.AuthorityID: {fake.PublicKey("authority")}}}
+	verified, err := agentrelay.VerifyRelaySideEffectAdmissionReceiptAuthority(request.AdmissionReceipt, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return verified
 }
