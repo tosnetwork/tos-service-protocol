@@ -1,0 +1,199 @@
+{
+  "schema": "tos.service.transport-binding.v1.vectors",
+  "valid": [
+    {
+      "name": "connect-https",
+      "security_mode": 1,
+      "max_request_bytes": 1048576,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQEAEAAAAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxl9qPL2A==",
+      "transport_binding_digest": "sha256:f0a2787cdf7fa5755ecaa1a571887abd7f334845f3b459bbf2fe73e24c03d69b"
+    },
+    {
+      "name": "connect-loopback",
+      "security_mode": 0,
+      "max_request_bytes": 16777216,
+      "base_url": "http://127.0.0.1:8080",
+      "boc_base64": "te6cckEBAgEAJQABFk5UQjEAAQABAAAAAQAqaHR0cDovLzEyNy4wLjAuMTo4MDgwYM0XJA==",
+      "transport_binding_digest": "sha256:dca9babcd44775f2c19ef571964c01e2e75b15254d0d16f2349c8d446f76c44c"
+    },
+    {
+      "name": "connect-https-path-prefix",
+      "security_mode": 1,
+      "max_request_bytes": 1048576,
+      "base_url": "https://provider.example/tos/rpc",
+      "boc_base64": "te6cckEBAgEAMAABFk5UQjEAAQEAEAAAAQBAaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3Rvcy9ycGNjbdQ9",
+      "transport_binding_digest": "sha256:0adfff160240151da85f3b6f97cad545c38f1a7ae31a0c169326cafe0ef5c427"
+    },
+    {
+      "name": "connect-loopback-path-prefix",
+      "security_mode": 0,
+      "max_request_bytes": 4096,
+      "base_url": "http://127.0.0.1:8080/rpc",
+      "boc_base64": "te6cckEBAgEAKQABFk5UQjEAAQAAABAAAQAyaHR0cDovLzEyNy4wLjAuMTo4MDgwL3JwY7J4Lyg=",
+      "transport_binding_digest": "sha256:4d13179f73bba9982acb78332c9515f91c3ac8da7111b155401996be32ae1f64"
+    },
+    {
+      "name": "agent-packet-1mib",
+      "security_mode": 2,
+      "max_request_bytes": 1048576,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQIAEAAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWEy1INP",
+      "transport_binding_digest": "sha256:83ad45f3e21f0fcb4ae32c88c41ea88f2cfc8e3aa6f604c71a66fdba3df1fd0a"
+    },
+    {
+      "name": "agent-packet-small",
+      "security_mode": 2,
+      "max_request_bytes": 4096,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQIAABAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWFWJE0O",
+      "transport_binding_digest": "sha256:1b2c038ddcb94a809fc4999b5eb60eecc5295b3eda7a11f84cc4834343cec09d"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "agent-packet-over-1mib",
+      "security_mode": 2,
+      "max_request_bytes": 1048577,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQIAEAABAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWHlx8hD"
+    },
+    {
+      "name": "agent-packet-upper-hex",
+      "security_mode": 2,
+      "max_request_bytes": 4096,
+      "base_url": "agent-packet:agent_5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQIAABAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVBNUE1QTVBNUE1QTVBNUE1QTVBNUE1QTVBNUE1QTVBNUE1QTVBNUE1QTVBNUE1QTVBNUE1QTVBNUE1QTVBNUG0ftcH"
+    },
+    {
+      "name": "agent-packet-short-id",
+      "security_mode": 2,
+      "max_request_bytes": 4096,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYQABFk5UQjEAAQIAABAAAQCiYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhGrxrzg=="
+    },
+    {
+      "name": "agent-packet-trailing",
+      "security_mode": 2,
+      "max_request_bytes": 4096,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a/",
+      "boc_base64": "te6cckEBAgEAZAABFk5UQjEAAQIAABAAAQCoYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWEv46ICFg=="
+    },
+    {
+      "name": "agent-packet-https-url",
+      "security_mode": 2,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQIAABAAAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlxfEiiw=="
+    },
+    {
+      "name": "https-naming-agent",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQEAABAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWHCknqT"
+    },
+    {
+      "name": "unknown-mode-3",
+      "security_mode": 3,
+      "max_request_bytes": 4096,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQMAABAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWF1ZASG"
+    },
+    {
+      "name": "unknown-mode-3-https-url",
+      "security_mode": 3,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQMAABAAAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlDiGEtg=="
+    },
+    {
+      "name": "agent-packet-zero-bound",
+      "security_mode": 2,
+      "max_request_bytes": 0,
+      "base_url": "agent-packet:agent_5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "boc_base64": "te6cckEBAgEAYwABFk5UQjEAAQIAAAAAAQCmYWdlbnQtcGFja2V0OmFnZW50XzVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWE1YTVhNWFmwRF/"
+    },
+    {
+      "name": "connect-https-over-16mib",
+      "security_mode": 1,
+      "max_request_bytes": 16777217,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQEBAAABAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlLi4hXA=="
+    },
+    {
+      "name": "connect-https-zero-bound",
+      "security_mode": 1,
+      "max_request_bytes": 0,
+      "base_url": "https://provider.example",
+      "boc_base64": "te6cckEBAgEAKAABFk5UQjEAAQEAAAAAAQAwaHR0cHM6Ly9wcm92aWRlci5leGFtcGxll8WThg=="
+    },
+    {
+      "name": "connect-https-path-trailing-slash",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/rpc/",
+      "boc_base64": "te6cckEBAgEALQABFk5UQjEAAQEAABAAAQA6aHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3JwYy8s64gW"
+    },
+    {
+      "name": "connect-https-path-query",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/rpc?x=1",
+      "boc_base64": "te6cckEBAgEAMAABFk5UQjEAAQEAABAAAQBAaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3JwYz94PTEA+8Yf"
+    },
+    {
+      "name": "connect-https-path-fragment",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/rpc#part",
+      "boc_base64": "te6cckEBAgEAMQABFk5UQjEAAQEAABAAAQBCaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3JwYyNwYXJ0mcVdpg=="
+    },
+    {
+      "name": "connect-https-userinfo",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://user@provider.example/rpc",
+      "boc_base64": "te6cckEBAgEAMQABFk5UQjEAAQEAABAAAQBCaHR0cHM6Ly91c2VyQHByb3ZpZGVyLmV4YW1wbGUvcnBjOeWZIg=="
+    },
+    {
+      "name": "connect-https-empty-segment",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example//rpc",
+      "boc_base64": "te6cckEBAgEALQABFk5UQjEAAQEAABAAAQA6aHR0cHM6Ly9wcm92aWRlci5leGFtcGxlLy9ycGMiJBxM"
+    },
+    {
+      "name": "connect-https-dot-segment",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/a/../rpc",
+      "boc_base64": "te6cckEBAgEAMQABFk5UQjEAAQEAABAAAQBCaHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL2EvLi4vcnBjMCVktg=="
+    },
+    {
+      "name": "connect-https-escaped-path",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://provider.example/r%20pc",
+      "boc_base64": "te6cckEBAgEALwABFk5UQjEAAQEAABAAAQA+aHR0cHM6Ly9wcm92aWRlci5leGFtcGxlL3IlMjBwY/Bn21U="
+    },
+    {
+      "name": "connect-loopback-path-trailing-slash",
+      "security_mode": 0,
+      "max_request_bytes": 4096,
+      "base_url": "http://127.0.0.1:8080/rpc/",
+      "boc_base64": "te6cckEBAgEAKgABFk5UQjEAAQAAABAAAQA0aHR0cDovLzEyNy4wLjAuMTo4MDgwL3JwYy+duU0e"
+    },
+    {
+      "name": "connect-https-url-over-120-bytes",
+      "security_mode": 1,
+      "max_request_bytes": 4096,
+      "base_url": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+      "boc_base64": "te6cckEBAgEAjgABFk5UQjEAAQEAABAAAQD8aHR0cHM6Ly9hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYS5leGFtcGxlUbumZA=="
+    }
+  ],
+  "notes": [
+    "generated by tos-service-protocol pkg/nativecore TestTransportBindingVectors",
+    "invalid entries are NTB1 cells encoded without validation; every decoder must refuse them"
+  ]
+}

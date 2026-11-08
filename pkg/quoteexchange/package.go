@@ -89,6 +89,13 @@ func validatePortable(network *nativev1.NetworkDomain, request *nativev1.Request
 	if err != nil {
 		return nil, errors.New("Quote Proposal transport binding is invalid")
 	}
+	if transport.SecurityMode == nativecore.TransportAgentPacket {
+		// Agent Packets go to the Capability owner Agent and to nobody else.
+		recipient, err := transport.AgentPacketRecipient()
+		if err != nil || recipient != value.Proposal.ProviderAgentId {
+			return nil, errors.New("Quote Proposal Agent Packet transport names another Agent than the provider")
+		}
+	}
 	if _, _, err := nativecore.BuildAcceptedQuoteCommitment(network, value.Proposal); err != nil {
 		return nil, errors.New("Quote Proposal fields are not canonically encodable")
 	}

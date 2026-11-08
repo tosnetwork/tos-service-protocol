@@ -10,10 +10,10 @@ permissions:
 env:
   # The tosctl build that signs and verifies ML-DSA-44 for the Native
   # Registry and the Action Authority (--for action-authority). Tests that
-  # check real ML-DSA-44 bytes fail, rather than skip, without it. Repin when
-  # the helper lands on the tos main branch.
+  # check real ML-DSA-44 bytes fail, rather than skip, without it. Pinned to
+  # the tos main merge that carries the custody authorization context.
   TOS_HELPER_REPOSITORY: tosnetwork/tos
-  TOS_HELPER_COMMIT: 3ec568a31c5984cc70e67cd758e1ce33acdd0319
+  TOS_HELPER_COMMIT: c41331dd3103c0eac719d7e5f368079f0a40e64f
 
 jobs:
   test:

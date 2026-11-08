@@ -86,3 +86,41 @@ func TestValidateRejectsExpiredProposal(t *testing.T) {
 		t.Fatal("expired proposal accepted")
 	}
 }
+
+func withAgentPacketTransport(t *testing.T, value *nativev1.QuoteProposalPackageV1, recipient string) {
+	t.Helper()
+	binding, err := nativecore.AgentPacketTransportBinding(recipient, nativecore.MaxAgentPacketTransportRequestBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, digest, err := nativecore.BuildTransportBindingCellV1(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value.TransportBindingBoc, value.Proposal.TransportBindingDigest = root.ToBOC(), digest
+}
+
+func TestValidateAcceptsAgentPacketTransportToTheProvider(t *testing.T) {
+	network, request, value, now := validPackage(t)
+	withAgentPacketTransport(t, value, value.Proposal.ProviderAgentId)
+	validated, err := Validate(network, request, value, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := validated.TransportBinding.AgentPacketRecipient()
+	if err != nil || recipient != value.Proposal.ProviderAgentId ||
+		validated.TransportBinding.MaxRequestBytes != nativecore.MaxAgentPacketTransportRequestBytes {
+		t.Fatalf("binding=%+v recipient=%q err=%v", validated.TransportBinding, recipient, err)
+	}
+}
+
+func TestValidateRefusesAgentPacketTransportToAnotherAgent(t *testing.T) {
+	network, request, value, now := validPackage(t)
+	withAgentPacketTransport(t, value, "agent_"+strings.Repeat("56", 32))
+	if _, err := Validate(network, request, value, now); err == nil {
+		t.Fatal("accepted an Agent Packet transport to another Agent")
+	}
+	if _, err := ValidatePortable(network, request, value); err == nil || !strings.Contains(err.Error(), "another Agent") {
+		t.Fatalf("portable validation of an Agent Packet transport to another Agent: %v", err)
+	}
+}
