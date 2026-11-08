@@ -272,3 +272,44 @@ func TestRelayReceiptAuthorityIsVerifiedOnceAndOutsideTheJournal(t *testing.T) {
 		t.Fatalf("the receipt authority was verified %d times, want exactly once", count)
 	}
 }
+
+// A receipt signed by another key that the resolver also authorizes for the
+// same authority is refused: the receipt key ID must equal the fence and
+// action key ID.
+func TestRelayReceiptKeyMustEqualTheFenceKey(t *testing.T) {
+	fixture := newRelayFixture(t)
+	second := relayAuthorityKey("second-authority")
+	resolver := twoKeyRelayResolver{relayResolver: fixture.resolver, second: second.publicKey()}
+	if err := VerifyRelaySideEffectAdmissionReceipt(fixture.execution.AdmissionReceipt, fixture.execution, resolver,
+		fixture.now); err != nil {
+		t.Fatalf("the fence-key receipt was refused under a two-key resolver: %v", err)
+	}
+	other, err := signTestReceipt(fixture.execution.AdmissionReceipt.Body, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(other, resolver); err != nil {
+		t.Fatalf("the second key's receipt signature does not verify on its own: %v", err)
+	}
+	if err := VerifyRelaySideEffectAdmissionReceipt(other, fixture.execution, resolver, fixture.now); err == nil {
+		t.Fatal("a receipt signed by a key other than the fence key was accepted")
+	}
+	if err := VerifyRelaySideEffectAdmissionReceiptIntegrity(other, fixture.execution); err == nil {
+		t.Fatal("a receipt naming a key other than the fence key passed the integrity check")
+	}
+}
+
+// twoKeyRelayResolver authorizes the fixture authority key and one more key
+// for authority:client.
+type twoKeyRelayResolver struct {
+	relayResolver
+	second []byte
+}
+
+func (resolver twoKeyRelayResolver) ResolveActionAuthorityKey(authorityID string, keyID [mldsa44.KeyIDSize]byte,
+	at time.Time) ([]byte, error) {
+	if id, err := mldsa44.KeyID(resolver.second); err == nil && id == keyID && authorityID == "authority:client" {
+		return append([]byte(nil), resolver.second...), nil
+	}
+	return resolver.relayResolver.ResolveActionAuthorityKey(authorityID, keyID, at)
+}
