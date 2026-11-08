@@ -324,3 +324,30 @@ func (resolver twoKeyRelayResolver) ResolveActionAuthorityKey(authorityID string
 	}
 	return resolver.relayResolver.ResolveActionAuthorityKey(authorityID, keyID, at)
 }
+
+// The receipt authority check refuses a receipt whose signature is altered or
+// whose key the resolver does not authorize.
+func TestRelayReceiptAuthorityRefusesAnInvalidSignature(t *testing.T) {
+	fixture := newRelayFixture(t)
+	receipt := fixture.execution.AdmissionReceipt
+	signature, err := agentcommerce.ParseActionAuthoritySignature(receipt.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature[7] ^= 1
+	flipped := receipt
+	flipped.Signature, _ = agentcommerce.ActionAuthoritySignatureText(signature)
+	unauthorized, err := signTestReceipt(receipt.Body, relayAuthorityKey("unauthorized-authority"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, candidate := range map[string]SignedRelaySideEffectAdmissionReceipt{"flipped signature": flipped,
+		"unauthorized key": unauthorized} {
+		if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(candidate, fixture.resolver); err == nil {
+			t.Fatalf("a receipt with a %s passed its authority check", name)
+		}
+	}
+	if _, err := VerifyRelaySideEffectAdmissionReceiptAuthority(receipt, fixture.resolver); err != nil {
+		t.Fatalf("the valid receipt was refused: %v", err)
+	}
+}
