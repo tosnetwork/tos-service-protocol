@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -29,7 +28,7 @@ func FirmOfferAgreementEvidenceProfileV1() ProfileRefV1 {
 		ProfileVersion: 1, ContentType: FirmOfferAgreementEvidenceContentType,
 		GroupRule: "complete-subject-profile-group", TargetRule: "agreement-predicate-target-v1",
 		Verifier: "tos.service.agent-guarantor.verify.firm-offer-agreement-evidence.v1"}
-	digest, _ := codec.Digest("tos.service.agreement.evidence-profile.guarantor-firm-offer.v1", descriptor)
+	digest, _ := guarantorCodec.Digest("tos.service.agreement.evidence-profile.guarantor-firm-offer.v1", descriptor)
 	return ProfileRefV1{ProfileURI: descriptor.ProfileURI, ProfileVersion: descriptor.ProfileVersion, ProfileDigest: digest}
 }
 
@@ -60,7 +59,7 @@ func AgreementAuthorizationEvidenceSetDigestV1(value GuarantorAgreementAuthoriza
 	if err := ValidateAgreementAuthorizationEvidenceSetV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-agreement-authorization-evidence-set.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-agreement-authorization-evidence-set.v1", value)
 }
 
 func ValidateAgreementAuthorizationEvidenceSetV1(value GuarantorAgreementAuthorizationEvidenceSetV1) error {
@@ -75,8 +74,8 @@ func ValidateAgreementAuthorizationEvidenceSetV1(value GuarantorAgreementAuthori
 			evidence.AgreementBodyDigest != value.AgreementBodyDigest {
 			return errors.New("Guarantor Agreement evidence set mixes Agreement contexts")
 		}
-		encoded, err := codec.Marshal(evidence)
-		identity, identityErr := codec.Digest("tos.service.agent-guarantor-agreement-evidence-identity.v1", struct {
+		encoded, err := guarantorCodec.Marshal(evidence)
+		identity, identityErr := guarantorCodec.Digest("tos.service.agent-guarantor-agreement-evidence-identity.v1", struct {
 			AuthoritySubject agentcommerce.AgreementAuthoritySubject `json:"authority_subject"`
 			ProfileURI       string                                  `json:"profile_uri"`
 			ProfileVersion   uint32                                  `json:"profile_version"`
@@ -132,7 +131,7 @@ func NewFirmOfferAgreementEvidenceV1(offer AuthorizedFirmCoverageOfferV1, agreem
 	typed := GuarantorFirmOfferAgreementEvidenceV1{SchemaVersion: 1, EvidenceProfile: profile,
 		AgreementBodyDigest: agreementDigest, GuarantorAgentID: offer.Body.GuarantorAgentID,
 		SatisfiedPredicateTargets: targets, AuthorizedFirmOfferEnvelopeDigest: offerDigest, AuthorizedFirmOffer: offer}
-	canonical, err := codec.Marshal(typed)
+	canonical, err := guarantorCodec.Marshal(typed)
 	if err != nil {
 		return agentcommerce.AgreementAuthorizationEvidence{}, err
 	}
@@ -153,7 +152,7 @@ func VerifyFirmOfferAgreementEvidenceV1(wrapper agentcommerce.AgreementAuthoriza
 		return errors.New("firm-offer Agreement evidence profile is invalid")
 	}
 	var value GuarantorFirmOfferAgreementEvidenceV1
-	if err := codec.Unmarshal(wrapper.Evidence, &value); err != nil {
+	if err := guarantorCodec.Unmarshal(wrapper.Evidence, &value); err != nil {
 		return err
 	}
 	agreementDigest, err := agentcommerce.AgreementBodyDigest(agreement)
@@ -180,7 +179,7 @@ func verifyFirmOfferAgreementEvidenceAgainstOfferV1(wrapper agentcommerce.Agreem
 	var value GuarantorFirmOfferAgreementEvidenceV1
 	if wrapper.EvidenceProfileURI != profile.ProfileURI || uint64(wrapper.EvidenceProfileVersion) != profile.ProfileVersion ||
 		wrapper.EvidenceProfileDigest != profile.ProfileDigest || wrapper.EvidenceContentType != FirmOfferAgreementEvidenceContentType ||
-		codec.Unmarshal(wrapper.Evidence, &value) != nil {
+		guarantorCodec.Unmarshal(wrapper.Evidence, &value) != nil {
 		return errors.New("firm-offer Agreement evidence wire profile is invalid")
 	}
 	agreementDigest, agreementErr := agentcommerce.AgreementBodyDigest(agreement)
@@ -217,7 +216,7 @@ func VerifyFirmOfferAgreementEvidenceIntrinsicV1(wrapper agentcommerce.Agreement
 	var value GuarantorFirmOfferAgreementEvidenceV1
 	if resolver == nil || publicationResolver == nil || wrapper.EvidenceProfileURI != profileRef.ProfileURI ||
 		uint64(wrapper.EvidenceProfileVersion) != profileRef.ProfileVersion || wrapper.EvidenceProfileDigest != profileRef.ProfileDigest ||
-		wrapper.EvidenceContentType != FirmOfferAgreementEvidenceContentType || codec.Unmarshal(wrapper.Evidence, &value) != nil {
+		wrapper.EvidenceContentType != FirmOfferAgreementEvidenceContentType || guarantorCodec.Unmarshal(wrapper.Evidence, &value) != nil {
 		return errors.New("firm-offer Agreement evidence intrinsic profile is invalid")
 	}
 	offer := value.AuthorizedFirmOffer
@@ -255,7 +254,7 @@ func VerifyFirmOfferAgreementEvidenceIntrinsicV1(wrapper agentcommerce.Agreement
 		body.GuarantorEvidenceProfile != profileRef {
 		return errors.New("firm-offer Agreement evidence intrinsic offer projection differs")
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-firm-offer-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-firm-offer-body.v1", body)
 	return ValidateAuthorizationSet(offer.Authorizations, "firm-coverage-offer", bodyDigest,
 		"tos.service.agent-guarantor-firm-offer-signature.v1", []string{body.GuarantorAgentID}, resolver, now)
 }
@@ -303,21 +302,21 @@ func FirmOfferRecipientSetDigestV1(value FirmOfferRecipientSetV1) (string, error
 		!sortedUnique(value.AcceptanceSubjects, MaxAuthorizations, validID) {
 		return "", errors.New("Guarantor firm-offer recipient set is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-firm-offer-recipient-set.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-firm-offer-recipient-set.v1", value)
 }
 
 func FirmOfferAuthorityInstanceEffectDigestV1(value FirmOfferAuthorityInstanceEffectV1) (string, error) {
 	if err := ValidateFirmOfferAuthorityInstanceEffectV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-firm-offer-authority-effect.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-firm-offer-authority-effect.v1", value)
 }
 
 func ReservationIDV1(guarantorAgentID, authorityInstanceID, descriptorDigest string) (string, error) {
 	if !validID(guarantorAgentID) || !validDigest(authorityInstanceID) || !validDigest(descriptorDigest) {
 		return "", errors.New("Guarantor reservation identity input is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-reservation-id.v1", struct {
+	return guarantorCodec.Digest("tos.service.agent-guarantor-reservation-id.v1", struct {
 		GuarantorAgentID  string `json:"guarantor_agent_id"`
 		AuthorityInstance string `json:"authority_instance_id"`
 		DescriptorDigest  string `json:"descriptor_digest"`
@@ -364,8 +363,8 @@ func ValidateFirmOfferIssuanceActionBodyV1(value FirmOfferIssuanceActionBodyV1) 
 	expectedTemplate := value.AuthorityInstanceEffect.PreallocationOfferTemplate
 	expectedTemplate.OfferID = value.AuthorityInstanceID
 	expectedTemplate.ReservationID = reservationID
-	expectedTemplateBytes, expectedTemplateErr := codec.Marshal(expectedTemplate)
-	actualTemplateBytes, actualTemplateErr := codec.Marshal(value.UnsignedOfferTemplate)
+	expectedTemplateBytes, expectedTemplateErr := guarantorCodec.Marshal(expectedTemplate)
+	actualTemplateBytes, actualTemplateErr := guarantorCodec.Marshal(value.UnsignedOfferTemplate)
 	if requestErr != nil || descriptorErr != nil || reservationErr != nil || requestDigest != value.AuthorityInstanceEffect.AuthorizedQuoteRequestEnvelopeDigest ||
 		expectedTemplateErr != nil || actualTemplateErr != nil || !bytes.Equal(expectedTemplateBytes, actualTemplateBytes) ||
 		value.UnsignedOfferTemplate.ExposureAdmissionReceiptDigest != zero ||

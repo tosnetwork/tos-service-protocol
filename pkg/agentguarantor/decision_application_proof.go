@@ -5,22 +5,21 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const DecisionApplicationReceiptSealDomainV1 = "tos.service.agent-guarantor-decision-application-receipt-seal.v1"
 
 func NewDecisionApplicationReceiptSealBodyV1(receipt AuthorizedClaimDecisionApplicationReceiptV1,
 	terms CoverageTermsV1, sealedAt time.Time) (DecisionApplicationReceiptSealBodyV1, ImmutableEvidenceDescriptorV1, error) {
-	wire, err := codec.Marshal(receipt)
+	wire, err := guarantorCodec.Marshal(receipt)
 	if err != nil {
 		return DecisionApplicationReceiptSealBodyV1{}, ImmutableEvidenceDescriptorV1{}, err
 	}
 	receiptDigest, receiptErr := ClaimDecisionApplicationReceiptDigestV1(receipt)
-	bodyDigest, bodyErr := codec.Digest("tos.service.agent-guarantor-claim-decision-application-receipt-body.v1", receipt.Body)
+	bodyDigest, bodyErr := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-application-receipt-body.v1", receipt.Body)
 	actionDigest, actionErr := agentcommerce.AuthorizedActionDigest(receipt.StageActionAdmissionEvidence.AuthorizedAction)
 	transitionDigest, transitionErr := ClaimStateTransitionReceiptDigestV1(receipt.AuthorizedTerminalClaimStateTransitionReceipt)
-	payoutDigest, payoutErr := codec.Digest(PayoutSetDomain, receipt.MaterializedPayoutObligationSet)
+	payoutDigest, payoutErr := guarantorCodec.Digest(PayoutSetDomain, receipt.MaterializedPayoutObligationSet)
 	tokenDigest, tokenErr := DecisionApplicationTokenDigestV1(receipt.DecisionApplicationToken)
 	termsDigest, termsErr := CoverageTermsDigest(terms)
 	if receiptErr != nil || bodyErr != nil || actionErr != nil || transitionErr != nil || payoutErr != nil || tokenErr != nil ||
@@ -63,7 +62,7 @@ func ValidateDecisionApplicationReceiptProofV1(proof DecisionApplicationReceiptP
 		proof.ReceiptDescriptor.RetrievalPolicyDigest != terms.DecisionAdmissionProfile.ProfileDigest {
 		return errors.New("decision application compact proof is malformed")
 	}
-	bodyDigest, bodyErr := codec.Digest("tos.service.agent-guarantor-claim-decision-application-receipt-body.v1", proof.Body)
+	bodyDigest, bodyErr := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-application-receipt-body.v1", proof.Body)
 	termsDigest, termsErr := CoverageTermsDigest(terms)
 	bound, boundErr := FindStageActionAuthorityV1(terms.StageActionAuthorityBinding, "decision_application")
 	seal := proof.SealBody
@@ -96,7 +95,7 @@ func ValidateDecisionApplicationReceiptProofV1(proof DecisionApplicationReceiptP
 	}
 	if len(wire) != 0 {
 		var complete AuthorizedClaimDecisionApplicationReceiptV1
-		if codec.Unmarshal(wire, &complete) != nil {
+		if guarantorCodec.Unmarshal(wire, &complete) != nil {
 			return errors.New("decision application compact proof complete receipt is undecodable")
 		}
 		completeDigest, digestErr := ClaimDecisionApplicationReceiptDigestV1(complete)
@@ -107,7 +106,7 @@ func ValidateDecisionApplicationReceiptProofV1(proof DecisionApplicationReceiptP
 			return errors.New("decision application compact proof differs from its immutable complete receipt")
 		}
 	}
-	sealDigest, _ := codec.Digest(DecisionApplicationReceiptSealDomainV1, seal)
+	sealDigest, _ := guarantorCodec.Digest(DecisionApplicationReceiptSealDomainV1, seal)
 	return VerifyObjectAuthorization(proof.SealAuthorization, "decision-application-receipt-seal", sealDigest,
 		"tos.service.agent-guarantor-decision-application-receipt-seal-signature.v1", resolver, now)
 }

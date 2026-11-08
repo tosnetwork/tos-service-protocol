@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 type ActivationAdmissionCutProofV1 struct {
@@ -25,7 +24,7 @@ func ActivationAdmissionCutProofDigestV1(proof ActivationAdmissionCutProofV1) (s
 	if err := ValidateActivationAdmissionCutProofV1(proof); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-activation-cut-proof.v1", proof)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-activation-cut-proof.v1", proof)
 }
 
 func ValidateActivationAdmissionCutProofV1(proof ActivationAdmissionCutProofV1) error {
@@ -150,7 +149,7 @@ func CoverageNonActivationReasonEvidenceDigestV1(reason CoverageNonActivationRea
 	if err := ValidateCoverageNonActivationReasonEvidenceV1(reason); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-non-activation-reason-evidence.v1", reason)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-non-activation-reason-evidence.v1", reason)
 }
 
 func ValidateCoverageNonActivationReasonEvidenceV1(reason CoverageNonActivationReasonEvidenceV1) error {
@@ -273,7 +272,7 @@ func verifyCoverageNonActivationReasonV1(reason CoverageNonActivationReasonEvide
 					return errors.New("prerequisite terminal-failure authorization profile is substituted")
 				}
 			}
-			failureBodyDigest, err := codec.Digest("tos.service.agent-guarantor-prerequisite-terminal-failure.v1", struct {
+			failureBodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-prerequisite-terminal-failure.v1", struct {
 				CoverageAgreementBodyDigest string       `json:"coverage_agreement_body_digest"`
 				CoverageObligationID        string       `json:"coverage_obligation_id"`
 				PrerequisiteID              string       `json:"prerequisite_id"`
@@ -301,7 +300,7 @@ func verifyCoverageNonActivationReasonV1(reason CoverageNonActivationReasonEvide
 			uint64(now.UTC().Unix()) >= body.ExpiresAtUnix {
 			return errors.New("mutual-cancellation body is stale or substituted")
 		}
-		cancellationDigest, _ := codec.Digest("tos.service.agent-guarantor-pre-activation-mutual-cancellation.v1", body)
+		cancellationDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-pre-activation-mutual-cancellation.v1", body)
 		agreementBody := evidence.AuthorizedAcceptanceReceipt.AuthorizedAcceptanceRequest.CoverageAgreementBody
 		agreementDigest, _ := agentcommerce.AgreementBodyDigest(agreementBody)
 		predicates := make(map[string]agentcommerce.AgreementAuthorizationPredicate)
@@ -347,7 +346,7 @@ func CoverageNonActivationEvidenceDigestV1(evidence AuthorizedCoverageNonActivat
 	if err := validateCoverageNonActivationEvidenceShapeV1(evidence); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-non-activation-evidence-envelope.v1", evidence)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-non-activation-evidence-envelope.v1", evidence)
 }
 
 func validateCoverageNonActivationEvidenceShapeV1(evidence AuthorizedCoverageNonActivationEvidenceV1) error {
@@ -445,7 +444,7 @@ func VerifyCoverageNonActivationEvidenceV1(evidence AuthorizedCoverageNonActivat
 		ExpectedClaimFilingState: body.PriorClaimFilingState, TargetClaimFilingState: body.ResultingClaimFilingState,
 		ExpectedClaimFilingStateRevision: body.PriorClaimFilingStateRevision,
 		TargetClaimFilingStateRevision:   body.ResultingClaimFilingStateRevision}
-	requestBytes, err := codec.Marshal(request)
+	requestBytes, err := guarantorCodec.Marshal(request)
 	if err != nil || !bytes.Equal(requestBytes, evidence.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("non-activation action request is noncanonical")
 	}
@@ -467,7 +466,7 @@ func VerifyCoverageNonActivationEvidenceV1(evidence AuthorizedCoverageNonActivat
 		evidence.AuthorityAdmissionEligibilityProofSet.AdmittedActionDigest != actionDigest {
 		return errors.New("non-activation action or authority proof is substituted")
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-non-activation-evidence-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-non-activation-evidence-body.v1", body)
 	return ValidateAuthorizationSet(evidence.Authorizations, "non-activation-evidence", bodyDigest,
 		"tos.service.agent-guarantor-non-activation-evidence-signature.v1", []string{offer.Body.GuarantorAgentID}, authorityResolver, now)
 }

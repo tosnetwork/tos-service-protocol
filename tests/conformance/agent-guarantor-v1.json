@@ -1353,5 +1353,54 @@
         }
       ]
     }
-  ]
+  ],
+  "guarantor_size_limits": {
+    "canonical_bytes": 2000000,
+    "string_bytes": 2000000,
+    "json_bytes": 4000000,
+    "default_canonical_bytes": 1048576,
+    "default_string_bytes": 1048576,
+    "domain": "tos.service.agent-guarantor-size-vector.v1",
+    "vectors": [
+      {
+        "name": "guarantor-ceiling-exact",
+        "construction": {
+          "kind": "text-map",
+          "key": "padding",
+          "text_length": 1999986
+        },
+        "canonical_bytes": 2000000,
+        "longest_string_bytes": 1999986,
+        "digest": "sha256:d13f20374be7be91da3f299c401372c8fd099693473152d637ad63727c69af5b",
+        "accepted_by_guarantor": true,
+        "accepted_by_default": false
+      },
+      {
+        "name": "guarantor-ceiling-plus-one",
+        "construction": {
+          "kind": "text-map",
+          "key": "padding",
+          "text_length": 1999987
+        },
+        "canonical_bytes": 2000001,
+        "longest_string_bytes": 1999987,
+        "digest": "sha256:810d68c5be7b821a1901a183f1e78d50de69362cff6e410d980d7b2c8cfa4c11",
+        "accepted_by_guarantor": false,
+        "accepted_by_default": false
+      },
+      {
+        "name": "worst-case-nested-request-string",
+        "construction": {
+          "kind": "nested-request",
+          "key": "canonical_request",
+          "text_length": 874006
+        },
+        "canonical_bytes": 1165384,
+        "longest_string_bytes": 1165360,
+        "digest": "sha256:1cee28a577668ebbd7a65e70e1f34fe811b2ed729df8c8b0e294c9524470f33e",
+        "accepted_by_guarantor": true,
+        "accepted_by_default": false
+      }
+    ]
+  }
 }

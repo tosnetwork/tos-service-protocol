@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -24,14 +23,14 @@ func ClaimRevisionEpochExpectationDigestV1(value ClaimRevisionEpochExpectationV1
 		value.ExpectedEpochStateRevision == 0 || value.ExpectedClaimRevision == 0 {
 		return "", errors.New("claim revision epoch expectation is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-revision-epoch-expectation.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-revision-epoch-expectation.v1", value)
 }
 
 func ClaimIngressAdmissionCutProofDigestV1(value ClaimIngressAdmissionCutProofV1) (string, error) {
 	if err := ValidateClaimIngressAdmissionCutProofV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-ingress-admission-cut-proof.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-ingress-admission-cut-proof.v1", value)
 }
 
 func ValidateClaimIngressAdmissionCutProofV1(value ClaimIngressAdmissionCutProofV1) error {
@@ -114,7 +113,7 @@ func DecisionApplicationTokenDigestV1(value DecisionApplicationTokenV1) (string,
 		(value.State != "pending" && value.State != "consumed" && value.State != "replaced" && value.State != "cancelled") {
 		return "", errors.New("decision application token is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-decision-application-token.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-decision-application-token.v1", value)
 }
 
 func DecisionApplicationTokenIDV1(agreementDigest, obligationID, claimID, decisionDigest string,
@@ -123,7 +122,7 @@ func DecisionApplicationTokenIDV1(agreementDigest, obligationID, claimID, decisi
 		!validDigest(decisionDigest) || decisionSequence == 0 || decisionRevision != 1 {
 		return "", errors.New("decision application token identity is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-decision-application-token-id.v1", struct {
+	return guarantorCodec.Digest("tos.service.agent-guarantor-decision-application-token-id.v1", struct {
 		CoverageAgreementBodyDigest string `json:"coverage_agreement_body_digest"`
 		CoverageObligationID        string `json:"coverage_obligation_id"`
 		ClaimID                     string `json:"claim_id"`
@@ -134,15 +133,15 @@ func DecisionApplicationTokenIDV1(agreementDigest, obligationID, claimID, decisi
 }
 
 func ClaimDecisionAdmissionReceiptDigestV1(value AuthorizedClaimDecisionAdmissionReceiptV1) (string, error) {
-	return codec.Digest(ClaimDecisionAdmissionReceiptDomainV1, value)
+	return guarantorCodec.Digest(ClaimDecisionAdmissionReceiptDomainV1, value)
 }
 
 func ClaimStateTransitionReceiptDigestV1(value AuthorizedClaimStateTransitionReceiptV1) (string, error) {
-	return codec.Digest(ClaimStateTransitionReceiptDomainV1, value)
+	return guarantorCodec.Digest(ClaimStateTransitionReceiptDomainV1, value)
 }
 
 func ClaimDecisionApplicationReceiptDigestV1(value AuthorizedClaimDecisionApplicationReceiptV1) (string, error) {
-	return codec.Digest(ClaimDecisionApplicationReceiptDomainV1, value)
+	return guarantorCodec.Digest(ClaimDecisionApplicationReceiptDomainV1, value)
 }
 
 func decisionTargetStateV1(result ClaimDecisionResult) (string, error) {
@@ -209,11 +208,11 @@ func AuthorizedDecisionAdmissionSourceIdentityV1(variant AuthorizedDecisionAdmis
 		CurrentDecisionAdmissionReceiptDigest:    variant.PredecessorDecisionAdmissionReceiptDigest,
 		CurrentClaimStateTransitionReceiptDigest: variant.PredecessorClaimStateTransitionReceiptDigest,
 		ClaimRevisionEpochExpectationDigest:      epochDigest}
-	headDigest, err := codec.Digest("tos.service.agent-guarantor-claim-decision-source-head.v1", head)
+	headDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-source-head.v1", head)
 	if err != nil {
 		return "", "", err
 	}
-	bodyDigest, err := codec.Digest("tos.service.agent-guarantor-claim-decision-body.v1", decision.Body)
+	bodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-body.v1", decision.Body)
 	if err != nil {
 		return "", "", err
 	}
@@ -221,7 +220,7 @@ func AuthorizedDecisionAdmissionSourceIdentityV1(variant AuthorizedDecisionAdmis
 	if err != nil {
 		return "", "", err
 	}
-	identityDigest, err := codec.Digest("tos.service.agent-guarantor-authorized-decision-admission-identity.v1",
+	identityDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-authorized-decision-admission-identity.v1",
 		AuthorizedDecisionAdmissionIdentityV1{SchemaVersion: 1, ClaimDecisionBodyDigest: bodyDigest,
 			DecisionRevision: decision.Body.DecisionRevision, DerivedTargetState: target})
 	return headDigest, identityDigest, err
@@ -241,12 +240,19 @@ func VerifyClaimDecisionAdmissionReceiptV1(receipt AuthorizedClaimDecisionAdmiss
 	if receipt.Body.AdmissionMode != "authorized_decision" || agreementVerifier == nil {
 		return errors.New("claim decision admission mode is unsupported or incomplete")
 	}
+	// A late filing-close receipt and a fallback trigger cutoff exist only for
+	// deterministic fallback admission; an authorized decision carrying either
+	// would sign over an object no check ever reads.
+	if receipt.LateFilingCloseReceipt != nil || receipt.Body.LateFilingCloseReceiptDigest != "" ||
+		receipt.Body.FallbackTriggerCutoffUnix != 0 {
+		return errors.New("authorized claim decision admission carries a late filing-close receipt or fallback cutoff")
+	}
 	bound, err := FindStageActionAuthorityV1(terms.StageActionAuthorityBinding, "terminal_decision")
 	if err != nil {
 		return err
 	}
 	var actionBody ClaimDecisionAdmissionActionBodyV1
-	if err := codec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &actionBody); err != nil ||
+	if err := guarantorCodec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &actionBody); err != nil ||
 		actionBody.SchemaVersion != 1 || actionBody.AdmissionMode != "authorized_decision" ||
 		actionBody.AuthorizedDecisionVariant == nil || actionBody.DeterministicFallbackVariant != nil {
 		return errors.New("claim decision admission request is not the closed authorized variant")
@@ -332,7 +338,7 @@ func VerifyClaimDecisionAdmissionReceiptV1(receipt AuthorizedClaimDecisionAdmiss
 	if err != nil {
 		return err
 	}
-	request, err := codec.Marshal(actionBody)
+	request, err := guarantorCodec.Marshal(actionBody)
 	if err != nil || !bytes.Equal(request, receipt.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("claim decision admission request is noncanonical")
 	}
@@ -415,7 +421,7 @@ func VerifyClaimDecisionAdmissionReceiptV1(receipt AuthorizedClaimDecisionAdmiss
 		body.DecisionSequence, body.AdmittedAtUnix); err != nil {
 		return err
 	}
-	bodyDigest, err := codec.Digest("tos.service.agent-guarantor-claim-decision-admission-receipt-body.v1", body)
+	bodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-admission-receipt-body.v1", body)
 	if err != nil {
 		return err
 	}
@@ -454,7 +460,7 @@ func VerifyClaimStateTransitionReceiptV1(receipt AuthorizedClaimStateTransitionR
 	}
 	decisionAdmission := decisionProof.ReceiptBody
 	var request ClaimStateTransitionActionBodyV1
-	if err := codec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &request); err != nil ||
+	if err := guarantorCodec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &request); err != nil ||
 		request.SchemaVersion != 1 ||
 		!equalCanonical(request.TransitionEvidenceProjection, receipt.TransitionEvidenceProjection) ||
 		!equalCanonical(request.TransitionEvidenceSet, receipt.TransitionEvidenceSet) {
@@ -523,7 +529,7 @@ func VerifyClaimStateTransitionReceiptV1(receipt AuthorizedClaimStateTransitionR
 		request.TargetNonterminalRoundsUsed != wantNonterminalAfter || request.SuccessorDecisionDueAtUnix != wantSuccessorDue {
 		return errors.New("claim transition action does not follow the closed transition table")
 	}
-	requestBytes, err := codec.Marshal(request)
+	requestBytes, err := guarantorCodec.Marshal(request)
 	if err != nil || !bytes.Equal(requestBytes, receipt.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("claim transition request bytes are noncanonical")
 	}
@@ -560,7 +566,7 @@ func VerifyClaimStateTransitionReceiptV1(receipt AuthorizedClaimStateTransitionR
 		body.ResultingClaimStateRevision, body.TransitionedAtUnix); err != nil {
 		return err
 	}
-	bodyDigest, err := codec.Digest("tos.service.agent-guarantor-claim-state-transition-receipt-body.v1", body)
+	bodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-state-transition-receipt-body.v1", body)
 	if err != nil {
 		return err
 	}
@@ -613,7 +619,7 @@ func VerifyClaimDecisionApplicationReceiptV1(receipt AuthorizedClaimDecisionAppl
 	transitionDigest, transitionErr := ClaimStateTransitionReceiptDigestV1(transition)
 	endDigest, endErr := CoverageEndCommitmentDigestV1(receipt.CoverageEndCommitment)
 	templateDigest, templateErr := agentcommerce.ConditionalSettlementTemplateDigestV1(terms.PayoutTemplate)
-	if err := codec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &request); err != nil ||
+	if err := guarantorCodec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &request); err != nil ||
 		decisionErr != nil || transitionErr != nil || endErr != nil || templateErr != nil ||
 		request.SchemaVersion != 1 || request.AuthorizedClaimDecisionDigest != decisionDigest ||
 		request.AuthorizedClaimAdmissionReceiptDigest != claimAdmissionDigest ||
@@ -646,11 +652,11 @@ func VerifyClaimDecisionApplicationReceiptV1(receipt AuthorizedClaimDecisionAppl
 	if err != nil || !equalCanonical(wantSet, receipt.MaterializedPayoutObligationSet) {
 		return errors.New("decision application payout materialization differs")
 	}
-	payoutDigest, err := codec.Digest(PayoutSetDomain, receipt.MaterializedPayoutObligationSet)
+	payoutDigest, err := guarantorCodec.Digest(PayoutSetDomain, receipt.MaterializedPayoutObligationSet)
 	if err != nil {
 		return err
 	}
-	requestBytes, err := codec.Marshal(request)
+	requestBytes, err := guarantorCodec.Marshal(request)
 	if err != nil || !bytes.Equal(requestBytes, receipt.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("decision application request bytes are noncanonical")
 	}
@@ -711,7 +717,7 @@ func VerifyClaimDecisionApplicationReceiptV1(receipt AuthorizedClaimDecisionAppl
 		!containsString(receipt.StageActionAdmissionEvidence.ActionResolution.EvidenceRefs, payoutDigest) {
 		return errors.New("decision application terminal result does not commit the payout set")
 	}
-	bodyDigest, err := codec.Digest("tos.service.agent-guarantor-claim-decision-application-receipt-body.v1", body)
+	bodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-application-receipt-body.v1", body)
 	if err != nil {
 		return err
 	}

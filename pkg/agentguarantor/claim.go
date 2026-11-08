@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 func TriggeredObligationSetDigestV1(value TriggeredObligationSetV1) (string, error) {
@@ -15,7 +14,7 @@ func TriggeredObligationSetDigestV1(value TriggeredObligationSetV1) (string, err
 		!sortedUnique(value.ObligationIDs, 256, func(v string) bool { return validToken(v, 128) }) {
 		return "", errors.New("triggered obligation set is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-triggered-obligation-set.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-triggered-obligation-set.v1", value)
 }
 
 func ClaimID(coverageAgreementBodyDigest, coverageObligationID, incidentKeyDigest, beneficiaryAgentID,
@@ -24,7 +23,7 @@ func ClaimID(coverageAgreementBodyDigest, coverageObligationID, incidentKeyDiges
 		!validDigest(incidentKeyDigest) || !validID(beneficiaryAgentID) || !validDigest(triggeredObligationSetDigest) {
 		return "", errors.New("claim identity input is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-id.v1", struct {
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-id.v1", struct {
 		CoverageAgreementBodyDigest  string `json:"coverage_agreement_body_digest"`
 		CoverageObligationID         string `json:"coverage_obligation_id"`
 		IncidentKeyDigest            string `json:"incident_key_digest"`
@@ -37,14 +36,14 @@ func ClaimBodyDigest(body CoverageClaimBodyV1) (string, error) {
 	if err := validateClaimBody(body); err != nil {
 		return "", err
 	}
-	return codec.Digest(ClaimBodyDomain, body)
+	return guarantorCodec.Digest(ClaimBodyDomain, body)
 }
 
 func ClaimEnvelopeDigest(claim AuthorizedCoverageClaimV1) (string, error) {
 	if err := validateClaimEnvelopeShape(claim); err != nil {
 		return "", err
 	}
-	return codec.Digest(ClaimDomain, claim)
+	return guarantorCodec.Digest(ClaimDomain, claim)
 }
 
 func VerifyClaim(claim AuthorizedCoverageClaimV1, terms CoverageTermsV1, coverageAgreementBodyDigest,
@@ -135,7 +134,7 @@ func ValidateClaimEvidenceManifest(manifest ClaimEvidenceManifestV1) (string, er
 	if total != manifest.TotalDeclaredBytes {
 		return "", errors.New("claim evidence total is not exact")
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-evidence-manifest.v1", manifest)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-evidence-manifest.v1", manifest)
 }
 
 func ValidateOtherRecoveryDeclaration(declaration OtherRecoveryDeclarationV1, manifest ClaimEvidenceManifestV1) (string, error) {
@@ -161,7 +160,7 @@ func ValidateOtherRecoveryDeclaration(declaration OtherRecoveryDeclarationV1, ma
 		}
 		previous = item.RecoveryItemID
 	}
-	return codec.Digest("tos.service.agent-guarantor-other-recovery-declaration.v1", declaration)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-other-recovery-declaration.v1", declaration)
 }
 
 func ValidateClaimDecision(decision AuthorizedClaimDecisionV1, claim AuthorizedCoverageClaimV1, terms CoverageTermsV1,
@@ -371,7 +370,7 @@ func ClaimDecisionPolicyApplicationDigestV1(value ClaimDecisionPolicyApplication
 	if err := validateClaimDecisionPolicyApplicationV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-decision-policy-application.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-policy-application.v1", value)
 }
 
 func ClaimDecisionReasonDigestV1(value ClaimDecisionReasonV1) (string, error) {
@@ -381,18 +380,18 @@ func ClaimDecisionReasonDigestV1(value ClaimDecisionReasonV1) (string, error) {
 		!sortedUniqueAllowEmpty(value.EvidencePredicateIDs, MaxEvidenceItems, func(v string) bool { return validToken(v, 128) }) {
 		return "", errors.New("claim decision reason is invalid")
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-decision-reason.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-reason.v1", value)
 }
 
 func ClaimDecisionBodyDigestV1(body ClaimDecisionBodyV1, terms CoverageTermsV1) (string, error) {
 	if err := validateClaimDecisionBody(body, terms); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-claim-decision-body.v1", body)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-decision-body.v1", body)
 }
 
 func ClaimDecisionDigestV1(value AuthorizedClaimDecisionV1) (string, error) {
-	return codec.Digest(ClaimDecisionDomain, value)
+	return guarantorCodec.Digest(ClaimDecisionDomain, value)
 }
 
 func validateClaimDecisionPolicyApplicationV1(value ClaimDecisionPolicyApplicationV1) error {
@@ -559,7 +558,7 @@ func MaterializeClaimPayout(ownerID, agentID, mandateDigest, payoutTemplateOblig
 		if !ok || expires > terms.TerminalResolutionDeadlineUnix {
 			return MaterializedPayoutObligationSetV1{}, errors.New("payout exceeds terminal resolution deadline")
 		}
-		lineDigest, _ := codec.Digest("tos.service.agent-guarantor-payout-line.v1", line)
+		lineDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-payout-line.v1", line)
 		identity := struct {
 			CoverageAgreementBodyDigest               string `json:"coverage_agreement_body_digest"`
 			PayoutTemplateObligationID                string `json:"payout_template_obligation_id"`
@@ -575,7 +574,7 @@ func MaterializeClaimPayout(ownerID, agentID, mandateDigest, payoutTemplateOblig
 		}{decision.Body.CoverageAgreementBodyDigest, payoutTemplateObligationID,
 			decisionBodyDigest, terminalClaimStateTransitionReceiptDigest, line.DecisionLineIndex, lineDigest,
 			notBefore, due, expires, sequence, previousLineDigest}
-		instanceID, err := codec.Digest("tos.service.agent-guarantor-payout-instance.v1", identity)
+		instanceID, err := guarantorCodec.Digest("tos.service.agent-guarantor-payout-instance.v1", identity)
 		if err != nil {
 			return MaterializedPayoutObligationSetV1{}, err
 		}
@@ -584,7 +583,7 @@ func MaterializeClaimPayout(ownerID, agentID, mandateDigest, payoutTemplateOblig
 			TerminalClaimStateTransitionReceiptDigest: terminalClaimStateTransitionReceiptDigest,
 			DecisionLineIndex:                         line.DecisionLineIndex, ClaimPayoutLine: line, NotBeforeUnix: notBefore,
 			DueAtUnix: due, ExpiresAtUnix: expires, ObligationInstanceID: instanceID}
-		materializedDigest, _ := codec.Digest("tos.service.agent-guarantor-materialized-payout-line.v1", materialized)
+		materializedDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-materialized-payout-line.v1", materialized)
 		actionID, _, err := agentcommerce.DeriveStableActionID("billing.materialize", map[string]agentcommerce.SemanticValue{
 			"owner_id": agentcommerce.ID(ownerID), "agent_id": agentcommerce.ID(agentID),
 			"agreement_body_digest":   agentcommerce.Digest32(decision.Body.CoverageAgreementBodyDigest),

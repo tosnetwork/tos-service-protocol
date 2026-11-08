@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 func validateEligibilityProofSetAgainstV1(set AuthorityAdmissionEligibilityProofSetV1, actionDigest,
@@ -79,7 +78,7 @@ func VerifyClaimSubmissionIngressReceiptV1(receipt AuthorizedClaimSubmissionIngr
 		return err
 	}
 	requestBody := ClaimSubmissionIngressActionBodyV1{SchemaVersion: 1, AuthorizedClaim: claim, TargetIngressState: "received"}
-	request, err := codec.Marshal(requestBody)
+	request, err := guarantorCodec.Marshal(requestBody)
 	if err != nil {
 		return err
 	}
@@ -100,7 +99,7 @@ func VerifyClaimSubmissionIngressReceiptV1(receipt AuthorizedClaimSubmissionIngr
 		terms.ClaimIngressProfile, logID, body.ClaimIngressSequence, body.ReceivedAtUnix); err != nil {
 		return err
 	}
-	receiptBodyDigest, err := codec.Digest("tos.service.agent-guarantor-claim-ingress-receipt-body.v1", body)
+	receiptBodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-ingress-receipt-body.v1", body)
 	if err != nil {
 		return err
 	}
@@ -117,7 +116,7 @@ func extractFirmOfferFromAcceptanceV1(receipt AuthorizedCoverageAcceptanceReceip
 		}
 		var typed GuarantorFirmOfferAgreementEvidenceV1
 		if found != nil || wrapper.EvidenceContentType != FirmOfferAgreementEvidenceContentType ||
-			codec.Unmarshal(wrapper.Evidence, &typed) != nil {
+			guarantorCodec.Unmarshal(wrapper.Evidence, &typed) != nil {
 			return AuthorizedFirmCoverageOfferV1{}, errors.New("Guarantor acceptance has ambiguous firm-offer evidence")
 		}
 		candidate := typed.AuthorizedFirmOffer
@@ -164,7 +163,7 @@ func VerifyClaimAdmissionReceiptV1(receipt AuthorizedClaimAdmissionReceiptV1, te
 	activation := receipt.AuthorizedClaimIngressReceipt
 	_ = activation // keep the sole claim path explicit; activation is carried by the action effect below.
 	var actionBody ClaimSubmissionActionBodyV1
-	if err := codec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &actionBody); err != nil {
+	if err := guarantorCodec.Unmarshal(receipt.StageActionAdmissionEvidence.CanonicalRequest, &actionBody); err != nil {
 		return errors.New("Guarantor claim admission request cannot be decoded")
 	}
 	effect := actionBody.AuthorityInstanceEffect
@@ -184,7 +183,7 @@ func VerifyClaimAdmissionReceiptV1(receipt AuthorizedClaimAdmissionReceiptV1, te
 		authorityResolver, fenceResolver, collateralFinalityVerifierFromResolverV1(authorityResolver), now); err != nil {
 		return fmt.Errorf("Guarantor claim admission activation predecessor is invalid: %w", err)
 	}
-	effectBytes, err := codec.Marshal(effect)
+	effectBytes, err := guarantorCodec.Marshal(effect)
 	if err != nil {
 		return err
 	}
@@ -206,7 +205,7 @@ func VerifyClaimAdmissionReceiptV1(receipt AuthorizedClaimAdmissionReceiptV1, te
 		receipt.AuthorityInstanceRecord.AuthorityInstanceID != instanceID || body.AuthorityInstanceAllocationRequestDigest != allocationDigest {
 		return errors.New("Guarantor claim authority instance is invalid")
 	}
-	request, err := codec.Marshal(actionBody)
+	request, err := guarantorCodec.Marshal(actionBody)
 	if err != nil || !bytes.Equal(request, receipt.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("Guarantor claim admission request is noncanonical")
 	}
@@ -275,7 +274,7 @@ func VerifyClaimAdmissionReceiptV1(receipt AuthorizedClaimAdmissionReceiptV1, te
 		body.ClaimRevisionAdmissionSequence, body.AdmittedAtUnix); err != nil {
 		return err
 	}
-	receiptBodyDigest, err := codec.Digest("tos.service.agent-guarantor-claim-admission-receipt-body.v1", body)
+	receiptBodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-claim-admission-receipt-body.v1", body)
 	if err != nil {
 		return err
 	}

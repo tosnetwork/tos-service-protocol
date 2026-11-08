@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const maxCollateralAdapterEvidenceBytes = 256 << 10
@@ -44,7 +43,7 @@ func CollateralControlDisclosureDigestV1(value CollateralControlDisclosureV1) (s
 	if err := ValidateCollateralControlDisclosureV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-collateral-control-disclosure.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-collateral-control-disclosure.v1", value)
 }
 
 func ValidateCollateralControlDisclosureV1(value CollateralControlDisclosureV1) error {
@@ -81,7 +80,7 @@ func CollateralTransitionProfileDigestV1(value CollateralTransitionProfileV1) (s
 	if err := ValidateCollateralTransitionProfileV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-collateral-transition-profile.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-collateral-transition-profile.v1", value)
 }
 
 func ValidateCollateralTransitionProfileV1(value CollateralTransitionProfileV1) error {
@@ -125,13 +124,13 @@ func CollateralTransitionBindingDigestV1(value CollateralTransitionBindingV1) (s
 		return "", errors.New("Guarantor collateral transition binding is invalid")
 	}
 	if value.TransitionProfile.AuthorizationSubjectSource == "custodian" {
-		left, _ := codec.Marshal(value.AuthorizationBinding)
-		right, _ := codec.Marshal(*value.TransitionProfile.CustodianAuthorizationBinding)
+		left, _ := guarantorCodec.Marshal(value.AuthorizationBinding)
+		right, _ := guarantorCodec.Marshal(*value.TransitionProfile.CustodianAuthorizationBinding)
 		if !bytes.Equal(left, right) {
 			return "", errors.New("collateral transition substituted its custodian authorization")
 		}
 	}
-	return codec.Digest("tos.service.agent-guarantor-collateral-transition-binding.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-collateral-transition-binding.v1", value)
 }
 
 func ValidateCollateralTermsV1(value CollateralTermsV1) error {
@@ -181,7 +180,7 @@ func CollateralPositionStateDigestV1(value CollateralPositionStateV1) (string, e
 	if err := ValidateCollateralPositionStateV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-collateral-position-state.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-collateral-position-state.v1", value)
 }
 
 func ValidateCollateralPositionStateV1(value CollateralPositionStateV1) error {
@@ -230,7 +229,7 @@ func CollateralAdapterRequestDigestV1(value CollateralAdapterRequestV1, binding 
 	if err := ValidateCollateralAdapterRequestV1(value, binding, terms); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-collateral-adapter-request.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-collateral-adapter-request.v1", value)
 }
 
 func ValidateCollateralAdapterRequestV1(value CollateralAdapterRequestV1, binding CollateralTransitionBindingV1,
@@ -262,7 +261,7 @@ func ValidateCollateralAdapterRequestV1(value CollateralAdapterRequestV1, bindin
 		value.ObligationInstanceID != "" || value.AuthorizedClaimDecisionEnvelopeDigest != "" {
 		return errors.New("non-payout collateral request carries payment fields")
 	}
-	encoded, err := codec.Marshal(value)
+	encoded, err := guarantorCodec.Marshal(value)
 	if err != nil || uint64(len(encoded)) > binding.TransitionProfile.MaximumAdapterRequestBytes {
 		return errors.New("complete Guarantor collateral Adapter request exceeds its bound")
 	}
@@ -374,7 +373,7 @@ func CollateralAdapterEvidenceDigestV1(value CollateralAdapterEvidenceV1) (strin
 	default:
 		return "", errors.New("collateral evidence representation is unsupported")
 	}
-	return codec.Digest("tos.service.agent-guarantor-collateral-adapter-evidence.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-collateral-adapter-evidence.v1", value)
 }
 
 func validateImmutableEvidenceDescriptor(value ImmutableEvidenceDescriptorV1) error {
@@ -389,7 +388,7 @@ func CollateralEvidenceDigestV1(value AuthorizedCollateralEvidenceV1) (string, e
 	if value.Body.SchemaVersion != 1 || len(value.Authorizations) == 0 || len(value.Authorizations) > MaxAuthorizations {
 		return "", errors.New("authorized Guarantor collateral evidence is invalid")
 	}
-	return codec.Digest(CollateralDomain, value)
+	return guarantorCodec.Digest(CollateralDomain, value)
 }
 
 func VerifyCollateralEvidenceV1(value AuthorizedCollateralEvidenceV1, coverageTerms CoverageTermsV1,
@@ -410,7 +409,7 @@ func VerifyCollateralEvidenceV1(value AuthorizedCollateralEvidenceV1, coverageTe
 		uint64(now.UTC().Unix()) > body.FinalizedAtUnix+terms.MaximumEvidenceAgeSeconds {
 		return errors.New("Guarantor collateral evidence is stale")
 	}
-	actionBodyDigest, _ := codec.Digest("tos.service.agent-guarantor-collateral-transition-action-body.v1", action)
+	actionBodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-collateral-transition-action-body.v1", action)
 	requestDigest, _ := CollateralAdapterRequestDigestV1(action.AdapterRequest, binding, terms)
 	adapterEvidenceDigest, adapterErr := CollateralAdapterEvidenceDigestV1(value.AdapterEvidence)
 	expectedResult, resultErr := ApplyCollateralAdapterTransitionV1(action.AdapterRequest, binding, terms)
@@ -476,7 +475,7 @@ func VerifyCollateralEvidenceV1(value AuthorizedCollateralEvidenceV1, coverageTe
 			return errors.New("Guarantor collateral evidence uses a substituted authorization profile")
 		}
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-collateral-evidence-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-collateral-evidence-body.v1", body)
 	return ValidateAuthorizationQuorumSet(value.Authorizations, "collateral-evidence", bodyDigest,
 		"tos.service.agent-guarantor-collateral-evidence-signature.v1",
 		binding.AuthorizationBinding.AuthorizationSubjects, binding.AuthorizationBinding.AuthorizationQuorumRule,

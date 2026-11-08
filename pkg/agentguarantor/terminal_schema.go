@@ -1,7 +1,5 @@
 package agentguarantor
 
-import "github.com/tosnetwork/tos-service-protocol/pkg/codec"
-
 type ClaimTerminalResolutionRefSetV1 struct {
 	SchemaVersion               uint16                         `json:"schema_version"`
 	CoverageAgreementBodyDigest string                         `json:"coverage_agreement_body_digest"`
@@ -35,11 +33,11 @@ type CoverageClosureEvidenceContextV1 struct {
 }
 
 func ClaimTerminalResolutionRefSetDigestV1(value ClaimTerminalResolutionRefSetV1) (string, error) {
-	return codec.Digest("tos.service.agent-guarantor-claim-resolution-set.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-claim-resolution-set.v1", value)
 }
 
 func CoverageClosureEvidenceContextDigestV1(value CoverageClosureEvidenceContextV1) (string, error) {
-	return codec.Digest("tos.service.agent-guarantor-coverage-closure-context.v1", value)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-coverage-closure-context.v1", value)
 }
 
 type ExposureDispositionComputationV1 struct {

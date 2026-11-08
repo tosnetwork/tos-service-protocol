@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -92,7 +92,7 @@ func CoverageCancellationPolicyDigestV1(policy CoverageCancellationPolicyV1) (st
 	if err := ValidateCoverageCancellationPolicyV1(policy); err != nil {
 		return "", err
 	}
-	return codec.Digest(CancellationPolicyDomain, policy)
+	return guarantorCodec.Digest(CancellationPolicyDomain, policy)
 }
 
 func ValidateCoverageCancellationPolicyV1(policy CoverageCancellationPolicyV1) error {
@@ -121,9 +121,23 @@ func CanonicalGuarantorEvidenceSetDigestV1(set CanonicalGuarantorEvidenceSetV1) 
 	if err := ValidateCanonicalGuarantorEvidenceSetV1(set); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-evidence-set.v1", set)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-evidence-set.v1", set)
 }
 
+// GuarantorMediaTypePrefixV1 begins every media type this profile defines.
+const GuarantorMediaTypePrefixV1 = "application/vnd.tos.service.agent-guarantor-"
+
+// IsGuarantorMediaTypeV1 reports whether contentType names a Guarantor object.
+func IsGuarantorMediaTypeV1(contentType string) bool {
+	return strings.HasPrefix(contentType, GuarantorMediaTypePrefixV1)
+}
+
+// ValidateCanonicalGuarantorEvidenceSetV1 validates a canonical evidence set.
+// Evidence whose media type is a Guarantor object is descriptor-only: an
+// inline copy would repeat, as base64 text, an object already carried or
+// referenced elsewhere and is what pushes nested envelopes past the
+// complete-object ceiling. Inline is kept for external (non-Guarantor)
+// evidence only.
 func ValidateCanonicalGuarantorEvidenceSetV1(set CanonicalGuarantorEvidenceSetV1) error {
 	if set.SchemaVersion != 1 || !validToken(set.Purpose, 128) || !validDigest(set.ContextDigest) ||
 		len(set.Items) == 0 || len(set.Items) > MaxEvidenceItems {
@@ -136,6 +150,9 @@ func ValidateCanonicalGuarantorEvidenceSetV1(set CanonicalGuarantorEvidenceSetV1
 			return errors.New("Guarantor evidence item is invalid")
 		}
 		if item.Representation == "inline" {
+			if IsGuarantorMediaTypeV1(item.ContentType) {
+				return errors.New("Guarantor evidence of a Guarantor media type must be content addressed")
+			}
 			if len(item.CanonicalEnvelopeBytes) == 0 || len(item.CanonicalEnvelopeBytes) > MaxCanonicalObjectBytes || item.ImmutableDescriptor != nil {
 				return errors.New("inline Guarantor evidence representation is invalid")
 			}
@@ -145,7 +162,7 @@ func ValidateCanonicalGuarantorEvidenceSetV1(set CanonicalGuarantorEvidenceSetV1
 			!validDigest(item.ImmutableDescriptor.RetrievalPolicyDigest) {
 			return errors.New("content-addressed Guarantor evidence representation is invalid")
 		}
-		encoded, err := codec.Marshal(item)
+		encoded, err := guarantorCodec.Marshal(item)
 		if err != nil || prior != nil && bytes.Compare(prior, encoded) >= 0 {
 			return errors.New("Guarantor evidence items are not a canonical set")
 		}
@@ -158,7 +175,7 @@ func CoverageCancellationRequestDigestV1(request AuthorizedCoverageCancellationR
 	if err := validateCoverageCancellationRequestShapeV1(request); err != nil {
 		return "", err
 	}
-	return codec.Digest(CancellationRequestDomain, request)
+	return guarantorCodec.Digest(CancellationRequestDomain, request)
 }
 
 func VerifyCoverageCancellationRequestV1(request AuthorizedCoverageCancellationRequestV1,
@@ -209,7 +226,7 @@ func VerifyCoverageCancellationRequestV1(request AuthorizedCoverageCancellationR
 			return errors.New("Guarantor cancellation authorization profile was substituted")
 		}
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-cancellation-request-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-cancellation-request-body.v1", body)
 	return ValidateAuthorizationQuorumSet(request.Authorizations, "coverage-cancellation-request", bodyDigest,
 		"tos.service.agent-guarantor-cancellation-request-signature.v1", selected.PermittedRequesterSubjects,
 		selected.RequestAuthorizationQuorumRule, resolver, now)
@@ -238,7 +255,7 @@ func CoverageCancellationReceiptDigestV1(receipt AuthorizedCoverageCancellationR
 	if err := validateCoverageCancellationReceiptShapeV1(receipt); err != nil {
 		return "", err
 	}
-	return codec.Digest(CancellationReceiptDomain, receipt)
+	return guarantorCodec.Digest(CancellationReceiptDomain, receipt)
 }
 
 func validateCoverageCancellationReceiptShapeV1(receipt AuthorizedCoverageCancellationReceiptV1) error {
@@ -351,7 +368,7 @@ func VerifyCoverageCancellationReceiptV1(receipt AuthorizedCoverageCancellationR
 		AuthorizedCancellationRequest: receipt.AuthorizedCancellationRequest, ExpectedCoverageEndCommitment: priorCommitment,
 		TransitionEvidenceProjection: receipt.TransitionEvidenceProjection, ExpectedCoverageRevision: body.PriorCoverageRevision,
 		TargetCoverageRevision: body.EndedCoverageRevision, TargetCoverageState: "coverage_ended"}
-	requestBytes, err := codec.Marshal(actionRequest)
+	requestBytes, err := guarantorCodec.Marshal(actionRequest)
 	if err != nil || !bytes.Equal(requestBytes, receipt.StageActionAdmissionEvidence.CanonicalRequest) {
 		return errors.New("Guarantor cancellation action request is noncanonical")
 	}
@@ -375,7 +392,7 @@ func VerifyCoverageCancellationReceiptV1(receipt AuthorizedCoverageCancellationR
 		return errors.New("Guarantor cancellation action or authority proof is substituted")
 	}
 	stageResolution := receipt.StageActionAdmissionEvidence.ActionResolution
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-cancellation-receipt-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-cancellation-receipt-body.v1", body)
 	if stageResolution.SinkReference != bodyDigest || !containsString(stageResolution.EvidenceRefs, bodyDigest) {
 		return errors.New("Guarantor cancellation terminal result is substituted")
 	}
@@ -411,8 +428,8 @@ func minimumUint64(values ...uint64) uint64 {
 
 func sortTransitionEvidenceRefsV1(refs []TransitionEvidenceDigestRefV1) {
 	sort.Slice(refs, func(i, j int) bool {
-		left, _ := codec.Marshal(refs[i])
-		right, _ := codec.Marshal(refs[j])
+		left, _ := guarantorCodec.Marshal(refs[i])
+		right, _ := guarantorCodec.Marshal(refs[j])
 		return bytes.Compare(left, right) < 0
 	})
 }

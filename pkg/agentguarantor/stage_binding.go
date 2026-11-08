@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -58,14 +57,14 @@ func StageOperationBindingDigestV1(binding GuarantorStageOperationBindingV1) (st
 	if err := ValidateStageOperationBindingV1(binding); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-stage-operation-binding.v1", binding)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-stage-operation-binding.v1", binding)
 }
 
 func StageActionAuthorityBindingDigestV1(binding GuarantorStageActionAuthorityBindingV1) (string, error) {
 	if err := ValidateStageActionAuthorityBindingV1(binding); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-stage-action-authority-binding.v1", binding)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-stage-action-authority-binding.v1", binding)
 }
 
 func mutationEntryV1(actionKind, purpose string) (MutationVerifierEntryV1, bool) {
@@ -321,7 +320,7 @@ func VerifyPortableStageActionAdmissionEvidenceV1(evidence PortableStageActionAd
 		evidence.ActionResolution.StateRevision != body.AdmissionStateRevision {
 		return errors.New("Guarantor stage action resolution is not the admitted terminal effect")
 	}
-	stageBodyDigest, err := codec.Digest("tos.service.agent-guarantor-stage-action-admission.v1", body)
+	stageBodyDigest, err := guarantorCodec.Digest("tos.service.agent-guarantor-stage-action-admission.v1", body)
 	if err != nil {
 		return err
 	}

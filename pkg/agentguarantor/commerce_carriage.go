@@ -6,7 +6,6 @@ import (
 	"time"
 
 	commerce "github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 // CommerceCarriageObjectV1 is one immutable entry in the Messenger dispatch
@@ -86,7 +85,7 @@ func BuildCommerceProfileEventV1(ctx context.Context, objectKind string, object 
 	if entry == nil || object == nil {
 		return commerce.CommerceProfileEventV1{}, errors.New("unsupported Guarantor commerce object")
 	}
-	canonical, err := codec.Marshal(object)
+	canonical, err := guarantorCodec.Marshal(object)
 	if err != nil {
 		return commerce.CommerceProfileEventV1{}, err
 	}
@@ -94,7 +93,7 @@ func BuildCommerceProfileEventV1(ctx context.Context, objectKind string, object 
 	if err != nil {
 		return commerce.CommerceProfileEventV1{}, err
 	}
-	digest, err := codec.Digest(entry.EnvelopeDomain, decoded)
+	digest, err := guarantorCodec.Digest(entry.EnvelopeDomain, decoded)
 	if err != nil {
 		return commerce.CommerceProfileEventV1{}, err
 	}
@@ -155,7 +154,7 @@ func (CommerceObjectVerifierV1) VerifyCommerceObject(profileURI string, profileV
 	if err != nil {
 		return err
 	}
-	want, err := codec.Digest(entry.EnvelopeDomain, value)
+	want, err := guarantorCodec.Digest(entry.EnvelopeDomain, value)
 	if err != nil || want != digest {
 		return errors.New("Guarantor commerce object digest differs")
 	}

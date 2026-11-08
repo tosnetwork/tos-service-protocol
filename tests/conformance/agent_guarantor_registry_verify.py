@@ -136,6 +136,40 @@ def verify_native_vector(item):
         assert mldsa44_signature(refusal["signature"]) != mldsa44_signature(evidence["signature"])
 
 
+def build_size_vector(construction):
+    text = "p" * construction["text_length"]
+    if construction["kind"] == "text-map":
+        return {construction["key"]: text}, len(text)
+    assert construction["kind"] == "nested-request"
+    encoded = base64.b64encode(cbor({"padding": text})).decode("ascii")
+    return {construction["key"]: encoded}, len(encoded)
+
+
+def verify_size_limits(limits):
+    assert limits["canonical_bytes"] == 2_000_000
+    assert limits["string_bytes"] == limits["canonical_bytes"]
+    assert limits["json_bytes"] == 2 * limits["canonical_bytes"]
+    assert limits["default_canonical_bytes"] == 1 << 20 and limits["default_string_bytes"] == 1 << 20
+    vectors = limits["vectors"]
+    assert [item["name"] for item in vectors] == [
+        "guarantor-ceiling-exact", "guarantor-ceiling-plus-one", "worst-case-nested-request-string"
+    ]
+    for item in vectors:
+        value, longest = build_size_vector(item["construction"])
+        encoded = cbor(value)
+        assert item["canonical_bytes"] == len(encoded)
+        assert item["longest_string_bytes"] == longest
+        assert item["digest"] == digest(limits["domain"], value)
+        assert item["accepted_by_guarantor"] == (
+            len(encoded) <= limits["canonical_bytes"] and longest <= limits["string_bytes"])
+        assert item["accepted_by_default"] == (
+            len(encoded) <= limits["default_canonical_bytes"] and longest <= limits["default_string_bytes"])
+    assert vectors[0]["canonical_bytes"] == limits["canonical_bytes"] and vectors[0]["accepted_by_guarantor"]
+    assert vectors[1]["canonical_bytes"] == limits["canonical_bytes"] + 1 and not vectors[1]["accepted_by_guarantor"]
+    assert vectors[2]["longest_string_bytes"] == 1_165_360 and vectors[2]["accepted_by_guarantor"]
+    assert not any(item["accepted_by_default"] for item in vectors)
+
+
 def require_registry(registry, expected_size, kind_field):
     assert registry["schema_version"] == 1 and registry["registry_version"] == 1
     assert len(registry["entries"]) == expected_size
@@ -198,6 +232,7 @@ def main():
     assert [item["name"] for item in native_vectors] == ["quote-request-native-mldsa44"]
     for item in native_vectors:
         verify_native_vector(item)
+    verify_size_limits(document["guarantor_size_limits"])
 
 
 if __name__ == "__main__":

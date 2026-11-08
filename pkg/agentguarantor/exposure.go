@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -78,21 +77,21 @@ func ExposureReservationScopeDigestV1(scope ProviderExposureReservationScopeV1) 
 	if err := validateExposureReservationScope(scope); err != nil {
 		return "", err
 	}
-	return codec.Digest("tos.service.agent-guarantor-reservation-scope.v1", scope)
+	return guarantorCodec.Digest("tos.service.agent-guarantor-reservation-scope.v1", scope)
 }
 
 func ExposureAdmissionDescriptorDigestV1(descriptor ProviderExposureAdmissionDescriptorV1) (string, error) {
 	if err := validateExposureDescriptor(descriptor); err != nil {
 		return "", err
 	}
-	return codec.Digest(ExposureDescriptorDomain, descriptor)
+	return guarantorCodec.Digest(ExposureDescriptorDomain, descriptor)
 }
 
 func ExposureAdmissionReceiptDigestV1(receipt AuthorizedProviderExposureAdmissionReceiptV1) (string, error) {
 	if err := validateExposureReceiptShape(receipt); err != nil {
 		return "", err
 	}
-	return codec.Digest(ExposureReceiptDomain, receipt)
+	return guarantorCodec.Digest(ExposureReceiptDomain, receipt)
 }
 
 func VerifyExposureAdmissionReceiptV1(receipt AuthorizedProviderExposureAdmissionReceiptV1,
@@ -100,7 +99,7 @@ func VerifyExposureAdmissionReceiptV1(receipt AuthorizedProviderExposureAdmissio
 	if err := validateExposureReceiptShape(receipt); err != nil {
 		return err
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-exposure-receipt-body.v1", receipt.Body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-exposure-receipt-body.v1", receipt.Body)
 	return ValidateAuthorizationSet(receipt.Authorizations, "exposure-admission-receipt", bodyDigest,
 		"tos.service.agent-guarantor-exposure-receipt-signature.v1", []string{receipt.Body.GuarantorAgentID}, resolver, now)
 }

@@ -20,7 +20,7 @@ func DecodeRegisteredObjectV1(kind string, canonical []byte) (any, error) {
 		return nil, errors.New("unsupported Guarantor V1 object kind")
 	}
 	value := factory()
-	if err := codec.Unmarshal(canonical, value); err != nil {
+	if err := registeredObjectCodecV1(value).Unmarshal(canonical, value); err != nil {
 		return nil, err
 	}
 	if err := requireSchemaVersionOneWhenPresent(value); err != nil {
@@ -30,6 +30,26 @@ func DecodeRegisteredObjectV1(kind string, canonical []byte) (any, error) {
 		return nil, err
 	}
 	return value, nil
+}
+
+// guarantorPackagePath identifies types declared by this profile.
+var guarantorPackagePath = reflect.TypeOf(CommerceCarriageObjectV1{}).PkgPath()
+
+// registeredObjectCodecV1 returns the codec whose limits own value's type. A
+// registered kind whose type is declared by this package is a Guarantor
+// object and uses GuarantorCodecLimitsV1; a kind that reuses another
+// profile's type (for example the commerce Agreement body or the commerce
+// profile event) keeps that profile's default limits, so registering it here
+// never widens its bound.
+func registeredObjectCodecV1(value any) codec.Bounded {
+	typeOf := reflect.TypeOf(value)
+	for typeOf != nil && typeOf.Kind() == reflect.Pointer {
+		typeOf = typeOf.Elem()
+	}
+	if typeOf != nil && typeOf.PkgPath() == guarantorPackagePath {
+		return guarantorCodec
+	}
+	return codec.Bounded{Limits: codec.DefaultLimits()}
 }
 
 // Every implementation eventually converts protocol wall-clock seconds to a

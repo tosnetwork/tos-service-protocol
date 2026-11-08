@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/tosnetwork/tos-service-protocol/pkg/agentcommerce"
-	"github.com/tosnetwork/tos-service-protocol/pkg/codec"
 )
 
 const (
@@ -48,7 +47,7 @@ func CollateralControlEvidenceDigestV1(value AuthorizedCollateralControlEvidence
 	if value.Body.SchemaVersion != 1 || len(value.Authorizations) == 0 || len(value.Authorizations) > MaxAuthorizations {
 		return "", errors.New("collateral control evidence envelope is invalid")
 	}
-	return codec.Digest(CollateralControlEvidenceDomainV1, value)
+	return guarantorCodec.Digest(CollateralControlEvidenceDomainV1, value)
 }
 
 func VerifyCollateralControlEvidenceV1(value AuthorizedCollateralControlEvidenceV1, agreementDigest,
@@ -86,7 +85,7 @@ func VerifyCollateralControlEvidenceV1(value AuthorizedCollateralControlEvidence
 			return errors.New("collateral control evidence authorization profile is substituted")
 		}
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-collateral-control-evidence-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-collateral-control-evidence-body.v1", body)
 	return ValidateAuthorizationQuorumSet(value.Authorizations, "collateral-control-evidence", bodyDigest,
 		"tos.service.agent-guarantor-collateral-control-evidence-signature.v1", subjects, quorum, resolver, now)
 }
@@ -95,7 +94,7 @@ func OperationalIndependenceTermsDigestV1(value GuarantorOperationalIndependence
 	if err := ValidateOperationalIndependenceTermsV1(value); err != nil {
 		return "", err
 	}
-	return codec.Digest(OperationalIndependenceTermsDomainV1, value)
+	return guarantorCodec.Digest(OperationalIndependenceTermsDomainV1, value)
 }
 
 func ValidateOperationalIndependenceTermsV1(value GuarantorOperationalIndependenceTermsV1) error {
@@ -118,7 +117,7 @@ func OperationalIndependenceEvidenceDigestV1(value AuthorizedGuarantorOperationa
 		len(value.ResolverFinalityEvidence) == 0 || len(value.ResolverFinalityEvidence) > maxControlResolverFinalityEvidenceBytesV1 {
 		return "", errors.New("operational-independence evidence envelope is invalid")
 	}
-	return codec.Digest(OperationalIndependenceEvidenceDomainV1, value)
+	return guarantorCodec.Digest(OperationalIndependenceEvidenceDomainV1, value)
 }
 
 func VerifyOperationalIndependenceEvidenceV1(value AuthorizedGuarantorOperationalIndependenceEvidenceV1,
@@ -168,7 +167,7 @@ func VerifyOperationalIndependenceEvidenceV1(value AuthorizedGuarantorOperationa
 			terms.GuarantorControlRootSubjects, entry.FinalizedAuthorityStateRoot,
 			entry.FinalizedAuthorityStateRevision, time.Unix(int64(body.ObservedAtUnix), 0).UTC(),
 			value.ResolverFinalityEvidence)
-		boundDigest, digestErr := codec.Digest("tos.service.agent-guarantor-stage-action-authority.v1", bound)
+		boundDigest, digestErr := guarantorCodec.Digest("tos.service.agent-guarantor-stage-action-authority.v1", bound)
 		if adapterErr != nil || resolutionErr != nil || digestErr != nil || resolution.SchemaVersion != 1 ||
 			resolution.Stage != stageName || resolution.BindingDigest != boundDigest ||
 			resolution.OperationAdapterProfile != adapterProfile ||
@@ -194,7 +193,7 @@ func VerifyOperationalIndependenceEvidenceV1(value AuthorizedGuarantorOperationa
 			return errors.New("operational-independence evidence profile is substituted")
 		}
 	}
-	bodyDigest, _ := codec.Digest("tos.service.agent-guarantor-operational-independence-evidence-body.v1", body)
+	bodyDigest, _ := guarantorCodec.Digest("tos.service.agent-guarantor-operational-independence-evidence-body.v1", body)
 	return ValidateAuthorizationQuorumSet(value.Authorizations, "operational-independence-evidence", bodyDigest,
 		"tos.service.agent-guarantor-operational-independence-evidence-signature.v1",
 		terms.ControlEvidenceAuthoritySubjects, terms.ControlEvidenceQuorumRule, resolver, now)
