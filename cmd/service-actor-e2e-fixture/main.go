@@ -161,7 +161,9 @@ func run(arguments []string, out io.Writer) error {
 		return emit(out, map[string]any{"package": outPath, "terms_hash": value.Proposal.TermsHash,
 			"price_nanotos": value.Proposal.PriceNanotos, "expires_at": value.Proposal.ExpiresAtUnixSeconds})
 	case "receipt-check":
-		receipt.providerAgentID, receipt.toolchainDigest, receipt.manifestDigest = providerID, toolchain, digest
+		receipt.networkPath, receipt.capabilityID, receipt.version, receipt.buyer = networkPath, capabilityID, version, buyer
+		receipt.actor, receipt.attestor, receipt.providerAgentID = actor, attestor, providerID
+		receipt.toolchainDigest, receipt.manifestDigest = toolchain, digest
 		checked, err := receipt.check()
 		if err != nil {
 			return err
