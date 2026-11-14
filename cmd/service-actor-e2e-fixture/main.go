@@ -1,10 +1,11 @@
 // Command service-actor-e2e-fixture prepares the provider-side inputs of the
 // local Service Actor buyer acceptance run: the canonical software-work
 // manifest naming the actor in key 21, the NSM1 metadata hash the actor must
-// carry, a code hash of a code BOC, and a Quote Proposal package built by
-// pkg/quoteprovider from finalized chain state. It is a local stand-in for a
-// provider's manifest store and quote endpoint; it holds no authority and
-// sends nothing.
+// carry, a code hash of a code BOC, a Quote Proposal package built by
+// pkg/quoteprovider from finalized chain state, and the attestor's check of a
+// software-work Receipt before it signs the response. It is a local stand-in
+// for a provider's manifest store, quote endpoint and attestor policy; it
+// holds no authority and sends nothing.
 package main
 
 import (
@@ -40,11 +41,13 @@ func main() {
 
 func run(arguments []string, out io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: service-actor-e2e-fixture <code-hash|manifest|metadata|quote> [flags]")
+		return errors.New("usage: service-actor-e2e-fixture <code-hash|manifest|metadata|quote|receipt-check> [flags]")
 	}
 	set := flag.NewFlagSet(arguments[0], flag.ContinueOnError)
 	var bocPath, actor, codeHash, attestor, version, outDir, networkPath, capabilityID, providerID, digest string
 	var rpc, registryBOC, registryHash, stateDir, manifestPath, buyer, outPath string
+	var toolchain, invocationArgs string
+	var receipt ReceiptExpectation
 	set.StringVar(&bocPath, "boc-file", "", "file holding a base64 cell BOC")
 	set.StringVar(&actor, "actor", "", "raw workchain 0 Service Actor address")
 	set.StringVar(&codeHash, "code-hash", "", "tvm-cell-sha256:<hex> actor code hash")
@@ -62,6 +65,9 @@ func run(arguments []string, out io.Writer) error {
 	set.StringVar(&manifestPath, "manifest", "", "canonical manifest CBOR file")
 	set.StringVar(&buyer, "buyer-wallet", "", "raw buyer wallet address")
 	set.StringVar(&outPath, "out", "", "output file for the Quote package (protojson)")
+	set.StringVar(&toolchain, "toolchain-digest", "", "manifest, receipt-check: sha256:<hex> toolchain image digest the executor pins (manifest default: a placeholder)")
+	set.StringVar(&invocationArgs, "invocation-args", "", "manifest: space-separated invocation arguments the executor runs (default: the fixture's)")
+	receipt.addFlags(set)
 	if err := set.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -90,6 +96,12 @@ func run(arguments []string, out io.Writer) error {
 			return errors.New("--code-hash must be tvm-cell-sha256:<hex>")
 		}
 		manifest := servicefixture.Manifest(version, servicefixture.Settlement{ActorAccount: account, ActorCodeHash: code, AttestorKey: attestor})
+		if toolchain != "" {
+			manifest.ToolchainDigest = toolchain
+		}
+		if invocationArgs != "" {
+			manifest.Invocation.Arguments = strings.Fields(invocationArgs)
+		}
 		encoded, manifestDigest, err := nativecore.CanonicalSoftwareWorkManifest(manifest)
 		if err != nil {
 			return err
@@ -148,6 +160,13 @@ func run(arguments []string, out io.Writer) error {
 		}
 		return emit(out, map[string]any{"package": outPath, "terms_hash": value.Proposal.TermsHash,
 			"price_nanotos": value.Proposal.PriceNanotos, "expires_at": value.Proposal.ExpiresAtUnixSeconds})
+	case "receipt-check":
+		receipt.providerAgentID, receipt.toolchainDigest, receipt.manifestDigest = providerID, toolchain, digest
+		checked, err := receipt.check()
+		if err != nil {
+			return err
+		}
+		return emit(out, checked)
 	default:
 		return errors.New("unknown fixture command")
 	}
