@@ -504,12 +504,15 @@ def crash_after_broadcast() -> None:
            bool(broadcast) and still_waiting and phase_at_kill == "sending" and exit_code == -signal.SIGKILL,
            {"call_on_chain": bool(broadcast), "buyer_still_waiting": still_waiting, "phase_at_kill": phase_at_kill,
             "buyer_exit": exit_code})
+    # The killed buyer's tosctl keeps waiting for finality and holds the vault
+    # until it exits; the provider's tosctl shares that vault in this run.
+    orphan_gone = poll(lambda: find_sender(request_hash, process.pid) is None, 300, 1)
     status = wait_state(request_hash, {"pending"})
     phase_after = journal_phase(request_hash)
     again = buyer("call", "--request-hash", request_hash, *LIFE["call_flags"][2:], check=False)
     created = next_request_id() - before
     detail = {"phase": phase_after, "status": status or LAST_STATUS_ERROR[0], "requests_created": created,
-              "resend_stderr": again.stderr.strip()[-200:]}
+              "resend_stderr": again.stderr.strip()[-200:], "orphaned_sender_exited": bool(orphan_gone)}
     LIFE["evidence"]["crash_after_broadcast"] = detail
     record("crash after broadcast: the restarted journal resolves the one finalized call",
            bool(status) and created == 1, detail)
