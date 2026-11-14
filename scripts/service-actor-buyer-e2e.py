@@ -584,14 +584,26 @@ def sweep_path(request: dict) -> None:
     price, storage_fee, bounty = (nano_tos(snapshot[k]) for k in ("price", "storage_fee", "cleanup_bounty"))
     wait_until(request["refund_claim_deadline"] + DEADLINE_MARGIN, "the refund-claim deadline of the sweep request")
     credited, buyer_before, provider_before = revenue(), balance(BUYER), balance(LIFE["provider"])
+    buyer_lt = last_lt(BUYER)
     tosctl("agent", "service", "send", "--operation", "sweep-expired-request", "--address", LIFE["actor"], "--from",
            "provider", "--request-id", str(request["request_id"]), "--yes")
     swept = wait_state(request_hash, {"swept"})
     buyer_delta, revenue_delta = balance(BUYER) - buyer_before, revenue() - credited
     provider_delta = balance(LIFE["provider"]) - provider_before
     record("a never-expired request is swept after its refund-claim deadline", swept.get("state") == "swept", swept)
-    record("the sweep returns exactly the price to the caller", buyer_delta == price,
-           {"price": price, "buyer_wallet_delta": buyer_delta})
+    # The actor's obligation is the message it sends: exactly the price. The
+    # caller's balance then moves by that value less the fees its own account
+    # pays to process it (storage accrued since its last transaction and
+    # compute), which are not the actor's to cover.
+    refund_rows = [row for row in poll(lambda: transactions_after(BUYER, buyer_lt) or None, 120, 3) or []
+                   if norm((row.get("in_msg") or {}).get("source") or "0:" + "0" * 64) == LIFE["actor"]]
+    payout = int(refund_rows[0]["in_msg"]["value"]) if len(refund_rows) == 1 else None
+    own_fee = int(refund_rows[0].get("fee", -1)) if len(refund_rows) == 1 else None
+    record("the sweep sends exactly the price to the caller", payout == price,
+           {"price": price, "payout_message_value": payout, "payout_transactions": len(refund_rows)})
+    record("the caller's balance moves by the payout less only its own account fees",
+           payout is not None and own_fee is not None and 0 <= own_fee < NANO // 100 and buyer_delta == payout - own_fee,
+           {"payout_message_value": payout, "caller_transaction_fee": own_fee, "buyer_wallet_delta": buyer_delta})
     record("the provider is credited the storage fee less the cleanup bounty", revenue_delta == storage_fee - bounty,
            {"storage_fee": storage_fee, "cleanup_bounty": bounty, "revenue_delta": revenue_delta})
     record("the sweeper receives the bounty less only network fees", bounty - NANO // 10 < provider_delta <= bounty,
@@ -600,6 +612,18 @@ def sweep_path(request: dict) -> None:
                                  "storage_fee_nanotos": storage_fee, "cleanup_bounty_nanotos": bounty,
                                  "buyer_wallet_delta_nanotos": buyer_delta, "revenue_delta_nanotos": revenue_delta,
                                  "sweeper_wallet_delta_nanotos": provider_delta}
+
+
+def last_lt(address: str) -> int:
+    rows = rpc("getTransactions", address=address, limit=1)["result"]
+    return int(rows[0]["transaction_id"]["lt"]) if rows else 0
+
+
+def transactions_after(address: str, baseline_lt: int) -> list:
+    rows = rpc("getTransactions", address=address, limit=10)["result"]
+    if len(rows) == 10 and all(int(row["transaction_id"]["lt"]) > baseline_lt for row in rows):
+        raise RuntimeError("the transaction page did not reach the baseline")
+    return [row for row in rows if int(row["transaction_id"]["lt"]) > baseline_lt]
 
 
 def wait_until(unix_seconds: int, what: str) -> None:
