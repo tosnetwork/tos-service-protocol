@@ -753,11 +753,25 @@ def lifecycle() -> None:
     LIFE["evidence"]["requests"] = {"refund": refund_request.get("request_id"), "sweep": sweep_request.get("request_id")}
     # Each path is recorded on its own, so a failure in one still lets the
     # other's hour-long wait produce evidence.
-    for name, path, request, key in (("refund", refund_path, refund_request, "response_deadline"),
-                                     ("sweep", sweep_path, sweep_request, "refund_claim_deadline")):
+    paths = [("refund", refund_path, refund_request, "response_deadline")]
+    # A request whose paid execution failed is the buyer's to refund. It was
+    # called before this phase, so its refund window [response deadline,
+    # refund-claim deadline) is open right after the refund path's wait and
+    # closes before the sweep path's; claim it in that window.
+    if EXECUTE and EXEC.get("failed_request"):
+        paths.append(("failed-execution refund", refund_path, EXEC["failed_request"], "response_deadline"))
+    paths.append(("sweep", sweep_path, sweep_request, "refund_claim_deadline"))
+    for name, path, request, key in paths:
         if not request.get(key):
             record(f"{name} path has a pending request to settle", False, request)
             continue
+        if name == "failed-execution refund":
+            open_now = time.time() + DEADLINE_MARGIN < int(request.get("refund_claim_deadline", 0))
+            record("failed-execution refund: the request is still inside its refund window", open_now,
+                   {"request_id": request.get("request_id"), "now": int(time.time()),
+                    "refund_claim_deadline": request.get("refund_claim_deadline")})
+            if not open_now:
+                continue
         try:
             path(request)
         except Exception as error:  # noqa: BLE001 - the evidence records the failure
@@ -1167,10 +1181,6 @@ async def main() -> int:
                 await asyncio.to_thread(execute)
             if LIFECYCLE:
                 await asyncio.to_thread(lifecycle)
-            if EXECUTE and LIFECYCLE and EXEC.get("failed_request"):
-                # Hours have passed: the failed request's response deadline is
-                # behind it, so the buyer takes its refund.
-                await asyncio.to_thread(refund_path, EXEC["failed_request"])
     except Exception as error:  # noqa: BLE001 - the evidence records the failure
         record("run completed without an exception", False, repr(error))
     evidence["steps"] = steps
