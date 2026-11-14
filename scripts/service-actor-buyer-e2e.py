@@ -433,39 +433,88 @@ def find_sender(request_hash: str, exclude: int):
     return None
 
 
-def crash_recovery() -> None:
-    """Kill the buyer once its tosctl send has started; the restarted journal
-    must recover the call as ambiguous, refuse to send it again, and resolve
-    the one finalized call from the chain."""
-    import signal
-    prepared = quote_and_prepare("crash")
-    request_hash = prepared["request_hash"]
-    before = int(service_show(LIFE["actor"])["next_request_id"])
+def start_call(request_hash: str) -> subprocess.Popen:
     env = dict(os.environ)
     env["VAULT_URL"] = VAULT_URL
-    process = subprocess.Popen([str(BIN / "tos-service-buyer"), "call", *common_flags("buyer"), "--request-hash",
-                                request_hash, *LIFE["call_flags"][2:]], env=env, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
-    sender = poll(lambda: find_sender(request_hash, process.pid), 60, 0.05)
-    phase_at_kill = journal_phase(request_hash)
+    return subprocess.Popen([str(BIN / "tos-service-buyer"), "call", *common_flags("buyer"), "--request-hash",
+                             request_hash, *LIFE["call_flags"][2:]], env=env, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+
+def kill(process: subprocess.Popen) -> int:
+    import signal
     if process.poll() is None:
         process.send_signal(signal.SIGKILL)
-    process.wait(timeout=30)
-    killed_mid_send = sender is not None and process.returncode == -signal.SIGKILL
-    record("the buyer was killed while its tosctl send was running", killed_mid_send and phase_at_kill == "sending",
-           {"sender_pid_seen": sender is not None, "buyer_exit": process.returncode, "phase_at_kill": phase_at_kill})
-    if sender is not None:
-        poll(lambda: find_sender(request_hash, process.pid) is None, 120, 1)
+    return process.wait(timeout=30)
+
+
+def next_request_id() -> int:
+    return int(service_show(LIFE["actor"])["next_request_id"])
+
+
+def crash_before_broadcast() -> None:
+    """Kill the buyer as soon as its tosctl send starts, before the call can
+    reach the chain. No request may appear, the record must stay quarantined as
+    ambiguous, and the buyer must never send it again or lose funds."""
+    import signal
+    prepared = quote_and_prepare("crash-before")
+    request_hash = prepared["request_hash"]
+    before, wallet_before = next_request_id(), balance(BUYER)
+    process = start_call(request_hash)
+    sender = poll(lambda: find_sender(request_hash, process.pid), 60, 0.02)
+    phase_at_kill = journal_phase(request_hash)
+    exit_code = kill(process)
+    record("crash before broadcast: the buyer was killed while its send was starting",
+           sender is not None and exit_code == -signal.SIGKILL and phase_at_kill == "sending",
+           {"sender_seen": sender is not None, "buyer_exit": exit_code, "phase_at_kill": phase_at_kill})
+    poll(lambda: find_sender(request_hash, process.pid) is None, 120, 1)
+    time.sleep(30)  # several blocks: a broadcast that did happen would be finalized by now
+    created = next_request_id() - before
+    report = status_of(request_hash)
+    again = buyer("call", "--request-hash", request_hash, *LIFE["call_flags"][2:], check=False)
+    detail = {"requests_created": created, "phase": journal_phase(request_hash), "status": report,
+              "resend_stderr": again.stderr.strip()[-200:], "buyer_wallet_delta": balance(BUYER) - wallet_before}
+    LIFE["evidence"]["crash_before_broadcast"] = detail
+    if created == 1:
+        # The send escaped before the kill took effect: then it must resolve
+        # exactly like the after-broadcast case.
+        record("crash before broadcast: an escaped send resolves to the one finalized call",
+               report.get("state") == "pending" and again.returncode != 0, detail)
+        return
+    record("crash before broadcast: no request was created and the record stays quarantined as ambiguous",
+           created == 0 and detail["phase"] == "ambiguous" and not report.get("found"), detail)
+    record("crash before broadcast: the quarantined call is never sent again and costs the buyer nothing",
+           again.returncode != 0 and "never sent again" in again.stderr and detail["buyer_wallet_delta"] == 0, detail)
+
+
+def crash_after_broadcast() -> None:
+    """Kill the buyer after its call is on chain but before it journals the
+    outcome. The restarted journal must resolve that one call from finalized
+    state, never send it again, and the request must then settle once."""
+    import signal
+    prepared = quote_and_prepare("crash-after")
+    request_hash = prepared["request_hash"]
+    before = next_request_id()
+    process = start_call(request_hash)
+    broadcast = poll(lambda: next_request_id() > before or None, 120, 0.2)
+    still_waiting = process.poll() is None
+    phase_at_kill = journal_phase(request_hash)
+    exit_code = kill(process)
+    record("crash after broadcast: the buyer was killed after its call reached the chain",
+           bool(broadcast) and still_waiting and phase_at_kill == "sending" and exit_code == -signal.SIGKILL,
+           {"call_on_chain": bool(broadcast), "buyer_still_waiting": still_waiting, "phase_at_kill": phase_at_kill,
+            "buyer_exit": exit_code})
     status = wait_state(request_hash, {"pending"})
     phase_after = journal_phase(request_hash)
-    record("the restarted journal resolves the interrupted call from finalized state", bool(status) and
-           phase_after in ("submitted", "admitted", "ambiguous"), {"phase": phase_after, "status": status or LAST_STATUS_ERROR[0]})
     again = buyer("call", "--request-hash", request_hash, *LIFE["call_flags"][2:], check=False)
-    record("the interrupted call is never sent again", again.returncode != 0 and "never sent again" in again.stderr,
-           again.stderr.strip()[-300:])
-    after = int(service_show(LIFE["actor"])["next_request_id"])
-    record("exactly one request was created for the interrupted call", after == before + 1,
-           {"next_request_id_before": before, "next_request_id_after": after})
+    created = next_request_id() - before
+    detail = {"phase": phase_after, "status": status or LAST_STATUS_ERROR[0], "requests_created": created,
+              "resend_stderr": again.stderr.strip()[-200:]}
+    LIFE["evidence"]["crash_after_broadcast"] = detail
+    record("crash after broadcast: the restarted journal resolves the one finalized call",
+           bool(status) and created == 1, detail)
+    record("crash after broadcast: the call is never sent again", again.returncode != 0 and "never sent again" in again.stderr,
+           detail)
     if not status:
         return
     response_hash = secrets.token_hex(32)
@@ -473,7 +522,8 @@ def crash_recovery() -> None:
            "--request-id", str(status["request_id"]), "--response-hash", response_hash, "--attestor-controller",
            "service-attestor", "--yes")
     responded = wait_state(request_hash, {"responded"})
-    record("the recovered request settles once by an attested respond", responded.get("response_hash") == response_hash,
+    record("crash after broadcast: the recovered request settles once by an attested respond",
+           responded.get("response_hash") == response_hash and next_request_id() - before == 1,
            responded or LAST_STATUS_ERROR[0])
 
 
@@ -561,7 +611,8 @@ def lifecycle() -> None:
         record("settlement lifecycle prerequisites are present", False, "acceptance did not complete")
         return
     LIFE["evidence"] = evidence.setdefault("lifecycle", {})
-    crash_recovery()
+    crash_before_broadcast()
+    crash_after_broadcast()
     withdraw()
     refund_request = place_call("refund")
     sweep_request = place_call("sweep")
