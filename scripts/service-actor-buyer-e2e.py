@@ -359,6 +359,217 @@ def acceptance() -> None:
            bool(refused) and phase == "prepared" and after == before,
            {"stderr": refused.stderr.strip()[-400:] if refused else None, "phase": phase,
             "next_request_id_before": before, "next_request_id_after": after})
+    LIFE.update(actor=actor, capability_id=capability_id, agent_id=agent_id, manifest=manifest["path"],
+                call_flags=call_flags, provider=provider)
+
+
+# --- Settlement lifecycle (E2E_LIFECYCLE=1) ---------------------------------
+#
+# The contract fixes the minimum response SLA and refund-claim window at one
+# hour each, so the expiry, refund and sweep success paths can only be shown by
+# waiting them out. This phase does that with real calls, and also kills the
+# buyer process mid-send to show the journal recovers without a second call.
+
+LIFECYCLE = os.environ.get("E2E_LIFECYCLE") == "1"
+LIFE: dict = {}
+DEADLINE_MARGIN = 90
+
+
+def nano_tos(text: str) -> int:
+    from decimal import Decimal
+    value = Decimal(str(text).split()[0]) * NANO
+    if value != value.to_integral_value():
+        raise ValueError(f"amount {text!r} is finer than one nanoTOS")
+    return int(value)
+
+
+def balance(address: str) -> int:
+    return int(rpc("getAddressInformation", address=address)["result"]["balance"])
+
+
+def revenue() -> int:
+    return nano_tos(service_show(LIFE["actor"])["withdrawable_revenue"])
+
+
+def quote_and_prepare(label: str) -> dict:
+    package_path = PRIVATE / f"quote-{label}.json"
+    fixture("quote", "--network-domain", str(WORK / "network-domain.json"), "--rpc", ",".join(rpc_endpoints()),
+            "--registry-code-boc", str(REGISTRY_BOC), "--registry-code-hash", REGISTRY_CODE_HASH,
+            "--code-hash", ACTOR_CODE_HASH, "--state-dir", str(PRIVATE / "provider-quote"), "--manifest", LIFE["manifest"],
+            "--capability-id", LIFE["capability_id"], "--provider-agent-id", LIFE["agent_id"], "--buyer-wallet", BUYER,
+            "--out", str(package_path))
+    return json.loads(buyer("prepare", "--package", str(package_path), "--execution-id", secrets.token_hex(32),
+                            "--input-digest", secrets.token_hex(32)).stdout)
+
+
+def wait_state(request_hash: str, states: set, timeout: float = 300) -> dict:
+    return poll(lambda: (lambda r: r if r.get("state") in states else None)(status_of(request_hash)), timeout, 5) or {}
+
+
+def place_call(label: str) -> dict:
+    prepared = quote_and_prepare(label)
+    called = buyer("call", "--request-hash", prepared["request_hash"], *LIFE["call_flags"][2:], check=False)
+    status = wait_state(prepared["request_hash"], {"pending"})
+    record(f"request {label} is called and pending", called.returncode == 0 and bool(status),
+           status or (called.stderr.strip()[-400:] + " " + str(LAST_STATUS_ERROR[0])))
+    return {"request_hash": prepared["request_hash"], "payment": prepared.get("payment_nanotos"), **status}
+
+
+def journal_phase(request_hash: str) -> str:
+    return json.loads((PRIVATE / "buyer" / "journal" / f"call-{request_hash}.json").read_text())["phase"]
+
+
+def find_sender(request_hash: str, exclude: int):
+    """The pid of a live process whose command line carries request_hash."""
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) == exclude:
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if request_hash.encode() in cmdline and b"service" in cmdline:
+            return int(entry.name)
+    return None
+
+
+def crash_recovery() -> None:
+    """Kill the buyer once its tosctl send has started; the restarted journal
+    must recover the call as ambiguous, refuse to send it again, and resolve
+    the one finalized call from the chain."""
+    import signal
+    prepared = quote_and_prepare("crash")
+    request_hash = prepared["request_hash"]
+    before = int(service_show(LIFE["actor"])["next_request_id"])
+    env = dict(os.environ)
+    env["VAULT_URL"] = VAULT_URL
+    process = subprocess.Popen([str(BIN / "tos-service-buyer"), "call", *common_flags("buyer"), "--request-hash",
+                                request_hash, *LIFE["call_flags"][2:]], env=env, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    sender = poll(lambda: find_sender(request_hash, process.pid), 60, 0.05)
+    phase_at_kill = journal_phase(request_hash)
+    if process.poll() is None:
+        process.send_signal(signal.SIGKILL)
+    process.wait(timeout=30)
+    killed_mid_send = sender is not None and process.returncode == -signal.SIGKILL
+    record("the buyer was killed while its tosctl send was running", killed_mid_send and phase_at_kill == "sending",
+           {"sender_pid_seen": sender is not None, "buyer_exit": process.returncode, "phase_at_kill": phase_at_kill})
+    if sender is not None:
+        poll(lambda: find_sender(request_hash, process.pid) is None, 120, 1)
+    status = wait_state(request_hash, {"pending"})
+    phase_after = journal_phase(request_hash)
+    record("the restarted journal resolves the interrupted call from finalized state", bool(status) and
+           phase_after in ("submitted", "admitted", "ambiguous"), {"phase": phase_after, "status": status or LAST_STATUS_ERROR[0]})
+    again = buyer("call", "--request-hash", request_hash, *LIFE["call_flags"][2:], check=False)
+    record("the interrupted call is never sent again", again.returncode != 0 and "never sent again" in again.stderr,
+           again.stderr.strip()[-300:])
+    after = int(service_show(LIFE["actor"])["next_request_id"])
+    record("exactly one request was created for the interrupted call", after == before + 1,
+           {"next_request_id_before": before, "next_request_id_after": after})
+    if not status:
+        return
+    response_hash = secrets.token_hex(32)
+    tosctl("agent", "service", "send", "--operation", "respond", "--address", LIFE["actor"], "--from", "provider",
+           "--request-id", str(status["request_id"]), "--response-hash", response_hash, "--attestor-controller",
+           "service-attestor", "--yes")
+    responded = wait_state(request_hash, {"responded"})
+    record("the recovered request settles once by an attested respond", responded.get("response_hash") == response_hash,
+           responded or LAST_STATUS_ERROR[0])
+
+
+def withdraw() -> None:
+    provider = LIFE["provider"]
+    credited, wallet_before = revenue(), balance(provider)
+    # tosctl shows revenue to 0.0001 TOS, so withdraw a multiple of that unit
+    # to keep the before/after comparison exact.
+    amount = (credited // 2) // 100_000 * 100_000
+    tosctl("agent", "service", "send", "--operation", "withdraw-revenue", "--address", LIFE["actor"], "--from", "provider",
+           "--withdraw-amount", f"{amount / NANO:.9f}", "--yes")
+    decreased = poll(lambda: revenue() == credited - amount, 180, 3)
+    wallet_after = balance(provider)
+    received = wallet_after - wallet_before
+    # The provider pays the payout message's network fees; everything else of
+    # the 0.2 TOS allowance comes back as change.
+    record("withdraw_revenue debits credited revenue by exactly the amount", bool(decreased),
+           {"credited_before": credited, "amount": amount, "credited_after": revenue()})
+    record("the provider wallet receives the withdrawal less only network fees", amount - NANO // 10 < received <= amount,
+           {"amount": amount, "wallet_delta": received})
+    LIFE["evidence"]["withdrawal"] = {"amount_nanotos": amount, "wallet_delta_nanotos": received}
+
+
+def refund_path(request: dict) -> None:
+    request_hash = request["request_hash"]
+    view = service_show(LIFE["actor"])
+    price = nano_tos(view["price_per_call"]) if "price_per_call" in view else None
+    wait_until(request["response_deadline"] + DEADLINE_MARGIN, "the response deadline of the refund request")
+    tosctl("agent", "service", "send", "--operation", "expire", "--address", LIFE["actor"], "--from", "provider",
+           "--request-id", str(request["request_id"]), "--yes")
+    expired = wait_state(request_hash, {"expired"})
+    record("an unanswered request is expired after its response deadline", expired.get("status") == "refundable", expired)
+    refund = tosctl_json("agent", "service", "refund-show", "--address", LIFE["actor"], "--request-id",
+                         str(request["request_id"]))
+    credited, wallet_before = revenue(), balance(BUYER)
+    tosctl("agent", "service", "send", "--operation", "claim-refund", "--address", LIFE["actor"], "--from", "buyer",
+           "--request-id", str(request["request_id"]), "--yes")
+    refunded = wait_state(request_hash, {"refunded"})
+    received = balance(BUYER) - wallet_before
+    refund_price = nano_tos(refund.get("price", "0")) if refund.get("found") else price
+    storage_fee = nano_tos(refund.get("storage_fee", "0")) if refund.get("found") else None
+    record("the caller's claim_refund returns the price", bool(refunded) and refund_price is not None and
+           refund_price - NANO // 10 < received <= refund_price,
+           {"state": refunded.get("state"), "price": refund_price, "wallet_delta": received, "refund_entry": refund})
+    record("the storage fee is not refunded and is credited to the provider", storage_fee is not None and
+           revenue() - credited == storage_fee, {"revenue_delta": revenue() - credited, "storage_fee": storage_fee})
+    LIFE["evidence"]["refund"] = {"request_id": request["request_id"], "price_nanotos": refund_price,
+                                  "buyer_wallet_delta_nanotos": received, "storage_fee_nanotos": storage_fee}
+
+
+def sweep_path(request: dict) -> None:
+    request_hash = request["request_hash"]
+    snapshot = tosctl_json("agent", "service", "request-show", "--address", LIFE["actor"], "--request-id",
+                           str(request["request_id"]))
+    price, storage_fee, bounty = (nano_tos(snapshot[k]) for k in ("price", "storage_fee", "cleanup_bounty"))
+    wait_until(request["refund_claim_deadline"] + DEADLINE_MARGIN, "the refund-claim deadline of the sweep request")
+    credited, buyer_before, provider_before = revenue(), balance(BUYER), balance(LIFE["provider"])
+    tosctl("agent", "service", "send", "--operation", "sweep-expired-request", "--address", LIFE["actor"], "--from",
+           "provider", "--request-id", str(request["request_id"]), "--yes")
+    swept = wait_state(request_hash, {"swept"})
+    buyer_delta, revenue_delta = balance(BUYER) - buyer_before, revenue() - credited
+    provider_delta = balance(LIFE["provider"]) - provider_before
+    record("a never-expired request is swept after its refund-claim deadline", swept.get("state") == "swept", swept)
+    record("the sweep returns exactly the price to the caller", buyer_delta == price,
+           {"price": price, "buyer_wallet_delta": buyer_delta})
+    record("the provider is credited the storage fee less the cleanup bounty", revenue_delta == storage_fee - bounty,
+           {"storage_fee": storage_fee, "cleanup_bounty": bounty, "revenue_delta": revenue_delta})
+    record("the sweeper receives the bounty less only network fees", bounty - NANO // 10 < provider_delta <= bounty,
+           {"cleanup_bounty": bounty, "sweeper_wallet_delta": provider_delta})
+    LIFE["evidence"]["sweep"] = {"request_id": request["request_id"], "price_nanotos": price,
+                                 "storage_fee_nanotos": storage_fee, "cleanup_bounty_nanotos": bounty,
+                                 "buyer_wallet_delta_nanotos": buyer_delta, "revenue_delta_nanotos": revenue_delta,
+                                 "sweeper_wallet_delta_nanotos": provider_delta}
+
+
+def wait_until(unix_seconds: int, what: str) -> None:
+    remaining = int(unix_seconds) - int(time.time())
+    print(f"waiting {max(remaining, 0)} s for {what}", flush=True)
+    while time.time() < unix_seconds:
+        time.sleep(min(60, max(1, unix_seconds - time.time())))
+
+
+def lifecycle() -> None:
+    if "actor" not in LIFE:
+        record("settlement lifecycle prerequisites are present", False, "acceptance did not complete")
+        return
+    LIFE["evidence"] = evidence.setdefault("lifecycle", {})
+    crash_recovery()
+    withdraw()
+    refund_request = place_call("refund")
+    sweep_request = place_call("sweep")
+    LIFE["evidence"]["requests"] = {"refund": refund_request.get("request_id"), "sweep": sweep_request.get("request_id")}
+    if refund_request.get("response_deadline"):
+        refund_path(refund_request)
+    if sweep_request.get("refund_claim_deadline"):
+        sweep_path(sweep_request)
 
 
 evidence: dict = {}
@@ -421,6 +632,8 @@ async def main() -> int:
             record("every validator serves finalized JSON-RPC", bool(ready))
             await provision(network.zerostate.main_wallet(client))
             await asyncio.to_thread(acceptance)
+            if LIFECYCLE:
+                await asyncio.to_thread(lifecycle)
     except Exception as error:  # noqa: BLE001 - the evidence records the failure
         record("run completed without an exception", False, repr(error))
     evidence["steps"] = steps
