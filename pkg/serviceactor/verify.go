@@ -397,6 +397,12 @@ func VerifyAdmission(evidence *Evidence, pinnedCodeHash [32]byte, rail *nativeco
 	return &Admission{Binding: binding, Policy: policy, TermsHash: termsHash}, nil
 }
 
+// CheckPolicyBounds reports whether a policy's windows, bounty, storage fee
+// and price are inside the contract bounds admission step 7 enforces.
+func CheckPolicyBounds(policy nativecore.ServiceActorPolicyV1) error {
+	return checkPolicyBounds(policy)
+}
+
 func checkPolicyBounds(policy nativecore.ServiceActorPolicyV1) error {
 	if policy.ResponseSLA < nativecore.ServiceActorMinimumWindowSeconds || policy.ResponseSLA > nativecore.ServiceActorMaximumWindowSeconds {
 		return errors.New("response_sla is outside the contract bounds")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,5 +73,76 @@ func TestPublicationNonceAndPrivateTokenFailClosed(t *testing.T) {
 	}
 	if token, err := readToken(path); err != nil || token != "secret" {
 		t.Fatalf("private token: %q %v", token, err)
+	}
+}
+
+func TestStateDirectoryMustBeOwnerPrivateAndNotASymlink(t *testing.T) {
+	base := t.TempDir()
+	fresh := filepath.Join(base, "fresh")
+	if _, err := openJournal(fresh); err != nil {
+		t.Fatalf("fresh state directory: %v", err)
+	}
+	for _, directory := range []string{fresh, filepath.Join(fresh, "journal")} {
+		info, err := os.Lstat(directory)
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("%s was not created owner-private: %v %v", directory, info, err)
+		}
+	}
+	broad := filepath.Join(base, "broad")
+	if err := os.Mkdir(broad, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(broad, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openJournal(broad); err == nil {
+		t.Fatal("world-readable state directory was used")
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(fresh, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openJournal(link); err == nil {
+		t.Fatal("symlinked state directory was used")
+	}
+	if err := os.Chmod(filepath.Join(fresh, "journal"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openJournal(fresh); err == nil {
+		t.Fatal("group-accessible journal directory was used")
+	}
+	if _, err := openJournal("relative"); err == nil {
+		t.Fatal("relative state directory was used")
+	}
+}
+
+func TestCommandFlagsFailClosed(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "state")
+	base := []string{"--state-dir", state, "--gateway", "https://gateway.example", "--caller-id", "caller"}
+	prepareBase := append(append([]string(nil), base...), "--network-id", "n", "--genesis-root", "r", "--genesis-file", "f",
+		"--registry-code-hash", "h", "--owner-agent-id", "agent_"+strings.Repeat("ab", 32), "--manifest-json", "/manifest.json")
+	cases := map[string][]string{
+		"unknown mode":              {"publish", "--state-dir", state},
+		"no state dir":              {"status"},
+		"positional argument":       {"status", "--state-dir", state, "extra"},
+		"apply without hash":        append([]string{"apply"}, base...),
+		"preview without hash":      append([]string{"preview"}, base...),
+		"prepare without owner":     append([]string{"prepare"}, base...),
+		"rpc without pinned actor":  append(append([]string{"prepare"}, prepareBase...), "--rpc", "http://a,http://b,http://c"),
+		"registry code without rpc": append(append([]string{"prepare"}, prepareBase...), "--registry-code-boc", "/registry.boc"),
+		"quorum without rpc":        append(append([]string{"prepare"}, prepareBase...), "--quorum", "2"),
+		"apply takes no manifest":   append(append([]string{"apply"}, base...), "--action-hash", "sha256:"+strings.Repeat("11", 32), "--manifest-json", "/m.json"),
+	}
+	for name, arguments := range cases {
+		if err := run(arguments, io.Discard, io.Discard); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+	if err := run([]string{"status", "--state-dir", state, "--action-hash", "sha256:" + strings.Repeat("11", 32)}, io.Discard, io.Discard); err == nil {
+		t.Fatal("status of an unjournaled publication succeeded")
+	}
+	var out strings.Builder
+	if err := run([]string{"status", "--state-dir", state}, &out, io.Discard); err != nil || out.Len() != 0 {
+		t.Fatalf("status of an empty journal: %q %v", out.String(), err)
 	}
 }
