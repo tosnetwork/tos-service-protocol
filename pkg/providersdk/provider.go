@@ -173,49 +173,142 @@ func (p *Provider) PrepareCapabilityPublication(manifestJSON []byte, ownerAgentI
 		ManifestCBOR: manifestCBOR, ActionHash: built.HashString, Action: action}, nil
 }
 
+// PublishCapability verifies, relays and waits for one Capability
+// publication in a single call. It keeps no state; ApplyPublication is the
+// restartable form that journals every phase.
 func (p *Provider) PublishCapability(ctx context.Context, prepared *PreparedPublication, signatures []*nativev1.SignatureV1, idempotencyKey string) (*nativev1.NativeStateV1, error) {
-	if p == nil || ctx == nil || prepared == nil || prepared.Action == nil || idempotencyKey == "" || len(idempotencyKey) > 256 {
-		return nil, errors.New("invalid provider publication request")
+	if err := p.SubmitCapability(ctx, prepared, signatures, idempotencyKey); err != nil {
+		return nil, err
+	}
+	return p.WaitForPublication(ctx, prepared)
+}
+
+// checkPrepared recomputes the reviewed action and refuses any drift between
+// it, the canonical manifest bytes and the derived Capability identity.
+func (p *Provider) checkPrepared(prepared *PreparedPublication) (nativecore.BuiltAction, *nativev1.RegisterCapabilityV1, error) {
+	if p == nil || prepared == nil || prepared.Action == nil {
+		return nativecore.BuiltAction{}, nil, errors.New("invalid prepared Capability publication")
 	}
 	manifestHash := sha256.Sum256(prepared.ManifestCBOR)
 	if "sha256:"+hex.EncodeToString(manifestHash[:]) != prepared.ManifestDigest {
-		return nil, errors.New("prepared Capability manifest changed after review")
+		return nativecore.BuiltAction{}, nil, errors.New("prepared Capability manifest changed after review")
 	}
 	built, err := nativecore.BuildAction(prepared.Action)
 	registration := prepared.Action.GetRegisterCapability()
 	if err != nil || built.Kind != nativecore.KindRegisterCapability || registration == nil ||
 		built.HashString != prepared.ActionHash || prepared.CapabilityID != prepared.Action.TargetObjectId ||
-		registration.InitialVersion == nil || registration.InitialVersion.ManifestDigest != prepared.ManifestDigest {
-		return nil, errors.New("prepared Capability publication changed after review")
+		registration.InitialVersion == nil || registration.InitialVersion.ManifestDigest != prepared.ManifestDigest ||
+		!proto.Equal(prepared.Action.Network, p.network) || prepared.Action.TargetContractCodeHash != p.registryCodeHash {
+		return nativecore.BuiltAction{}, nil, errors.New("prepared Capability publication changed after review")
+	}
+	return built, registration, nil
+}
+
+// VerifyPublicationSignatures checks controller signatures over the exact
+// reviewed action against the finalized owner Agent policy. Nothing is
+// relayed.
+func (p *Provider) VerifyPublicationSignatures(ctx context.Context, prepared *PreparedPublication, signatures []*nativev1.SignatureV1) error {
+	if ctx == nil {
+		return errors.New("invalid provider publication request")
+	}
+	built, registration, err := p.checkPrepared(prepared)
+	if err != nil {
+		return err
 	}
 	owner, err := p.resolve(ctx, registration.OwnerAgentId)
 	if err != nil {
-		return nil, fmt.Errorf("resolve Capability owner: %w", err)
+		return fmt.Errorf("resolve Capability owner: %w", err)
 	}
 	if owner.GetAgent() == nil || owner.GetAgent().AgentId != registration.OwnerAgentId ||
 		owner.GetAgent().Tombstoned || owner.GetAgent().Policy == nil ||
 		!p.validStateEnvelope(owner) {
-		return nil, errors.New("Capability owner is not a live finalized Agent")
+		return errors.New("Capability owner is not a live finalized Agent")
 	}
 	if err := nativecore.VerifySignatures(ctx, p.verifier, owner.GetAgent().Policy, signatures,
 		nativecore.PurposeCapabilityControl, false, built); err != nil {
-		return nil, fmt.Errorf("verify Capability controller signatures: %w", err)
+		return fmt.Errorf("verify Capability controller signatures: %w", err)
+	}
+	return nil
+}
+
+// SubmitCapability verifies the signatures and relays the exact reviewed
+// action once. A nil error means only that the Gateway acknowledged the
+// exact action hash; it is never publication.
+func (p *Provider) SubmitCapability(ctx context.Context, prepared *PreparedPublication, signatures []*nativev1.SignatureV1, idempotencyKey string) error {
+	if p == nil || ctx == nil || idempotencyKey == "" || len(idempotencyKey) > 256 {
+		return errors.New("invalid provider publication request")
+	}
+	if err := p.VerifyPublicationSignatures(ctx, prepared, signatures); err != nil {
+		return err
+	}
+	return p.relayCapability(ctx, prepared, signatures, idempotencyKey)
+}
+
+// relayCapability sends the exact action without re-verifying signatures;
+// callers verify first and journal the attempt before calling it.
+func (p *Provider) relayCapability(ctx context.Context, prepared *PreparedPublication, signatures []*nativev1.SignatureV1, idempotencyKey string) error {
+	built, _, err := p.checkPrepared(prepared)
+	if err != nil {
+		return err
 	}
 	requestContext, err := p.requestContext(idempotencyKey)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	request := &nativev1.SubmitNativeActionRequest{Context: requestContext,
 		Submission: &nativev1.SignedNativeActionV1{Action: proto.Clone(prepared.Action).(*nativev1.NativeActionV1),
 			AuthoritySignatures: cloneSignatures(signatures)}}
 	response, err := p.client.SubmitNativeAction(ctx, request)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if response == nil || !response.RelayAccepted || response.ActionHash != built.HashString {
-		return nil, errors.New("gateway did not acknowledge the exact Capability action")
+		return errors.New("gateway did not acknowledge the exact Capability action")
+	}
+	return nil
+}
+
+// WaitForPublication polls finalized state until the Capability exists and
+// matches the reviewed action exactly, the finality timeout elapses, or the
+// state conflicts.
+func (p *Provider) WaitForPublication(ctx context.Context, prepared *PreparedPublication) (*nativev1.NativeStateV1, error) {
+	if ctx == nil {
+		return nil, errors.New("invalid provider publication request")
+	}
+	built, registration, err := p.checkPrepared(prepared)
+	if err != nil {
+		return nil, err
 	}
 	return p.waitForPublication(ctx, prepared, registration, built.HashString)
+}
+
+// ResolvePublication reads finalized state once. found is false only when
+// the Capability does not exist yet; existing but different state is an
+// error, never "not found".
+func (p *Provider) ResolvePublication(ctx context.Context, prepared *PreparedPublication) (*nativev1.NativeStateV1, bool, error) {
+	if ctx == nil {
+		return nil, false, errors.New("invalid provider publication request")
+	}
+	built, registration, err := p.checkPrepared(prepared)
+	if err != nil {
+		return nil, false, err
+	}
+	state, found, err := p.resolveFound(ctx, prepared.CapabilityID)
+	if err != nil || !found {
+		return nil, false, err
+	}
+	if err := p.matchPublication(state, prepared, registration, built.HashString); err != nil {
+		return nil, false, err
+	}
+	return state, true, nil
+}
+
+func (p *Provider) matchPublication(state *nativev1.NativeStateV1, prepared *PreparedPublication, registration *nativev1.RegisterCapabilityV1, actionHash string) error {
+	capability := state.GetCapability()
+	if capability == nil || capability.LastActionHash != actionHash {
+		return errors.New("finalized Capability state conflicts with publication")
+	}
+	return p.validatePublishedState(state, registration, prepared)
 }
 
 func (p *Provider) waitForPublication(ctx context.Context, prepared *PreparedPublication, registration *nativev1.RegisterCapabilityV1, actionHash string) (*nativev1.NativeStateV1, error) {
@@ -229,11 +322,7 @@ func (p *Provider) waitForPublication(ctx context.Context, prepared *PreparedPub
 			return nil, err
 		}
 		if found {
-			capability := state.GetCapability()
-			if capability == nil || capability.LastActionHash != actionHash {
-				return nil, errors.New("finalized Capability state conflicts with publication")
-			}
-			if err := p.validatePublishedState(state, registration, prepared); err != nil {
+			if err := p.matchPublication(state, prepared, registration, actionHash); err != nil {
 				return nil, err
 			}
 			return state, nil
