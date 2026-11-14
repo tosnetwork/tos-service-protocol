@@ -13,8 +13,9 @@
 # Optional: E2E_BASE_PORT (tostester ports), E2E_RPC_PORTS (three JSON-RPC ports),
 #   E2E_LIFECYCLE=1 (settlement lifecycle, hours of deadlines), and
 #   E2E_EXECUTE=1 (paid execution in the private containerd sandbox) with
-#   E2E_EXECUTOR (software-work-execute built from tos-ai, run under sudo -n)
-#   and E2E_TOS_AI_COMMIT (the commit it was built from, operator-asserted);
+#   E2E_EXECUTOR (the provider's software-work-execute binary, run under
+#   sudo -n) and E2E_TOS_AI_COMMIT (the source commit it was built from,
+#   operator-asserted);
 #   the provider's root-owned state is staged under E2E_ROOT_BASE
 #   (default /tos/m1-e2e-root)/<workdir name>, which must not exist yet.
 # The run fails unless the protocol tree is clean at the commit it records.
