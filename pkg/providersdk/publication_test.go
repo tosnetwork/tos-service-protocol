@@ -593,7 +593,7 @@ var requiredPreviewFields = []string{"signing_purpose", "network_id", "genesis_r
 func TestPreviewShowsEveryFieldAndMarksUnresolvedOnesExplicitly(t *testing.T) {
 	f := newJournalFixture(t, nil)
 	record := f.prepare(t)
-	preview, err := f.provider(t).PreviewPublication(context.Background(), record, nil)
+	preview, err := f.provider(t).PreviewPublication(context.Background(), record, PreviewSources{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +649,7 @@ func TestPreviewVerifiesServiceActorBindingAgainstFinalizedState(t *testing.T) {
 	f := newJournalFixture(t, manifestJSON)
 	record := f.prepare(t)
 	actors := liveActor(t, record, attestorKey)
-	preview, err := f.provider(t).PreviewPublication(context.Background(), record, actors)
+	preview, err := f.provider(t).PreviewPublication(context.Background(), record, withActors(actors))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +692,7 @@ func TestPreviewVerifiesServiceActorBindingAgainstFinalizedState(t *testing.T) {
 	} {
 		broken := liveActor(t, record, attestorKey)
 		edit(broken)
-		preview, err := f.provider(t).PreviewPublication(context.Background(), record, broken)
+		preview, err := f.provider(t).PreviewPublication(context.Background(), record, withActors(broken))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -703,7 +703,7 @@ func TestPreviewVerifiesServiceActorBindingAgainstFinalizedState(t *testing.T) {
 
 	absent := liveActor(t, record, attestorKey)
 	absent.observation.Account = nil
-	preview, err = f.provider(t).PreviewPublication(context.Background(), record, absent)
+	preview, err = f.provider(t).PreviewPublication(context.Background(), record, withActors(absent))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +711,7 @@ func TestPreviewVerifiesServiceActorBindingAgainstFinalizedState(t *testing.T) {
 		t.Fatalf("undeployed actor terms reported %+v", got)
 	}
 	failing := &staticActors{err: errors.New("quorum unavailable")}
-	preview, err = f.provider(t).PreviewPublication(context.Background(), record, failing)
+	preview, err = f.provider(t).PreviewPublication(context.Background(), record, withActors(failing))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +725,7 @@ func TestPreviewReportsAbsentOrTombstonedOwner(t *testing.T) {
 	record := f.prepare(t)
 	owner := f.client.owner
 	f.client.owner = nil
-	preview, err := f.provider(t).PreviewPublication(context.Background(), record, nil)
+	preview, err := f.provider(t).PreviewPublication(context.Background(), record, PreviewSources{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func TestPreviewReportsAbsentOrTombstonedOwner(t *testing.T) {
 	}
 	f.client.owner = proto.Clone(owner).(*nativev1.NativeStateV1)
 	f.client.owner.GetAgent().Tombstoned = true
-	preview, err = f.provider(t).PreviewPublication(context.Background(), record, nil)
+	preview, err = f.provider(t).PreviewPublication(context.Background(), record, PreviewSources{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -770,5 +770,183 @@ func TestSignedPublicationNeverRelaysASubstitutedSignatureSet(t *testing.T) {
 	got, err := f.provider(t).ApplyPublication(context.Background(), f.reopen(t), record.ActionHash, other)
 	if err == nil || got.Phase != PublicationSigned || f.client.submitCount() != 0 {
 		t.Fatalf("substituted signatures in the signed phase: phase=%s relays=%d err=%v", got.Phase, f.client.submitCount(), err)
+	}
+}
+
+func TestAmbiguousPublicationAfterPolicyRotationNamesTheRecovery(t *testing.T) {
+	f := newJournalFixture(t, nil)
+	record := f.prepare(t)
+	f.client.submitErr = errors.New("unreachable")
+	if _, err := f.provider(t).ApplyPublication(context.Background(), f.reopen(t), record.ActionHash, f.sign(t, record, "fixture")); err == nil {
+		t.Fatal("failed relay reported success")
+	}
+	// The owner rotated its controllers; the stored signatures are stale.
+	rotated := proto.Clone(f.client.owner).(*nativev1.NativeStateV1)
+	rotated.GetAgent().Policy.Controllers[0].KeyId = fakeKeys.KeyID("rotated")
+	rotated.GetAgent().Policy.Controllers[0].Mldsa44PublicKey = fakeKeys.PublicKey("rotated")
+	f.client.owner, f.client.submitErr = rotated, nil
+	got, err := f.provider(t).ApplyPublication(context.Background(), f.reopen(t), record.ActionHash, nil)
+	if err == nil || !strings.Contains(err.Error(), "explicit fresh nonces") || got.Phase != PublicationAmbiguous || f.client.submitCount() != 1 {
+		t.Fatalf("stale signatures after rotation: phase=%s relays=%d err=%v", got.Phase, f.client.submitCount(), err)
+	}
+}
+
+// withActors pins the release the static reader reports, as the command
+// does when it builds the reader from the same --actor-code-hash.
+func withActors(actors *staticActors) PreviewSources {
+	return PreviewSources{Actors: actors, PinnedActorCodeHash: actors.observation.PinnedCodeHash}
+}
+
+func TestPreviewComparesThePinWithoutAnyChainRead(t *testing.T) {
+	manifestJSON, attestorKey := previewManifest(t)
+	f := newJournalFixture(t, manifestJSON)
+	record := f.prepare(t)
+	wrongPin := "tvm-cell-sha256:" + strings.Repeat("44", 32)
+	for name, sources := range map[string]PreviewSources{
+		"no reader":   {PinnedActorCodeHash: wrongPin},
+		"read failed": {PinnedActorCodeHash: wrongPin, Actors: &staticActors{err: errors.New("quorum unavailable")}},
+	} {
+		preview, err := f.provider(t).PreviewPublication(context.Background(), record, sources)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := previewJSONFields(t, preview)["service_actor_code_hash"]; got.Status != PreviewMismatch {
+			t.Fatalf("%s: a manifest naming another release than the pin reported %+v", name, got)
+		}
+	}
+	preview, err := f.provider(t).PreviewPublication(context.Background(), record, PreviewSources{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := previewJSONFields(t, preview)["service_actor_code_hash"]; got.Status != PreviewKnown || !strings.Contains(got.Detail, "not compared") {
+		t.Fatalf("without a pin the code hash reported %+v", got)
+	}
+
+	// The account runs the manifest's code, but the operator pinned another
+	// release: the message must not blame the account.
+	actors := liveActor(t, record, attestorKey)
+	actors.observation.PinnedCodeHash = wrongPin
+	preview, err = f.provider(t).PreviewPublication(context.Background(), record, withActors(actors))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := previewJSONFields(t, preview)["service_actor_code_hash"]
+	if got.Status != PreviewMismatch || !strings.Contains(got.Detail, "equals manifest key 21") || !strings.Contains(got.Detail, "pinned release") {
+		t.Fatalf("pin mismatch with a matching account reported %+v", got)
+	}
+}
+
+func TestPreviewRedactsCredentialsFromReadErrors(t *testing.T) {
+	f := newJournalFixture(t, nil)
+	record := f.prepare(t)
+	failing := &staticActors{err: errors.New(`Post "https://operator:hunter2@rpc.example/api?token=s3cret#frag": dial tcp: refused`)}
+	preview, err := f.provider(t).PreviewPublication(context.Background(), record, PreviewSources{Actors: failing})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	if err := preview.WriteText(&text); err != nil {
+		t.Fatal(err)
+	}
+	for _, rendered := range []string{string(raw), text.String()} {
+		for _, secret := range []string{"operator", "hunter2", "s3cret", "frag"} {
+			if strings.Contains(rendered, secret) {
+				t.Fatalf("preview leaked %q", secret)
+			}
+		}
+		if !strings.Contains(rendered, "rpc.example") {
+			t.Fatal("redaction removed the host an operator needs to act on")
+		}
+	}
+	if got := redactURLs("dial grpc://a:b@[::1]:9/x?y=1 and http://plain.example/ok"); strings.Contains(got, "a:b") || strings.Contains(got, "y=1") ||
+		!strings.Contains(got, "http://plain.example/ok") {
+		t.Fatalf("redactURLs = %q", got)
+	}
+}
+
+func TestPreviewDoesNotClaimChainVerificationForManifestConsistency(t *testing.T) {
+	f := newJournalFixture(t, nil)
+	record := f.prepare(t)
+	preview, err := f.provider(t).PreviewPublication(context.Background(), record, PreviewSources{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := previewJSONFields(t, preview)["attestor_authorization"]; got.Status != PreviewKnown || got.Source != SourceManifest {
+		t.Fatalf("manifest-internal key 18/21 check reported %+v", got)
+	}
+}
+
+func TestPrepareRefusesAManifestOffThePinBeforeJournaling(t *testing.T) {
+	f := newJournalFixture(t, nil)
+	_, _, err := f.provider(t).PrepareJournaledPublication(f.reopen(t), f.manifestJSON, f.ownerID,
+		PublicationOptions{PinnedActorCodeHash: "tvm-cell-sha256:" + strings.Repeat("44", 32)})
+	if err == nil {
+		t.Fatal("a manifest naming another Service Actor release was prepared")
+	}
+	records, err := f.reopen(t).Records()
+	if err != nil || len(records) != 0 {
+		t.Fatalf("a refused manifest left %d journaled records (%v)", len(records), err)
+	}
+	if _, _, err := f.provider(t).PrepareJournaledPublication(f.reopen(t), f.manifestJSON, f.ownerID,
+		PublicationOptions{PinnedActorCodeHash: "not-a-hash"}); err == nil {
+		t.Fatal("a malformed pin was accepted")
+	}
+}
+
+func TestConcurrentNoncelessPreparesJournalOneCapability(t *testing.T) {
+	f := newJournalFixture(t, nil)
+	const workers = 8
+	start := make(chan struct{})
+	hashes := make([]string, workers)
+	errs := make([]error, workers)
+	var wait sync.WaitGroup
+	for worker := range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			// Each worker has its own journal handle, as separate processes do.
+			journal, err := OpenPublicationJournal(f.directory, time.Now())
+			if err != nil {
+				errs[worker] = err
+				return
+			}
+			<-start
+			record, _, err := f.provider(t).PrepareJournaledPublication(journal, f.manifestJSON, f.ownerID, PublicationOptions{})
+			hashes[worker], errs[worker] = record.ActionHash, err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	for worker := range workers {
+		if errs[worker] != nil || hashes[worker] != hashes[0] {
+			t.Fatalf("worker %d: %s %v (worker 0: %s)", worker, hashes[worker], errs[worker], hashes[0])
+		}
+	}
+	records, err := f.reopen(t).Records()
+	if err != nil || len(records) != 1 {
+		t.Fatalf("concurrent prepares journaled %d records (%v)", len(records), err)
+	}
+}
+
+func TestApplyReportsTheDurablePhaseWhenATransitionFails(t *testing.T) {
+	f := newJournalFixture(t, nil)
+	record := f.prepare(t)
+	// Another writer moves the record while this process is inside the
+	// relay, so the relay's own submitting -> submitted step fails.
+	f.client.onSubmit = func(*scriptedClient) {
+		if _, err := rawJournal(f).Transition(record.ActionHash, []PublicationPhase{PublicationSubmitting}, func(r *PublicationRecord) error {
+			r.Phase = PublicationAmbiguous
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}
+	got, err := f.provider(t).ApplyPublication(context.Background(), f.reopen(t), record.ActionHash, f.sign(t, record, "fixture"))
+	if err == nil || got.ActionHash != record.ActionHash || got.Phase != PublicationAmbiguous {
+		t.Fatalf("failed transition returned phase=%q hash=%q err=%v", got.Phase, got.ActionHash, err)
 	}
 }

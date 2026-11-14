@@ -97,8 +97,8 @@ keys, the signed action once verified, and a phase:
 | Phase | Meaning | What `ApplyPublication` does next |
 | --- | --- | --- |
 | `prepared` | Durable before the action is handed to the signer | Requires the signed action, verifies it against the finalized owner policy, stores it |
-| `signed` | Verified signatures stored | Journals `submitting`, relays once |
-| `submitting` | Written before the relay starts | Found when the journal is opened: becomes `ambiguous` |
+| `signed` | Verified signatures stored | Takes the record's relay lock, journals `submitting`, relays once |
+| `submitting` | Written before the relay starts, under the relay lock | While the relaying process lives: nothing (`ErrRelayInProgress`). Once it has died (its relay lock is free): becomes `ambiguous` |
 | `submitted` | Gateway acknowledged the exact action hash (transport only) | Waits for exact finalized state; a finality timeout makes it `ambiguous` |
 | `ambiguous` | The relay may or may not have landed | Settles from finalized state first; only a finalized absence re-relays the **stored** signed action under the **same** retry key |
 | `finalized` | Finalized Capability state matches the action | Publishes the stored manifest to the derived catalog |
@@ -110,11 +110,20 @@ stored action or signature set is never replaced; a different signed action
 is refused. Finalized state that names another action is an error, never a
 reason to re-relay.
 
+Each record has a relay lock file (`publication-<hex>.relay`). The process
+that relays holds it from journaling `submitting` until the outcome is
+journaled, and the operating system releases it if that process dies. Opening
+the journal, or applying a `submitting` record, recovers it as `ambiguous`
+only when that lock is free, so a live relay is never treated as abandoned
+and never relayed twice.
+
 ```go
 journal, err := providersdk.OpenPublicationJournal("/var/lib/provider/journal", time.Now())
 record, created, err := provider.PrepareJournaledPublication(journal, manifestJSON, providerAgentID,
-    providersdk.PublicationOptions{}) // nonces and retry keys generated and journaled
-preview, err := provider.PreviewPublication(ctx, record, actorReader) // actorReader may be nil
+    providersdk.PublicationOptions{PinnedActorCodeHash: actorCodeHash}) // nonces and retry keys generated and journaled
+preview, err := provider.PreviewPublication(ctx, record, providersdk.PreviewSources{
+    PinnedActorCodeHash: actorCodeHash, Actors: actorReader, // both optional
+})
 // ... sign record's action externally ...
 record, err = provider.ApplyPublication(ctx, journal, record.ActionHash, signed)
 // After a crash at any phase, call ApplyPublication again with signed == nil.
@@ -123,7 +132,11 @@ record, err = provider.ApplyPublication(ctx, journal, record.ActionHash, signed)
 With no nonces given, `PrepareJournaledPublication` resumes the journaled
 publication of the same manifest by the same owner on the same network
 instead of deriving a second Capability; pass explicit nonces to publish a
-deliberate second Capability of the same manifest.
+deliberate second Capability of the same manifest. The lookup and the write
+hold one journal lock, so concurrent nonce-less prepares of one manifest
+journal one Capability. With `PinnedActorCodeHash` set, a manifest whose key
+21 names another Service Actor release is refused before anything is
+journaled.
 
 ## Pre-signing preview
 
@@ -144,7 +157,13 @@ access, policy bounds, publication fee and both retry keys.
 The owner Agent is resolved through the Gateway. The Service Actor is read
 through the repository's quorum Service Actor reader only when one is
 configured; otherwise every actor-derived field is `unknown` with that
-reason. Two values have no resolver in this repository and are always
+reason. A configured pin is compared with manifest key 21 locally, before
+and independently of any chain read, so a failed or absent read never hides
+a manifest that names another release; without a pin the code hash is shown
+as `known` and marked as not compared. The key 18/21 attestor authorization
+is a consistency check inside the manifest and is reported as `known`, not
+`verified`. Read errors are shown with URL credentials, queries and fragments
+redacted. Two values have no resolver in this repository and are always
 `unknown`: the transport bound to `endpoint_commitment` (the manifest commits
 to it by digest only), and the publication fee (the Gateway's action
 publisher pays the relay fee; the signed action carries no fee). The actor
@@ -174,8 +193,10 @@ owner-private; the journal lives in its `journal/` subdirectory.
 1. Prepare. The record is durable before anything is printed. Nonces and
    retry keys are generated and journaled unless given
    (`--object-nonce`/`--action-nonce` together, `--capability-idempotency-key`,
-   `--manifest-idempotency-key`). Add the optional Service Actor reader to
-   verify the actor binding against finalized state:
+   `--manifest-idempotency-key`). `--actor-code-hash` on its own pins the
+   Service Actor release and checks manifest key 21 against it locally, with
+   no chain read. Add `--rpc` and `--registry-code-boc` as well to verify the
+   actor binding against finalized state:
 
    ```sh
    tos-service-provider-publish prepare $COMMON \
@@ -191,11 +212,13 @@ owner-private; the journal lives in its `journal/` subdirectory.
    stdout is the unsigned `NativeActionV1` (also written to
    `<state-dir>/action-<hex>.json`); stderr shows the human-readable preview,
    the machine-readable preview path `<state-dir>/preview-<hex>.json`, and the
-   `--action-hash` to resume with. `prepare` refuses to continue when the
-   manifest's Service Actor code hash differs from the pinned release or its
-   key 18 does not commit to the key 21 attestor; those manifest errors cannot
-   be fixed after publication. Re-running `prepare` with the same manifest
-   resumes the same record.
+   `--action-hash` to resume with. When the manifest's Service Actor code hash
+   differs from `--actor-code-hash`, `prepare` refuses before journaling
+   anything, so no record that `apply` would accept is left behind; an
+   immutable manifest cannot be fixed after publication. Without
+   `--actor-code-hash` that check is skipped and the preview marks the code
+   hash as not compared. Re-running `prepare` with the same manifest resumes
+   the same record.
 
 2. Review the preview again at any time (JSON on stdout, text on stderr):
 
@@ -229,8 +252,9 @@ owner-private; the journal lives in its `journal/` subdirectory.
    {"action_hash":"sha256:…","capability_id":"…","manifest_digest":"sha256:…","phase":"cataloged","submit_attempts":1,"chain_published":true,"finalized_checkpoint":42,"catalog_admitted":true,"catalog_checkpoint":42}
    ```
 
-   The status line is printed even when `apply` fails, and the exit code is
-   non-zero until the phase is `cataloged`.
+   The status line is printed even when `apply` fails. It shows the phase
+   the journal holds at that moment, and the exit code is non-zero until the
+   phase is `cataloged`.
 
 5. Inspect the journal without a Gateway:
 
@@ -244,9 +268,26 @@ Re-run `apply` with the same `--state-dir` and `--action-hash` after any
 crash, timeout or Gateway error. A `prepared` record still needs the signed
 action. An `ambiguous` record is settled from finalized state before any
 re-relay, so re-running is safe even when the previous relay reached the
-chain. Two concurrent `apply` processes are serialized by the journal lock;
-the loser of a step reports the phase the winner moved the record to. Opening
-the journal while another process is relaying turns that record `ambiguous`;
-the worst case is one re-relay of the same signed action under the same retry
-key, which the Registry admits at most once. Back up the state directory: it
-holds the only copy of generated nonces and retry keys.
+chain. Two concurrent `apply` processes are serialized by the journal lock
+and the record's relay lock. While one process is relaying, the other stops
+with "another process is relaying this publication" and leaves the record in
+`submitting`. Re-run it after the first finishes or dies. Back up the state
+directory: it holds the only copy of generated nonces and retry keys.
+
+**Owner policy changed after signing.** Every re-relay first verifies the
+stored signatures against the owner Agent's current finalized policy. If the
+controllers were rotated after signing and finalized state shows no
+Capability, an `ambiguous` record cannot be re-relayed: the stored signatures
+no longer satisfy the policy, and the journal never replaces them. `apply`
+reports this explicitly. Abandon that record and publish again with explicit
+fresh nonces, which derive a new Capability ID, then sign the new action
+under the new policy:
+
+```sh
+tos-service-provider-publish prepare $COMMON ... \
+  --object-nonce $(openssl rand -hex 32) --action-nonce $(openssl rand -hex 32)
+```
+
+A nonce-less `prepare` would resume the stuck record instead, because it
+publishes the same manifest. The old signed action cannot land later: the
+Registry rejects signatures outside the current policy.

@@ -136,7 +136,7 @@ func parse(mode string, arguments []string) (options, error) {
 		set.IntVar(&value.quorum, "quorum", 0, "strict-majority quorum; defaults to a majority of --rpc")
 		set.StringVar(&value.registryCodeBOC, "registry-code-boc", "", "file holding the Native Registry code BOC (base64); required with --rpc")
 		set.IntVar(&value.registryWorkchain, "registry-workchain", 0, "Native Registry workchain")
-		set.StringVar(&value.actorCodeHash, "actor-code-hash", "", "tvm-cell-sha256:<hex> pinned Service Actor release; required with --rpc")
+		set.StringVar(&value.actorCodeHash, "actor-code-hash", "", "tvm-cell-sha256:<hex> pinned Service Actor release, checked against manifest key 21; required with --rpc")
 	}
 	if mode == "apply" {
 		set.StringVar(&value.signedAction, "signed-action", "", "tos-service-wallet SignedNativeActionV1 JSON (required while the publication is prepared)")
@@ -160,8 +160,10 @@ func parse(mode string, arguments []string) (options, error) {
 	if value.rpc != "" && (value.registryCodeBOC == "" || value.actorCodeHash == "") {
 		return value, errors.New("--rpc requires --registry-code-boc and --actor-code-hash")
 	}
-	if value.rpc == "" && (value.registryCodeBOC != "" || value.actorCodeHash != "" || value.quorum != 0) {
-		return value, errors.New("--registry-code-boc, --actor-code-hash and --quorum are only used with --rpc")
+	// --actor-code-hash alone is a local pin check against manifest key 21;
+	// the registry code and quorum are only meaningful for chain reads.
+	if value.rpc == "" && (value.registryCodeBOC != "" || value.quorum != 0) {
+		return value, errors.New("--registry-code-boc and --quorum are only used with --rpc")
 	}
 	return value, nil
 }
@@ -213,7 +215,10 @@ func newProvider(value options, network *nativev1.NetworkDomain, registryHash st
 
 func prepare(value options, provider *providersdk.Provider, journal *providersdk.PublicationJournal, network *nativev1.NetworkDomain,
 	stdout, stderr io.Writer) error {
-	publication := providersdk.PublicationOptions{CapabilityIdempotencyKey: value.capabilityRetry, ManifestIdempotencyKey: value.manifestRetry}
+	// The pin is checked before anything is journaled, so a manifest that
+	// names another Service Actor release never leaves an applicable record.
+	publication := providersdk.PublicationOptions{CapabilityIdempotencyKey: value.capabilityRetry, ManifestIdempotencyKey: value.manifestRetry,
+		PinnedActorCodeHash: value.actorCodeHash}
 	if (value.objectNonce == "") != (value.actionNonce == "") {
 		return errors.New("give both --object-nonce and --action-nonce, or neither")
 	}
@@ -271,7 +276,7 @@ func writePreview(value options, provider *providersdk.Provider, record provider
 	if err != nil {
 		return err
 	}
-	preview, err := provider.PreviewPublication(ctx, record, actors)
+	preview, err := provider.PreviewPublication(ctx, record, providersdk.PreviewSources{PinnedActorCodeHash: value.actorCodeHash, Actors: actors})
 	if err != nil {
 		return err
 	}
@@ -347,8 +352,14 @@ func apply(value options, provider *providersdk.Provider, journal *providersdk.P
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
 	defer cancel()
 	result, applyErr := provider.ApplyPublication(ctx, journal, record.ActionHash, signed)
-	if result.ActionHash == "" {
-		result = record
+	if applyErr != nil {
+		// Report the phase the journal holds now, never the one read before
+		// apply started.
+		if current, err := journal.Read(record.ActionHash); err == nil {
+			result = current
+		} else if result.ActionHash == "" {
+			result = record
+		}
 	}
 	if err := writeStatus(stdout, result); err != nil {
 		return err

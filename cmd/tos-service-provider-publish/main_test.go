@@ -122,15 +122,16 @@ func TestCommandFlagsFailClosed(t *testing.T) {
 	prepareBase := append(append([]string(nil), base...), "--network-id", "n", "--genesis-root", "r", "--genesis-file", "f",
 		"--registry-code-hash", "h", "--owner-agent-id", "agent_"+strings.Repeat("ab", 32), "--manifest-json", "/manifest.json")
 	cases := map[string][]string{
-		"unknown mode":             {"publish", "--state-dir", state},
-		"no state dir":             {"status"},
-		"positional argument":      {"status", "--state-dir", state, "extra"},
-		"apply without hash":       append([]string{"apply"}, base...),
-		"preview without hash":     append([]string{"preview"}, base...),
-		"prepare without owner":    append([]string{"prepare"}, base...),
-		"rpc without pinned actor": append(append([]string{"prepare"}, prepareBase...), "--rpc", "http://a,http://b,http://c"),
-		"pinned actor without rpc": append(append([]string{"prepare"}, prepareBase...), "--actor-code-hash", "tvm-cell-sha256:"+strings.Repeat("11", 32)),
-		"apply takes no manifest":  append(append([]string{"apply"}, base...), "--action-hash", "sha256:"+strings.Repeat("11", 32), "--manifest-json", "/m.json"),
+		"unknown mode":              {"publish", "--state-dir", state},
+		"no state dir":              {"status"},
+		"positional argument":       {"status", "--state-dir", state, "extra"},
+		"apply without hash":        append([]string{"apply"}, base...),
+		"preview without hash":      append([]string{"preview"}, base...),
+		"prepare without owner":     append([]string{"prepare"}, base...),
+		"rpc without pinned actor":  append(append([]string{"prepare"}, prepareBase...), "--rpc", "http://a,http://b,http://c"),
+		"registry code without rpc": append(append([]string{"prepare"}, prepareBase...), "--registry-code-boc", "/registry.boc"),
+		"quorum without rpc":        append(append([]string{"prepare"}, prepareBase...), "--quorum", "2"),
+		"apply takes no manifest":   append(append([]string{"apply"}, base...), "--action-hash", "sha256:"+strings.Repeat("11", 32), "--manifest-json", "/m.json"),
 	}
 	for name, arguments := range cases {
 		if err := run(arguments, io.Discard, io.Discard); err == nil {

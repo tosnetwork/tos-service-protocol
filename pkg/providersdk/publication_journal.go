@@ -226,9 +226,11 @@ func validRetryKey(value string) bool {
 // and every write is an atomic, synced replacement.
 type PublicationJournal struct{ directory string }
 
-// OpenPublicationJournal opens the journal and recovers every record left in
-// the submitting phase as ambiguous: the process that wrote it may have
-// reached the Gateway before it stopped.
+// OpenPublicationJournal opens the journal and recovers every abandoned
+// relay: a record left in the submitting phase whose relay lock no live
+// process holds becomes ambiguous, because the process that wrote it may
+// have reached the Gateway before it stopped. A record whose relay is still
+// running is left alone.
 func OpenPublicationJournal(directory string, now time.Time) (*PublicationJournal, error) {
 	if !osguard.OwnerPrivateStorageSupported() {
 		return nil, errors.New("provider publication journal requires owner-private storage")
@@ -247,11 +249,8 @@ func OpenPublicationJournal(directory string, now time.Time) (*PublicationJourna
 			return err
 		}
 		for _, record := range records {
-			if record.Phase == PublicationSubmitting {
-				record.Phase, record.UpdatedUnix = PublicationAmbiguous, now.Unix()
-				if err := journal.writeUnlocked(record); err != nil {
-					return err
-				}
+			if _, err := journal.recoverAbandonedUnlocked(record, now); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -260,6 +259,68 @@ func OpenPublicationJournal(directory string, now time.Time) (*PublicationJourna
 		return nil, err
 	}
 	return journal, nil
+}
+
+func (j *PublicationJournal) relayLockPath(actionHash string) string {
+	return filepath.Join(j.directory, "publication-"+strings.TrimPrefix(actionHash, "sha256:")+".relay")
+}
+
+// acquireRelay takes the record's relay lock without waiting. The holder is
+// the only process that may move the record into, or out of, submitting;
+// the lock is released by the operating system if that process dies.
+func (j *PublicationJournal) acquireRelay(actionHash string) (func(), error) {
+	if !validActionHash(actionHash) {
+		return nil, errors.New("invalid publication action hash")
+	}
+	release, acquired, err := osguard.TryExclusiveFileLock(j.relayLockPath(actionHash), 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if !acquired {
+		return nil, ErrRelayInProgress
+	}
+	return release, nil
+}
+
+// ErrRelayInProgress reports a publication another live process is relaying.
+var ErrRelayInProgress = errors.New("another process is relaying this publication; retry after it finishes")
+
+// recoverAbandonedUnlocked turns a submitting record into ambiguous only
+// when no live process holds its relay lock. The caller holds the journal
+// lock; the relay lock is only tried, never waited for, so the two locks
+// cannot deadlock.
+func (j *PublicationJournal) recoverAbandonedUnlocked(record PublicationRecord, now time.Time) (PublicationRecord, error) {
+	if record.Phase != PublicationSubmitting {
+		return record, nil
+	}
+	release, err := j.acquireRelay(record.ActionHash)
+	if errors.Is(err, ErrRelayInProgress) {
+		return record, nil
+	}
+	if err != nil {
+		return record, err
+	}
+	defer release()
+	record.Phase, record.UpdatedUnix = PublicationAmbiguous, now.Unix()
+	if err := j.writeUnlocked(record); err != nil {
+		return record, err
+	}
+	return record, nil
+}
+
+// RecoverAbandonedRelay re-checks one record, for a long-lived journal whose
+// relaying process may have died after the journal was opened.
+func (j *PublicationJournal) RecoverAbandonedRelay(actionHash string, now time.Time) (PublicationRecord, error) {
+	var result PublicationRecord
+	err := j.withLock(func() error {
+		record, err := j.readUnlocked(actionHash)
+		if err != nil {
+			return err
+		}
+		result, err = j.recoverAbandonedUnlocked(record, now)
+		return err
+	})
+	return result, err
 }
 
 // Directory returns the journal directory.
@@ -278,6 +339,14 @@ func (j *PublicationJournal) path(actionHash string) string {
 // is never overwritten: re-running prepare after a crash converges on it,
 // whatever phase it has reached.
 func (j *PublicationJournal) CreateOrMatch(record PublicationRecord) (PublicationRecord, bool, error) {
+	return j.createOrResume(record, false)
+}
+
+// createOrResume is CreateOrMatch, optionally first resuming the one record
+// that publishes the same manifest for the same owner, network and
+// Registry. The lookup and the write hold one lock, so concurrent prepares
+// of one manifest never journal two Capabilities.
+func (j *PublicationJournal) createOrResume(record PublicationRecord, resumeByManifest bool) (PublicationRecord, bool, error) {
 	if record.Phase != PublicationPrepared {
 		return PublicationRecord{}, false, errors.New("a new publication record must be prepared")
 	}
@@ -287,6 +356,28 @@ func (j *PublicationJournal) CreateOrMatch(record PublicationRecord) (Publicatio
 	var result PublicationRecord
 	created := false
 	err := j.withLock(func() error {
+		if resumeByManifest {
+			records, err := j.recordsUnlocked()
+			if err != nil {
+				return err
+			}
+			var matches []PublicationRecord
+			for _, existing := range records {
+				if existing.NetworkID == record.NetworkID && existing.GenesisRootHash == record.GenesisRootHash &&
+					existing.GenesisFileHash == record.GenesisFileHash && existing.RegistryCodeHash == record.RegistryCodeHash &&
+					existing.OwnerAgentID == record.OwnerAgentID && existing.ManifestDigest == record.ManifestDigest {
+					matches = append(matches, existing)
+				}
+			}
+			switch len(matches) {
+			case 0:
+			case 1:
+				result = matches[0]
+				return nil
+			default:
+				return fmt.Errorf("%d journaled publications carry manifest %s; give the nonces of the one to resume", len(matches), record.ManifestDigest)
+			}
+		}
 		existing, err := j.readUnlocked(record.ActionHash)
 		if err == nil {
 			if !existing.immutableEqual(record) {

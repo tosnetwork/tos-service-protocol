@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 
 	nativev1 "github.com/tosnetwork/tos-service-protocol/gen/tos/service/v1"
@@ -143,20 +145,32 @@ func (r ServiceActorSessionReader) ObserveServiceActor(ctx context.Context, acto
 	return observation, nil
 }
 
+// PreviewSources are the optional inputs of a preview beyond the Gateway.
+type PreviewSources struct {
+	// PinnedActorCodeHash is the tvm-cell-sha256 Service Actor release the
+	// operator deploys. It is compared with manifest key 21 locally, so the
+	// comparison holds even when Actors is nil or its read fails.
+	PinnedActorCodeHash string
+	// Actors reads the Service Actor at a finalized checkpoint; nil leaves
+	// every actor-derived field unknown.
+	Actors ServiceActorStateReader
+}
+
 // PreviewPublication builds the pre-signing preview of a journaled
 // publication. The owner Agent is resolved through the Gateway; the Service
-// Actor is read only when actors is non-nil. Read failures become unknown
-// fields with their reason; they never drop a field.
-func (p *Provider) PreviewPublication(ctx context.Context, record PublicationRecord, actors ServiceActorStateReader) (*PublicationPreview, error) {
+// Actor is read only when sources.Actors is non-nil. Read failures become
+// unknown fields with their reason, with any URL credentials and queries
+// redacted; they never drop a field.
+func (p *Provider) PreviewPublication(ctx context.Context, record PublicationRecord, sources PreviewSources) (*PublicationPreview, error) {
 	if p == nil || ctx == nil {
 		return nil, errors.New("invalid publication preview request")
 	}
 	if err := record.validate(); err != nil {
 		return nil, err
 	}
-	input := previewInput{record: record, provider: p}
+	input := previewInput{record: record, provider: p, pinned: sources.PinnedActorCodeHash}
 	input.owner, input.ownerFound, input.ownerErr = p.resolveFound(ctx, record.OwnerAgentID)
-	if actors != nil {
+	if actors := sources.Actors; actors != nil {
 		manifest, err := nativecore.DecodeCanonicalSoftwareWorkManifestCBOR(record.ManifestCBOR)
 		if err != nil {
 			return nil, err
@@ -170,6 +184,7 @@ func (p *Provider) PreviewPublication(ctx context.Context, record PublicationRec
 type previewInput struct {
 	record          PublicationRecord
 	provider        *Provider
+	pinned          string
 	owner           *nativev1.NativeStateV1
 	ownerFound      bool
 	ownerErr        error
@@ -213,8 +228,8 @@ func buildPreview(input previewInput) (*PublicationPreview, error) {
 			"no finalized-state resolver maps endpoint_commitment to a transport; confirm it against the endpoint you operate"),
 		ServiceActorAddress: known(actorAddress, SourceManifest, "manifest key 21 settlement actor"),
 		AttestorKey:         known(settlement.AttestorKey, SourceManifest, "manifest key 21 attestor"),
-		AttestorAuthorized: field(PreviewVerified, manifest.ExecutionSignerAuthorization, SourceManifest,
-			"manifest key 18 commits to the key 21 attestor text"),
+		AttestorAuthorized: known(manifest.ExecutionSignerAuthorization, SourceManifest,
+			"manifest key 18 commits to the key 21 attestor text; a consistency check within the manifest, not a chain check"),
 		PublicationFee: field(PreviewUnknown, "", SourceNone,
 			"the Gateway's action publisher pays the relay fee of a Native action; this SDK has no fee estimator and the signed action carries no fee"),
 		CapabilityRetryKey: known(record.CapabilityIdempotencyKey, SourceJournal, ""),
@@ -243,7 +258,7 @@ func buildPreview(input previewInput) (*PublicationPreview, error) {
 func ownerField(input previewInput) PreviewField {
 	switch {
 	case input.ownerErr != nil:
-		return field(PreviewUnknown, "", SourceFinalizedState, "owner Agent resolution failed: "+input.ownerErr.Error())
+		return field(PreviewUnknown, "", SourceFinalizedState, "owner Agent resolution failed: "+redactURLs(input.ownerErr.Error()))
 	case !input.ownerFound:
 		return field(PreviewAbsent, "", SourceFinalizedState, "the owner Agent is not in finalized state; publication will be refused")
 	}
@@ -268,7 +283,20 @@ func ownerField(input previewInput) PreviewField {
 // actorFields fills every field that only the finalized Service Actor
 // account can establish.
 func actorFields(preview *PublicationPreview, input previewInput, manifest nativecore.SoftwareWorkManifestV1, actorAddress, manifestCodeHash string) {
-	preview.ServiceActorCodeHash = known(manifestCodeHash, SourceManifest, "manifest key 21 code hash")
+	// The pin comparison is local and runs before, and independently of,
+	// any chain read, so a failed or absent read cannot hide it.
+	pinMismatch := input.pinned != "" && input.pinned != manifestCodeHash
+	switch {
+	case input.pinned == "":
+		preview.ServiceActorCodeHash = known(manifestCodeHash, SourceManifest,
+			"manifest key 21 code hash; no pinned Service Actor release is configured, so it was not compared")
+	case pinMismatch:
+		preview.ServiceActorCodeHash = field(PreviewMismatch, manifestCodeHash, SourceConfiguration,
+			"manifest key 21 code hash is not the pinned Service Actor release "+input.pinned)
+	default:
+		preview.ServiceActorCodeHash = known(manifestCodeHash, SourceConfiguration,
+			"manifest key 21 code hash equals the pinned Service Actor release; the account was not checked")
+	}
 	dependent := []*PreviewField{&preview.ServiceActorAccount, &preview.ServiceActorOwner, &preview.ActorAttestor,
 		&preview.ActorMetadataBinding, &preview.ActorProofScheme, &preview.TermsHash, &preview.PolicyVersion,
 		&preview.PricePerCall, &preview.StorageFee, &preview.CleanupBounty, &preview.ResponseSLA,
@@ -283,13 +311,13 @@ func actorFields(preview *PublicationPreview, input previewInput, manifest nativ
 		fill(PreviewUnknown, "no Service Actor reader is configured; the actor's state, terms and fees were not read")
 		return
 	case input.actorErr != nil:
-		fill(PreviewUnknown, "Service Actor read failed: "+input.actorErr.Error())
+		fill(PreviewUnknown, "Service Actor read failed: "+redactURLs(input.actorErr.Error()))
 		return
 	}
 	observation := input.actor
-	if observation.PinnedCodeHash != manifestCodeHash {
-		preview.ServiceActorCodeHash = field(PreviewMismatch, manifestCodeHash, SourceManifest,
-			"manifest key 21 code hash is not the pinned Service Actor release "+observation.PinnedCodeHash)
+	if observation.PinnedCodeHash != "" && observation.PinnedCodeHash != input.pinned {
+		fill(PreviewUnknown, "the Service Actor reader pins release "+observation.PinnedCodeHash+", not the configured pin; its read was not used")
+		return
 	}
 	if observation.Account == nil {
 		fill(PreviewAbsent, fmt.Sprintf("the Service Actor is not active at checkpoint %d; buyers refuse admission until it is deployed", observation.Checkpoint))
@@ -300,12 +328,19 @@ func actorFields(preview *PublicationPreview, input previewInput, manifest nativ
 		fill(PreviewMismatch, "the reader returned another account or undecoded data")
 		return
 	}
-	if account.CodeHash == manifestCodeHash && observation.PinnedCodeHash == manifestCodeHash {
-		preview.ServiceActorCodeHash = field(PreviewVerified, manifestCodeHash, SourceFinalizedState,
-			fmt.Sprintf("account code at checkpoint %d equals manifest key 21 and the pinned release", observation.Checkpoint))
-	} else {
+	switch {
+	case account.CodeHash != manifestCodeHash:
 		preview.ServiceActorCodeHash = field(PreviewMismatch, account.CodeHash, SourceFinalizedState,
 			"the account code hash differs from manifest key 21 "+manifestCodeHash)
+	case pinMismatch:
+		preview.ServiceActorCodeHash = field(PreviewMismatch, manifestCodeHash, SourceFinalizedState,
+			fmt.Sprintf("account code at checkpoint %d equals manifest key 21, but both differ from the pinned release %s", observation.Checkpoint, input.pinned))
+	case input.pinned == "":
+		preview.ServiceActorCodeHash = field(PreviewVerified, manifestCodeHash, SourceFinalizedState,
+			fmt.Sprintf("account code at checkpoint %d equals manifest key 21; no pinned release is configured", observation.Checkpoint))
+	default:
+		preview.ServiceActorCodeHash = field(PreviewVerified, manifestCodeHash, SourceFinalizedState,
+			fmt.Sprintf("account code at checkpoint %d equals manifest key 21 and the pinned release", observation.Checkpoint))
 	}
 	data := account.Data
 	policy := data.Policy
@@ -377,6 +412,31 @@ func actorFields(preview *PublicationPreview, input previewInput, manifest nativ
 	} else {
 		preview.PolicyBounds = field(PreviewVerified, "within contract bounds", SourceFinalizedState, "")
 	}
+}
+
+var urlPattern = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s"'<>]+`)
+
+// redactURLs removes user information, query strings and fragments from
+// every URL in an error text before it reaches a preview file or a
+// terminal; an RPC endpoint may carry credentials in either.
+func redactURLs(text string) string {
+	return urlPattern.ReplaceAllStringFunc(text, func(raw string) string {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Host == "" {
+			scheme, _, _ := strings.Cut(raw, "://")
+			return scheme + "://[redacted]"
+		}
+		if parsed.User != nil {
+			parsed.User = url.User("redacted")
+		}
+		if parsed.RawQuery != "" {
+			parsed.RawQuery = "redacted"
+		}
+		if parsed.Fragment != "" {
+			parsed.Fragment = "redacted"
+		}
+		return parsed.String()
+	})
 }
 
 func bigText(value interface{ String() string }) string {
