@@ -563,7 +563,7 @@ def refund_path(request: dict) -> None:
                          str(request["request_id"]))
     credited, wallet_before = revenue(), balance(BUYER)
     tosctl("agent", "service", "send", "--operation", "claim-refund", "--address", LIFE["actor"], "--from", "buyer",
-           "--request-id", str(request["request_id"]), "--yes")
+           "--request-id", str(request["request_id"]), "--destination", BUYER, "--yes")
     refunded = wait_state(request_hash, {"refunded"})
     received = balance(BUYER) - wallet_before
     refund_price = nano_tos(refund.get("price", "0")) if refund.get("found") else price
@@ -620,10 +620,17 @@ def lifecycle() -> None:
     refund_request = place_call("refund")
     sweep_request = place_call("sweep")
     LIFE["evidence"]["requests"] = {"refund": refund_request.get("request_id"), "sweep": sweep_request.get("request_id")}
-    if refund_request.get("response_deadline"):
-        refund_path(refund_request)
-    if sweep_request.get("refund_claim_deadline"):
-        sweep_path(sweep_request)
+    # Each path is recorded on its own, so a failure in one still lets the
+    # other's hour-long wait produce evidence.
+    for name, path, request, key in (("refund", refund_path, refund_request, "response_deadline"),
+                                     ("sweep", sweep_path, sweep_request, "refund_claim_deadline")):
+        if not request.get(key):
+            record(f"{name} path has a pending request to settle", False, request)
+            continue
+        try:
+            path(request)
+        except Exception as error:  # noqa: BLE001 - the evidence records the failure
+            record(f"{name} path completed without an exception", False, repr(error))
 
 
 evidence: dict = {}
