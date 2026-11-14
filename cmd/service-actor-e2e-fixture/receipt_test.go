@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,13 @@ type receiptCase struct {
 // those, and returns receipt-check arguments that release it.
 func newReceiptCase(t *testing.T) receiptCase {
 	t.Helper()
+	return newReceiptCaseWithAttestor(t, 0x99)
+}
+
+// newReceiptCaseWithAttestor names the attestor key id byte the Quote
+// package's manifest and proposal carry.
+func newReceiptCaseWithAttestor(t *testing.T, attestorByte byte) receiptCase {
+	t.Helper()
 	dir := t.TempDir()
 	network := servicefixture.Network()
 	networkJSON, err := json.Marshal(map[string]string{"network_id": network.NetworkId,
@@ -51,7 +59,7 @@ func newReceiptCase(t *testing.T) receiptCase {
 		t.Fatal(err)
 	}
 	var attestorID [32]byte
-	copy(attestorID[:], bytes.Repeat([]byte{0x99}, 32))
+	copy(attestorID[:], bytes.Repeat([]byte{attestorByte}, 32))
 	attestor := mldsa44.KeyIDText(attestorID)
 	manifest := servicefixture.Manifest("1.0.0", servicefixture.Settlement{ActorAccount: bytes.Repeat([]byte{0x77}, 32),
 		ActorCodeHash: bytes.Repeat([]byte{0x88}, 32), AttestorKey: attestor})
@@ -224,29 +232,94 @@ func TestReceiptCheckRefuses(t *testing.T) {
 		999, protowire.VarintType), 1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cases := map[string][]string{
-		"missing flag":            c.args[:len(c.args)-2],
-		"non-base64 receipt":      c.with("--receipt-boc", "!!"),
-		"oversized receipt":       c.with("--receipt-boc", base64.StdEncoding.EncodeToString(make([]byte, maxReceiptBOCBytes+1))),
-		"trailing BOC bytes":      c.with("--receipt-boc", base64.StdEncoding.EncodeToString(append(append([]byte(nil), boc...), 0))),
-		"BOC without CRC32C":      c.with("--receipt-boc", noCRCBOC),
-		"BOC with an index":       c.with("--receipt-boc", indexBOC),
-		"nonzero exit code":       withAll(c.args, map[string]string{"--receipt-boc": failedBOC, "--response-hash": failedHash}),
-		"zero completion time":    withAll(c.args, map[string]string{"--receipt-boc": incompleteBOC, "--response-hash": incompleteHash}),
-		"uppercase response hash": c.with("--response-hash", strings.ToUpper(c.value("--response-hash"))),
-		"zero execution ID":       c.with("--execution-id", "sha256:"+strings.Repeat("00", 32)),
-		"another network":         c.with("--network-domain", otherNetwork),
-		"unknown package field":   c.with("--quote-package", unknownField),
-		"another capability":      c.with("--capability-id", "cap_"+strings.Repeat("34", 32)),
+	oversizePackage := filepath.Join(c.dir, "oversize.pb")
+	if err := os.WriteFile(oversizePackage, make([]byte, maxQuotePackageBytes+1), 0o600); err != nil {
+		t.Fatal(err)
 	}
+	emptyPackage := filepath.Join(c.dir, "empty.pb")
+	if err := os.WriteFile(emptyPackage, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := func(prefix string) string { return prefix + strings.Repeat("ab", 32) }
+	cases := map[string]struct {
+		args []string
+		why  string
+	}{
+		"missing flag":            {c.args[:len(c.args)-2], "receipt-check needs --manifest-digest"},
+		"non-base64 receipt":      {c.with("--receipt-boc", "!!"), "not bounded standard base64"},
+		"oversized receipt":       {c.with("--receipt-boc", base64.StdEncoding.EncodeToString(make([]byte, maxReceiptBOCBytes+1))), "not bounded standard base64"},
+		"trailing BOC bytes":      {c.with("--receipt-boc", base64.StdEncoding.EncodeToString(append(append([]byte(nil), boc...), 0))), "Receipt BOC"},
+		"BOC without CRC32C":      {c.with("--receipt-boc", noCRCBOC), "not the canonical serialization"},
+		"BOC with an index":       {c.with("--receipt-boc", indexBOC), "not the canonical serialization"},
+		"nonzero exit code":       {withAll(c.args, map[string]string{"--receipt-boc": failedBOC, "--response-hash": failedHash}), "did not succeed"},
+		"zero completion time":    {withAll(c.args, map[string]string{"--receipt-boc": incompleteBOC, "--response-hash": incompleteHash}), "completion time"},
+		"uppercase response hash": {c.with("--response-hash", strings.ToUpper(c.value("--response-hash"))), "--response-hash is not in its canonical form"},
+		"zero execution ID":       {c.with("--execution-id", "sha256:"+strings.Repeat("00", 32)), "zero sha256 digest"},
+		"another network":         {c.with("--network-domain", otherNetwork), "request_hash"},
+		"unknown package field":   {c.with("--quote-package", unknownField), "not canonically encoded"},
+		"oversized package":       {c.with("--quote-package", oversizePackage), "Quote package is outside its bounds"},
+		"empty package":           {c.with("--quote-package", emptyPackage), "Quote package is outside its bounds"},
+		"another capability":      {c.with("--capability-id", "cap_"+strings.Repeat("34", 32)), "package identity"},
+		"another request":         {c.with("--snapshot-request-hash", strings.Repeat("cd", 32)), "request_hash is"},
+		// Only the offer check differs; the Receipt agrees with the changed value.
+		"offer price only": {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.ChargedAtomicAmount = "120000000" },
+			map[string]string{"--snapshot-price-nanotos": "120000000"}), "offer price"},
+		"offer provider only": {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.ProviderAgentID = other("agent_") },
+			map[string]string{"--provider-agent-id": other("agent_")}), "offer provider"},
+		"offer manifest only": {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.SandboxDigest = other("sha256:") },
+			map[string]string{"--manifest-digest": other("sha256:")}), "offer manifest"},
+		"manifest toolchain only": {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.ToolchainDigest = other("sha256:") },
+			map[string]string{"--toolchain-digest": other("sha256:")}), "manifest toolchain"},
+		// Only the Receipt differs from the anchored request.
+		"receipt quote":     {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.QuoteCommitment = other("tvm-cell-sha256:") }, nil), "quote_commitment"},
+		"receipt execution": {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.ExecutionID = other("sha256:") }, nil), "execution_id"},
+		"receipt input":     {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.InputDigest = other("sha256:") }, nil), "input_digest"},
+		"receipt source":    {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.SourceDigest = other("sha256:") }, nil), "source_digest"},
+		"receipt charge":    {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.ChargedAtomicAmount = "1" }, nil), "charged_atomic_amount"},
+		"receipt provider":  {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.ProviderAgentID = other("agent_") }, nil), "provider_agent_id"},
+		"receipt toolchain": {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.ToolchainDigest = other("sha256:") }, nil), "toolchain_digest"},
+		"receipt sandbox":   {c.receiptWith(t, func(r *nativecore.SoftwareWorkReceiptV1) { r.SandboxDigest = other("sha256:") }, nil), "sandbox_digest"},
+		"another response":  {c.with("--response-hash", strings.Repeat("ef", 32)), "response_hash"},
+	}
+	// Only the offer's attestor differs: the snapshot and the attestor agree
+	// with each other but not with the accepted Quote.
+	offered := newReceiptCaseWithAttestor(t, 0x98)
+	cases["offer attestor only"] = struct {
+		args []string
+		why  string
+	}{withAll(offered.args, map[string]string{"--attestor": c.value("--attestor"),
+		"--snapshot-attestor-key": c.value("--attestor")}), "offer attestor"}
 	if failedHash == c.value("--response-hash") || incompleteHash == c.value("--response-hash") || noCRCBOC == c.value("--receipt-boc") || indexBOC == c.value("--receipt-boc") {
 		t.Fatal("a forged Receipt equals the valid one")
 	}
-	for name, args := range cases {
-		if err := run(args, &bytes.Buffer{}); err == nil {
+	for name, refusal := range cases {
+		err := run(refusal.args, &bytes.Buffer{})
+		if err == nil {
 			t.Errorf("%s was accepted", name)
+			continue
+		}
+		if !strings.Contains(err.Error(), refusal.why) {
+			t.Errorf("%s was refused for another reason: %v", name, err)
 		}
 	}
+}
+
+// receiptWith returns arguments carrying a Receipt changed by mutate and
+// the given flag overrides.
+func (c receiptCase) receiptWith(t *testing.T, mutate func(*nativecore.SoftwareWorkReceiptV1), overrides map[string]string) []string {
+	t.Helper()
+	receipt := c.receipt
+	mutate(&receipt)
+	root, _, err := nativecore.BuildSoftwareWorkReceiptCellV1(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{"--receipt-boc": base64.StdEncoding.EncodeToString(root.ToBOC()),
+		"--response-hash": hex.EncodeToString(root.Hash())}
+	for flag, value := range overrides {
+		values[flag] = value
+	}
+	return withAll(c.args, values)
 }
 
 func withAll(args []string, values map[string]string) []string {
@@ -257,4 +330,54 @@ func withAll(args []string, values map[string]string) []string {
 		}
 	}
 	return changed
+}
+
+// A charge wider than Coins decodes but is not what the builder encodes, so
+// the Receipt is refused as non-canonical.
+func TestDecodeCanonicalReceiptRefusesAWideCharge(t *testing.T) {
+	c := newReceiptCase(t)
+	root, _, err := nativecore.BuildSoftwareWorkReceiptCellV1(c.receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := root.BeginParse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err := s.LoadSlice(32 + 16 + 64 + 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builder := cell.BeginCell().MustStoreSlice(head, 32+16+64+32)
+	for index := 0; index < 3; index++ {
+		ref, err := s.LoadRefCell()
+		if err != nil {
+			t.Fatal(err)
+		}
+		builder.MustStoreRef(ref)
+	}
+	economic, err := s.LoadRefCell()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := economic.BeginParse()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.LoadBigUInt(128); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := e.LoadSlice(256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wide := new(big.Int).Lsh(big.NewInt(1), 121)
+	forged := builder.MustStoreRef(cell.BeginCell().MustStoreBigUInt(wide, 128).MustStoreSlice(provider, 256).EndCell()).EndCell()
+	if _, err := nativecore.DecodeSoftwareWorkReceiptCellV1(forged); err != nil {
+		t.Fatalf("the decoder no longer accepts a wide charge, so this test lost its subject: %v", err)
+	}
+	_, _, err = decodeCanonicalReceipt(base64.StdEncoding.EncodeToString(forged.ToBOC()))
+	if err == nil || !strings.Contains(err.Error(), "not canonical") {
+		t.Fatalf("a wide-charge Receipt was not refused as non-canonical: %v", err)
+	}
 }

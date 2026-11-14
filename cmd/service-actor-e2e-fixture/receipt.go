@@ -128,11 +128,6 @@ func (r *ReceiptExpectation) check() (map[string]any, error) {
 		{"toolchain_digest", receipt.ToolchainDigest, r.toolchainDigest},
 		{"sandbox_digest", receipt.SandboxDigest, r.manifestDigest},
 	})
-	// The decoder already refuses these; the attestor states its own rule
-	// rather than depend on that.
-	if receipt.ExitCode != 0 || receipt.CompletedAt == 0 {
-		mismatches = append(mismatches, "the Receipt is not a successful completed execution")
-	}
 	if len(mismatches) != 0 {
 		return nil, fmt.Errorf("%w: %s", errNotReleasable, strings.Join(mismatches, "; "))
 	}
@@ -224,6 +219,9 @@ func decodeCanonicalReceipt(text string) (nativecore.SoftwareWorkReceiptV1, stri
 	if !bytes.Equal(root.ToBOC(), boc) {
 		return none, "", errors.New("the Receipt BOC is not the canonical serialization")
 	}
+	// The decoder refuses a failed or incomplete execution and any other
+	// shape; a value the builder would not encode (a charge wider than
+	// Coins) is refused by rebuilding.
 	receipt, err := nativecore.DecodeSoftwareWorkReceiptCellV1(root)
 	if err != nil {
 		return none, "", err
