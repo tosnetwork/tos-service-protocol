@@ -1054,10 +1054,18 @@ def execute_failing() -> None:
     if not task["status"]:
         return
     inbox = deliver(task)
+    slots_before = slot_state_digest()
     code, report = paid(task, inbox)
+    slots_after = slot_state_digest()
     status = status_of(task["request_hash"])
     EXEC["evidence"]["execution_failed"] = {"request_id": task["status"]["request_id"], "request_hash": task["request_hash"],
-                                            "exit_code": code, "report": report, "status_after": status}
+                                            "exit_code": code, "report": report, "status_after": status,
+                                            "slots_before": slots_before, "slots_after": slots_after}
+    # The rerun controls rely on the slot listing digest; it must change when
+    # a paid run admits a new request, or their "unchanged" proves nothing.
+    record("the slot and journal digest changes when a paid run admits a new request",
+           slots_before != slots_after and slots_after["entries"] > slots_before["entries"],
+           {"before": slots_before, "after": slots_after})
     record("paid with a failing test: execution_failed, no Receipt hash, the request stays pending",
            code == EXIT_EXECUTION_FAILED and report.get("status") == "execution_failed" and
            report.get("slot_state") == "failed" and not report.get("response_hash") and
