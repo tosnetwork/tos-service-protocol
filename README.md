@@ -42,7 +42,7 @@ this module. Portable CBOR is a derived export and never a consensus input.
 
 ## Build and test
 
-The module uses Go 1.26.5.
+The module uses Go 1.26.11.
 
 ```bash
 go test ./...

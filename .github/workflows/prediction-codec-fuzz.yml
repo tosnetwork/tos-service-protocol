@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.11"
           cache: true
       # The regular suite runs the fixed seeds. This bounded native fuzz run
       # additionally mutates untrusted BOCs and must find neither a panic nor
