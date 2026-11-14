@@ -14,6 +14,12 @@ Boots three ML-DSA-44 PQ validators, each serving JSON-RPC on loopback, then:
 7. refused cases: discovery pinned to another actor code hash, and a call
    prepared under terms the provider changed before the call.
 
+E2E_EXECUTE=1 adds paid execution: the buyer calls with a real source
+archive, the provider runs `software-work-execute paid` in the private
+containerd sandbox, the attestor checks and signs the Receipt hash, and the
+buyer resolves exactly that response. E2E_LIFECYCLE=1 adds the settlement
+lifecycle (about two hours of deadlines).
+
 Stand-ins, both local and authority-free: the manifest store is a directory
 of canonical CBOR files named by digest, and the Quote Proposal comes from
 `service-actor-e2e-fixture quote`, which runs pkg/quoteprovider against
@@ -25,14 +31,17 @@ evidence file and one ALL PASS or FAIL line.
 """
 
 import asyncio
+import base64
 import datetime
 import hashlib
+import io
 import json
 import os
 import secrets
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -266,7 +275,8 @@ def acceptance() -> None:
 
     # 3. Capability whose manifest key 21 names the actor.
     manifest = fixture("manifest", "--actor", actor, "--code-hash", ACTOR_CODE_HASH, "--attestor", attestor_text,
-                       "--version", "1.0.0", "--out-dir", str(WORK / "manifests"))
+                       "--version", "1.0.0", "--out-dir", str(WORK / "manifests"), "--toolchain-digest", EXECUTOR_IMAGE,
+                       "--invocation-args", EXECUTOR_ARGUMENTS)
     digest = manifest["manifest_digest"]
     capability = tosctl_json("agent", "native-registry", "action", "--global-config", str(GLOBAL_CONFIG),
                              "--network-label", NETWORK_LABEL, "--kind", "register-capability", "--agent", agent_address,
@@ -360,7 +370,7 @@ def acceptance() -> None:
            {"stderr": refused.stderr.strip()[-400:] if refused else None, "phase": phase,
             "next_request_id_before": before, "next_request_id_after": after})
     LIFE.update(actor=actor, capability_id=capability_id, agent_id=agent_id, manifest=manifest["path"],
-                call_flags=call_flags, provider=provider)
+                manifest_digest=digest, call_flags=call_flags, provider=provider)
 
 
 # --- Settlement lifecycle (E2E_LIFECYCLE=1) ---------------------------------
@@ -391,15 +401,15 @@ def revenue() -> int:
     return nano_tos(service_show(LIFE["actor"])["withdrawable_revenue"])
 
 
-def quote_and_prepare(label: str) -> dict:
+def quote_and_prepare(label: str, execution_id: str | None = None, input_digest: str | None = None) -> dict:
     package_path = PRIVATE / f"quote-{label}.json"
     fixture("quote", "--network-domain", str(WORK / "network-domain.json"), "--rpc", ",".join(rpc_endpoints()),
             "--registry-code-boc", str(REGISTRY_BOC), "--registry-code-hash", REGISTRY_CODE_HASH,
             "--code-hash", ACTOR_CODE_HASH, "--state-dir", str(PRIVATE / "provider-quote"), "--manifest", LIFE["manifest"],
             "--capability-id", LIFE["capability_id"], "--provider-agent-id", LIFE["agent_id"], "--buyer-wallet", BUYER,
             "--out", str(package_path))
-    return json.loads(buyer("prepare", "--package", str(package_path), "--execution-id", secrets.token_hex(32),
-                            "--input-digest", secrets.token_hex(32)).stdout)
+    return json.loads(buyer("prepare", "--package", str(package_path), "--execution-id", execution_id or secrets.token_hex(32),
+                            "--input-digest", input_digest or secrets.token_hex(32)).stdout)
 
 
 def wait_state(request_hash: str, states: set, timeout: float = 300) -> dict:
@@ -657,11 +667,284 @@ def lifecycle() -> None:
             record(f"{name} path completed without an exception", False, repr(error))
 
 
+# --- Paid execution (E2E_EXECUTE=1) -----------------------------------------
+#
+# The provider executes the paid software-work job for real: the buyer calls
+# with a source archive, `software-work-execute paid` admits the finalized
+# pending request at most once and runs it in the private containerd sandbox,
+# and the attestor signs the resulting Receipt hash only after checking that
+# the Receipt binds exactly this request. The executor needs root for the
+# private containerd socket, so it alone runs under `sudo -n`, with every
+# input staged root-owned and private.
+
+EXECUTE = os.environ.get("E2E_EXECUTE") == "1"
+EXECUTOR = Path(os.environ.get("E2E_EXECUTOR") or "/nonexistent")
+TOS_AI_COMMIT = os.environ.get("E2E_TOS_AI_COMMIT", "")
+# The executor's pinned toolchain image and invocation; the manifest must
+# name exactly these or `paid` refuses the offer.
+EXECUTOR_IMAGE = "sha256:9624bca74096f810c5b24e489521dde124fadcfa1808581648b38bdc1ba1b105"
+EXECUTOR_ARGUMENTS = "test ./... -count=1"
+CONTAINERD_SOCKET = "/run/tos-service-containerd/containerd.sock"
+# The input digest is the transport's commitment to the source archive. This
+# run is its own direct transport: SHA-256 over a domain prefix, a zero byte
+# and the raw SHA-256 of the exact archive bytes.
+INPUT_DOMAIN = b"tos.service.e2e.software-work-input.v1\x00"
+EXIT_COMPLETED, EXIT_ALREADY_TAKEN, EXIT_NOT_ADMITTED, EXIT_EXECUTION_FAILED = 0, 3, 6, 7
+EXEC: dict = {}
+
+
+def sudo(*args, check: bool = True, timeout: int = 120) -> subprocess.CompletedProcess:
+    """A root command; the vault URL is not passed to it."""
+    return run_logged(["sudo", "-n", *map(str, args)], TRANSCRIPT, env=dict(os.environ), check=check, timeout=timeout)
+
+
+def source_archive(passing: bool) -> bytes:
+    """A deterministic USTAR archive of a Go module with one test."""
+    check = "if 2+2 != 4 {\n\t\tt.Fatal(\"arithmetic\")\n\t}" if passing else "t.Fatal(\"this test fails on purpose\")"
+    files = [("go.mod", "module example.test/paidwork\n\ngo 1.26.5\n"),
+             ("work_test.go", f"package paidwork\n\nimport \"testing\"\n\nfunc TestWork(t *testing.T) {{\n\t{check}\n}}\n")]
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for name, body in files:
+            data = body.encode()
+            info = tarfile.TarInfo(name)
+            info.size, info.mode, info.mtime, info.uid, info.gid, info.uname, info.gname = len(data), 0o444, 0, 0, 0, "", ""
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def input_digest_for(archive: bytes) -> str:
+    return hashlib.sha256(INPUT_DOMAIN + hashlib.sha256(archive).digest()).hexdigest()
+
+
+def install_root(source: Path, target: Path, mode: str = "0600") -> None:
+    sudo("install", "-o", "root", "-g", "root", "-m", mode, source, target)
+
+
+def stage_provider_root() -> None:
+    """Root-owned private state: executor binary, rail config, registry code,
+    manifest, the persistent paid state directory and an inbox per request."""
+    root = WORK / "provider-root"
+    EXEC.update(root=root, binary=root / "bin" / "software-work-execute", state=root / "paid", inbox=root / "inbox",
+                rail=root / "etc" / "rail.json", fifo=Path("/run/tos-service-containerd") / f"e2e-{WORK.name}-fifos")
+    sudo("install", "-d", "-o", "root", "-g", "root", "-m", "0700", root, root / "bin", root / "etc", EXEC["state"],
+         EXEC["inbox"], EXEC["fifo"])
+    install_root(EXECUTOR, EXEC["binary"], "0755")
+    install_root(REGISTRY_BOC, root / "etc" / "registry-code.boc")
+    install_root(Path(LIFE["manifest"]), root / "etc" / "manifest.cbor")
+    domain = json.loads((WORK / "network-domain.json").read_text())
+    rail = {"schema": "tos.ai.railgate-config.v1", "network": domain, "rpc_endpoints": rpc_endpoints(), "quorum": 0,
+            "registry_code_boc_file": str(root / "etc" / "registry-code.boc"), "registry_code_hash": REGISTRY_CODE_HASH,
+            "actor_code_hash": ACTOR_CODE_HASH, "provider_agent_id": LIFE["agent_id"],
+            "capability_id": LIFE["capability_id"], "version": "1.0.0",
+            "manifest_file": str(root / "etc" / "manifest.cbor"), "respond_budget_seconds": 120}
+    staged = PRIVATE / "rail.json"
+    staged.write_text(json.dumps(rail, indent=2))
+    install_root(staged, EXEC["rail"])
+    executor_sha = hashlib.sha256(EXECUTOR.read_bytes()).hexdigest()
+    staged_sha = sudo("sha256sum", EXEC["binary"]).stdout.split()[0]
+    EXEC["evidence"].update(executor={"built": str(EXECUTOR), "sha256": executor_sha, "staged_sha256": staged_sha,
+                                      "tos_ai_commit": TOS_AI_COMMIT},
+                            image_digest=EXECUTOR_IMAGE, invocation=EXECUTOR_ARGUMENTS,
+                            manifest_digest=LIFE["manifest_digest"], rail_config=rail,
+                            input_digest_domain=INPUT_DOMAIN.rstrip(b"\x00").decode())
+    record("the provider staged the executor, rail config and manifest root-owned and private",
+           staged_sha == executor_sha, EXEC["evidence"]["executor"])
+
+
+def call_with_source(label: str, archive: bytes) -> dict:
+    """The buyer prepares and calls with the archive's input digest; returns
+    what the buyer delivers to the provider for this request."""
+    execution_id, input_digest = secrets.token_hex(32), input_digest_for(archive)
+    prepared = quote_and_prepare(label, execution_id, input_digest)
+    called = buyer("call", "--request-hash", prepared["request_hash"], *LIFE["call_flags"][2:], check=False)
+    status = wait_state(prepared["request_hash"], {"pending"})
+    record(f"{label}: the buyer called with the source's input digest and the request is pending",
+           called.returncode == 0 and bool(status) and bool(status.get("call_transaction")),
+           status or (called.stderr.strip()[-400:] + " " + str(LAST_STATUS_ERROR[0])))
+    journal = json.loads((PRIVATE / "buyer" / "journal" / f"call-{prepared['request_hash']}.json").read_text())
+    return {"label": label, "archive": archive, "execution_id": execution_id, "input_digest": input_digest,
+            "request_hash": prepared["request_hash"], "package": base64.b64decode(journal["package_base64"]),
+            "quote_commitment": journal["quote_commitment"], "status": status}
+
+
+def deliver(task: dict) -> Path:
+    """The transport stand-in: the provider receives the archive and the
+    accepted Quote package, checks the archive against the committed input
+    digest, and stages both privately for the executor."""
+    local = PRIVATE / "provider-inbox" / task["label"]
+    local.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (local / "source.tar").write_bytes(task["archive"])
+    (local / "quote.pb").write_bytes(task["package"])
+    inbox = EXEC["inbox"] / task["label"]
+    sudo("install", "-d", "-o", "root", "-g", "root", "-m", "0700", inbox)
+    install_root(local / "source.tar", inbox / "source.tar")
+    install_root(local / "quote.pb", inbox / "quote.pb")
+    staged = sudo("sha256sum", inbox / "source.tar").stdout.split()[0]
+    task["source_digest"] = "sha256:" + staged
+    record(f"{task['label']}: the staged archive is the one the request's input digest commits",
+           hashlib.sha256(INPUT_DOMAIN + bytes.fromhex(staged)).hexdigest() == task["input_digest"],
+           {"source_digest": task["source_digest"], "input_digest": task["input_digest"]})
+    return inbox
+
+
+def paid(task: dict, inbox: Path) -> tuple[int, dict]:
+    status = task["status"]
+    result = sudo(EXEC["binary"], "paid", "--rail-config", EXEC["rail"], "--containerd-socket", CONTAINERD_SOCKET,
+                  "--fifo-dir", EXEC["fifo"], "--state-dir", EXEC["state"], "--source", inbox / "source.tar",
+                  "--quote-package", inbox / "quote.pb", "--buyer-wallet", BUYER, "--actor", LIFE["actor"],
+                  "--request-id", status["request_id"], "--call-lt", status["call_transaction"]["lt"],
+                  "--call-hash", status["call_transaction"]["hash"], "--execution-id", "sha256:" + task["execution_id"],
+                  "--input-digest", "sha256:" + task["input_digest"], check=False, timeout=900)
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        report = {"unparsed_stdout": result.stdout[-2000:], "stderr": result.stderr[-2000:]}
+    return result.returncode, report
+
+
+def actor_quiet_since(lt: int, seconds: int = 20) -> bool:
+    """No transaction reached the actor after lt over several blocks."""
+    time.sleep(seconds)
+    return last_lt(LIFE["actor"]) == lt
+
+
+def stored_digest(digest: str) -> str | None:
+    path = EXEC["state"] / "artifacts" / "objects" / digest.removeprefix("sha256:")
+    result = sudo("sha256sum", path, check=False)
+    return "sha256:" + result.stdout.split()[0] if result.returncode == 0 else None
+
+
+def execute_passing() -> None:
+    task = call_with_source("paid-pass", source_archive(passing=True))
+    if not task["status"]:
+        return
+    inbox = deliver(task)
+    request_id = task["status"]["request_id"]
+    snapshot = tosctl_json("agent", "service", "request-show", "--address", LIFE["actor"], "--request-id", str(request_id))
+    price = str(nano_tos(snapshot["price"]))
+    code, report = paid(task, inbox)
+    outcome = report.get("outcome") or {}
+    response_hash = report.get("response_hash", "")
+    run_evidence = {"request_id": request_id, "request_hash": task["request_hash"], "exit_code": code,
+                    "status": report.get("status"), "slot_state": report.get("slot_state"),
+                    "respond_check": report.get("respond_check"), "response_hash": response_hash,
+                    "receipt_boc_base64": report.get("receipt_boc_base64"), "retain_until_unix": report.get("retain_until_unix"),
+                    "quote_commitment": report.get("quote_commitment"), "outcome": outcome, "error": report.get("error")}
+    EXEC["evidence"]["completed"] = run_evidence
+    record("paid: the provider executed the request once in the sandbox and recorded its Receipt hash",
+           code == EXIT_COMPLETED and report.get("status") == "completed" and report.get("respond_check") == "passed" and
+           len(response_hash) == 64 and outcome.get("exit_code") == 0, run_evidence)
+    if code != EXIT_COMPLETED:
+        return
+    # Negative control while the request is still pending, the only time a
+    # second execution could happen: the slot refuses it.
+    baseline = last_lt(LIFE["actor"])
+    again_code, again = paid(task, inbox)
+    quiet = actor_quiet_since(baseline)
+    EXEC["evidence"]["rerun_pending"] = {"exit_code": again_code, "report": again, "actor_quiet": quiet}
+    record("paid again while the request is pending: already taken, not executed again, nothing sent",
+           again_code == EXIT_ALREADY_TAKEN and again.get("status") == "already_taken" and not again.get("response_hash") and
+           not again.get("outcome") and not again.get("receipt_boc_base64") and quiet, EXEC["evidence"]["rerun_pending"])
+    record("paid: the outcome binds this request's Quote, execution, input, source, toolchain and manifest",
+           outcome.get("quote_commitment") == task["quote_commitment"] == report.get("quote_commitment") and
+           outcome.get("execution_id") == "sha256:" + task["execution_id"] and
+           outcome.get("input_digest") == "sha256:" + task["input_digest"] and
+           outcome.get("source_digest") == task["source_digest"] and outcome.get("toolchain_digest") == EXECUTOR_IMAGE and
+           outcome.get("sandbox_digest") == LIFE["manifest_digest"],
+           {"outcome": outcome, "quote_commitment": task["quote_commitment"], "source_digest": task["source_digest"]})
+    artifact, report_object = (outcome.get(key, {}).get("Digest", "") for key in ("artifact", "report"))
+    stored = {"artifact": stored_digest(artifact), "report": stored_digest(report_object)}
+    record("paid: the artifact and report are stored intact before respond",
+           stored == {"artifact": artifact, "report": report_object}, stored)
+    # The attestor's own check: the Receipt binds exactly what the attestor
+    # knows from finalized state, the Quote, the staged source and the
+    # published manifest. Only then is the response signed.
+    checked = run([str(BIN / "service-actor-e2e-fixture"), "receipt-check", "--receipt-boc", report["receipt_boc_base64"],
+                   "--response-hash", response_hash, "--quote-commitment", task["quote_commitment"],
+                   "--execution-id", "sha256:" + task["execution_id"], "--input-digest", "sha256:" + task["input_digest"],
+                   "--source-digest", task["source_digest"], "--price-nanotos", price,
+                   "--provider-agent-id", LIFE["agent_id"], "--toolchain-digest", EXECUTOR_IMAGE,
+                   "--manifest-digest", LIFE["manifest_digest"]], check=False)
+    receipt = last_json(checked.stdout) or {}
+    EXEC["evidence"]["receipt_check"] = receipt or checked.stderr.strip()[-600:]
+    record("the attestor's check releases the Receipt: it binds exactly this request and charges its price",
+           checked.returncode == 0 and receipt.get("releasable") is True and receipt.get("response_hash") == response_hash and
+           receipt.get("artifact_digest") == artifact and receipt.get("report_digest") == report_object,
+           EXEC["evidence"]["receipt_check"])
+    if checked.returncode != 0:
+        return
+    tosctl("agent", "service", "send", "--operation", "respond", "--address", LIFE["actor"], "--from", "provider",
+           "--request-id", str(request_id), "--response-hash", response_hash, "--attestor-controller", "service-attestor",
+           "--yes")
+    responded = wait_state(task["request_hash"], {"responded"})
+    record("the buyer resolves the paid request as responded with exactly the Receipt hash",
+           responded.get("response_hash") == response_hash, responded or LAST_STATUS_ERROR[0])
+    EXEC["evidence"]["responded"] = responded
+
+    # Negative control after respond: finalized state no longer proves a
+    # pending request, so admission refuses before the slot is consulted;
+    # nothing runs and the response stays the one Receipt hash.
+    baseline = last_lt(LIFE["actor"])
+    again_code, again = paid(task, inbox)
+    quiet = actor_quiet_since(baseline)
+    after = status_of(task["request_hash"])
+    EXEC["evidence"]["rerun_responded"] = {"exit_code": again_code, "report": again, "actor_quiet": quiet,
+                                           "status_after": after}
+    record("paid again after respond: not admitted, not executed, no second respond",
+           again_code == EXIT_NOT_ADMITTED and again.get("status") == "not_admitted" and not again.get("response_hash") and
+           not again.get("outcome") and quiet and after.get("state") == "responded" and
+           after.get("response_hash") == response_hash, EXEC["evidence"]["rerun_responded"])
+
+
+def execute_failing() -> None:
+    task = call_with_source("paid-fail", source_archive(passing=False))
+    if not task["status"]:
+        return
+    inbox = deliver(task)
+    baseline = last_lt(LIFE["actor"])
+    code, report = paid(task, inbox)
+    quiet = actor_quiet_since(baseline)
+    status = status_of(task["request_hash"])
+    EXEC["evidence"]["execution_failed"] = {"request_id": task["status"]["request_id"], "request_hash": task["request_hash"],
+                                            "exit_code": code, "report": report, "actor_quiet": quiet,
+                                            "status_after": status}
+    record("paid with a failing test: execution_failed, no Receipt hash, never responded",
+           code == EXIT_EXECUTION_FAILED and report.get("status") == "execution_failed" and
+           report.get("slot_state") == "failed" and not report.get("response_hash") and
+           not report.get("receipt_boc_base64") and quiet and status.get("state") == "pending",
+           EXEC["evidence"]["execution_failed"])
+    # The buyer's remedy is the refund path once the response deadline passes.
+    EXEC["failed_request"] = {"request_hash": task["request_hash"], **task["status"]}
+
+
+def execute() -> None:
+    if "actor" not in LIFE:
+        record("paid execution prerequisites are present", False, "acceptance did not complete")
+        return
+    EXEC["evidence"] = evidence.setdefault("execute", {})
+    try:
+        stage_provider_root()
+    except Exception as error:  # noqa: BLE001 - the evidence records the failure
+        record("the provider root state was staged without an exception", False, repr(error))
+        return
+    # Each case is recorded on its own, so a failure in one still lets the
+    # other produce evidence.
+    for name, case in (("completed", execute_passing), ("execution_failed", execute_failing)):
+        try:
+            case()
+        except Exception as error:  # noqa: BLE001 - the evidence records the failure
+            record(f"paid {name} case completed without an exception", False, repr(error))
+
+
 evidence: dict = {}
 
 
 async def main() -> int:
     global GLOBAL_CONFIG, TOSCTL_SHA256
+    if EXECUTE and (not EXECUTOR.is_file() or not TOS_AI_COMMIT):
+        print("E2E_EXECUTE=1 needs E2E_EXECUTOR (the built software-work-execute) and E2E_TOS_AI_COMMIT", flush=True)
+        return 2
     from tostester.install import Install
     from tostester.n6_cluster import _wait_all_heights
     from tostester.network import Network, StartOptions, _write_model
@@ -717,8 +1000,14 @@ async def main() -> int:
             record("every validator serves finalized JSON-RPC", bool(ready))
             await provision(network.zerostate.main_wallet(client))
             await asyncio.to_thread(acceptance)
+            if EXECUTE:
+                await asyncio.to_thread(execute)
             if LIFECYCLE:
                 await asyncio.to_thread(lifecycle)
+            if EXECUTE and LIFECYCLE and EXEC.get("failed_request"):
+                # Hours have passed: the failed request's response deadline is
+                # behind it, so the buyer takes its refund.
+                await asyncio.to_thread(refund_path, EXEC["failed_request"])
     except Exception as error:  # noqa: BLE001 - the evidence records the failure
         record("run completed without an exception", False, repr(error))
     evidence["steps"] = steps
